@@ -534,6 +534,12 @@ messages. Every code below is part of the contract.
 Messages never echo payload bytes, so a malformed buffer cannot turn an error
 report into a leak channel.
 
+A *hand-built* module whose provenance keys collide after metadata redaction is
+refused by the encoder with `infinity/encode` (reason `provenance keys collide
+after redaction`): the image it would produce carries duplicate keys, which a
+reader rejects with `infinity/provenance`. Redaction happens at encode time, so
+this is an encoder-side error rather than a wire error.
+
 ---
 
 ## 10. Versioning

@@ -209,8 +209,8 @@ fn serialized_kind_names_are_stable() {
 /// collapses to the marker).
 #[test]
 fn redaction_is_a_fixpoint_for_arbitrary_secrets_and_texts() {
-    let text = "[a-z0-9 *]{0,24}";
-    let secret = "[a-z0-9*]{0,5}";
+    let text = "[a-zA-Z0-9 *]{0,24}";
+    let secret = "[a-zA-Z0-9*]{0,5}";
     proptest!(|(text in text, secrets in prop::collection::vec(secret, 0..4))| {
         let once = active_infinity::interop::redact_text(&text, &secrets);
         let twice = active_infinity::interop::redact_text(&once, &secrets);

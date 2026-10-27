@@ -41,17 +41,23 @@ builder, and both projections gain it.
 Redaction is structural, not textual:
 
 - a secret node projects as the marker; its bytes never reach a renderer;
-- **data text** that contains a secret literal becomes the marker as a whole, so a
-  partial copy cannot leak. This covers string values, provenance
-  producer/model/tool and text entries, intent annotations and constraint sources;
-- **labels** (table field names, binding names, unit names, environment names,
-  media types and provenance keys) have each occurrence replaced, because a label
-  is an identifier rather than a document and whole-value replacement would erase
-  the label entirely for every consumer;
+- **data text** in a projection that contains a secret literal becomes the marker
+  as a whole, so a partial copy cannot leak. This covers string values,
+  provenance producer/model/tool and text entries, intent annotations and
+  constraint sources;
+- **the canonical image** redacts metadata prose (annotations, provenance) with
+  the *storage* rule: each occurrence is replaced, which keeps the surrounding
+  prose usable for local consumers. `interop::intents` applies the same rule, so
+  its answer for an in-memory module matches what a decoded module yields;
+- **labels** (table field names, binding names, identifier names, unit names,
+  environment names, media types and provenance keys) have each occurrence
+  replaced in a projection, because a label is an identifier rather than a
+  document and whole-value replacement would erase it entirely for every
+  consumer;
 - the rule has **no length threshold**: a one- or two-byte secret is redacted
-  exactly like a long one. Redaction in canonicalization (`interop::redact_text`,
-  used for annotations and provenance) follows the same rule, so a copy cannot
-  survive in the image and then be hidden only by the projections;
+  exactly like a long one. Redaction in canonicalization follows the same
+  no-threshold rule, so a copy cannot survive in the image and then be hidden
+  only by the projections;
 - a replacement can create a new secret by joining the text around it, so the
   canonicalizer repeats the pass until the text is clean and falls back to the
   marker. That makes redaction a fixpoint for every secret set, including a

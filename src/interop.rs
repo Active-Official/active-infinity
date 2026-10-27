@@ -785,7 +785,8 @@ fn build_projected(
             Inode::Bool(flag) => Projected::Bool(*flag),
             Inode::Int(number) => Projected::Int(*number),
             Inode::Float(number) => Projected::Float(*number),
-            Inode::Str(text) | Inode::Ident(text) => Projected::Text(redacted_value(text, secrets)),
+            Inode::Str(text) => Projected::Text(redacted_value(text, secrets)),
+            Inode::Ident(text) => Projected::Text(redacted_key(text, secrets)),
             Inode::DurationMs(ms) => Projected::DurationMs(*ms),
             Inode::Quantity { value, unit } => Projected::Quantity(
                 Box::new(build_projected(module, Some(*value), secrets, depth + 1)?),
@@ -1299,9 +1300,9 @@ pub fn provenance_lines(module: &InfinityModule) -> Vec<String> {
 
 /// Intent annotations attached to a node (agent-facing helper).
 ///
-/// Text is redacted against the module's secret literals: canonicalization also
-/// redacts annotation text at encode time, but this helper must be safe on an
-/// in-memory module that has not been through the codec yet.
+/// Text is redacted against the module's secret literals with the *storage* rule
+/// (each occurrence replaced), so the answer matches what a decoded module
+/// yields: canonicalization stores annotations in that form.
 pub fn intents(module: &InfinityModule, id: NodeId) -> Vec<String> {
     let secrets = secret_texts(module);
     module
@@ -1309,7 +1310,7 @@ pub fn intents(module: &InfinityModule, id: NodeId) -> Vec<String> {
         .iter()
         .filter(|annotation| annotation.node == id)
         .filter_map(|annotation| match &annotation.kind {
-            AnnotationKind::Intent(text) => Some(redacted_value(text, &secrets)),
+            AnnotationKind::Intent(text) => Some(redact_text(text, &secrets)),
             _ => None,
         })
         .collect()
@@ -1331,6 +1332,11 @@ pub fn immutable_nodes(module: &InfinityModule) -> Vec<NodeId> {
 }
 
 /// Provenance entries as typed pairs (sorted by key).
+///
+/// **Raw accessor**: keys and text values are *not* redacted, because a caller
+/// that handles the typed record may need the exact bytes. Use
+/// [`provenance_json`] or [`provenance_lines`] for output that leaves the
+/// process.
 pub fn provenance_pairs(prov: &Provenance) -> Vec<&ProvEntry> {
     let mut entries: Vec<&ProvEntry> = prov.entries.iter().collect();
     entries.sort_by(|a, b| a.key.cmp(&b.key));

@@ -1,5 +1,26 @@
 # Changelog — Active Infinity
 
+## 1.2.4 — 2026-10-27
+
+Fourth review pass; no wire-format change. The verification round after these
+fixes reported no new findings.
+
+- **`intents()` matches the stored form.** It applies the same occurrence
+  replacement the canonicalizer uses, so an in-memory module and its decoded
+  image give the same answer. The projections' data-text rule (whole-value
+  marker) is unchanged and now documented separately from the image's prose rule.
+- **Identifier nodes follow the label rule.** `Inode::Ident` redacts by
+  occurrence like every other name; string values keep the whole-value rule.
+- **`provenance_pairs` is documented as a raw accessor**, so a caller knows to use
+  `provenance_json`/`provenance_lines` for output that leaves the process.
+- **Redaction edge cases are tested explicitly**: a secret equal to the marker, a
+  secret that contains it, overlapping secrets, empty entries and no secrets; the
+  property generator now reaches uppercase secrets, including `SECRET` and
+  marker-containing ones.
+- **The spec states where a provenance key collision is reported**: the encoder
+  refuses it (`infinity/encode`) because the resulting image would carry
+  duplicate keys, which a reader rejects (`infinity/provenance`).
+
 ## 1.2.3 — 2026-10-27
 
 Third review pass. No wire-format change. Two of these are regressions introduced

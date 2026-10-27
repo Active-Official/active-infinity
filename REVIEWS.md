@@ -87,3 +87,20 @@ fixed, with tests:
 
 Verified unchanged: JSON projection output for secret-free modules, every
 previously valid vector, and the stream layer.
+
+## Round 8 — 2026-10-27 (1.2.3)
+
+Verification of round 7 found three medium and two low items; all fixed in
+1.2.4:
+
+| Finding | Severity | Disposition |
+|---|---|---|
+| `intents()` used the projection rule while the image stores the occurrence form, so pre-encode and post-encode answers differed | medium | fixed: `intents()` uses the storage rule; the spec states both rules |
+| `Ident` nodes used the data rule while every other name used the label rule | medium | fixed: labels by occurrence |
+| `provenance_pairs` returned raw keys and values with no warning | medium | fixed: documented as a raw accessor |
+| The property generator could not reach `SECRET` or a marker-containing secret | low | fixed: uppercase alphabet plus explicit edge cases |
+| The spec did not say where a post-redaction provenance collision is reported | low | fixed: `layout.md` §9 |
+
+## Round 9 — 2026-10-27 (1.2.4)
+
+Verification round: **NO NEW FINDINGS**.

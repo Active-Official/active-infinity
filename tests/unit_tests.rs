@@ -787,6 +787,42 @@ fn value_paths_do_not_carry_secret_copies() {
 }
 
 #[test]
+fn redaction_edge_cases_are_fixpoints() {
+    // Cases the generators cannot reach: a secret equal to the marker, a secret
+    // that contains it, overlapping secrets, and empty entries.
+    let cases: &[(&str, &[&str])] = &[
+        ("***SECRET***", &["***SECRET***"]),
+        ("x ***SECRET*** y", &["***SECRET***"]),
+        ("***SECRET***world", &["***SECRET***world"]),
+        ("abc", &["ab", "abc"]),
+        ("abc", &["abc", "ab"]),
+        ("hello", &["", "hello"]),
+        ("text with S", &["S", "text"]),
+        ("plain", &[]),
+    ];
+    for (text, secrets) in cases {
+        let secrets: Vec<String> = secrets.iter().map(|s| s.to_string()).collect();
+        let once = active_infinity::interop::redact_text(text, &secrets);
+        let twice = active_infinity::interop::redact_text(&once, &secrets);
+        assert_eq!(once, twice, "not a fixpoint for {text:?} / {secrets:?}");
+        let marker_tainted = secrets.iter().any(|secret| {
+            !secret.is_empty() && active_infinity::interop::SECRET_MARKER.contains(secret.as_str())
+        });
+        if !marker_tainted {
+            for secret in &secrets {
+                if secret.is_empty() {
+                    continue;
+                }
+                assert!(
+                    !once.contains(secret.as_str()),
+                    "{secret:?} survived redaction of {text:?}: {once:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn error_codes_are_stable_and_documented() {
     let expected = [
         (Error::Magic, "infinity/magic"),

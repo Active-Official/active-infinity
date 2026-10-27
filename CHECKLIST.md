@@ -1,0 +1,194 @@
+# CHECKLIST — Active Infinity (`active-infinity`)
+
+**Instructions**
+
+- Execute in order.
+- Before starting an item, read the referenced section in `PROPOSAL.md` (and MASTER docs when cited).
+- Mark `[x]` only when code + tests + docs for that item are complete.
+- Never weaken Active secret / budget / determinism / unit invariants.
+
+---
+
+## Phase 0 — Repository scaffolding
+
+- [ ] **C-0.1** Initialize crate `active-infinity` with the folder layout from the scaffold (src/, tests/, docs/, benches/, examples/, fuzz/, .github/workflows/).  
+  → PROPOSAL §1; MASTER-CHECKLIST M-0.1.
+
+- [ ] **C-0.2** Write `Cargo.toml` (name `active-infinity`, edition 2021, MSRV 1.85, dual license MIT/Apache-2.0, repository URLs for both orgs).  
+  → PROPOSAL §1; MASTER-PROPOSAL §6.
+
+- [ ] **C-0.3** Add LICENSE-MIT, LICENSE-APACHE, README.md (placeholder that points to PROPOSAL), CONTRIBUTING.md, CODE_OF_CONDUCT.md, SECURITY.md, AGENTS.md.  
+  → MASTER-CHECKLIST M-0.3.
+
+- [ ] **C-0.4** CI workflow: `cargo fmt --check`, `cargo clippy -- -D warnings`, `cargo test`, `cargo doc`.  
+  → MASTER-CHECKLIST M-0.4.
+
+- [ ] **C-0.5** Create `docs/adr/` and ADR-0001 “Purpose of Active Infinity”.  
+  → PROPOSAL §13.
+
+---
+
+## Phase 1 — Foundations and dependencies
+
+- [ ] **C-1.1** Decide and document exact dependency on `active-core` (version strategy, features).  
+  → PROPOSAL §2; MASTER-PROPOSAL §2.
+
+- [ ] **C-1.2** Re-state and lock the list of invariants that Infinity must uphold (secrets, budgets, determinism, units, cycles).  
+  → PROPOSAL §2, §6; MASTER-PROPOSAL invariants.
+
+- [ ] **C-1.3** ADR-0002 “Dependency and invariant contract with active-core”.  
+  → PROPOSAL §13.
+
+---
+
+## Phase 2 — Binary layout definition
+
+- [ ] **C-2.1** Specify and implement the fixed header (magic, versions, flags, hashes, counts, offsets).  
+  → PROPOSAL §3.1.
+
+- [ ] **C-2.2** Define flags bitfield and version negotiation rules.  
+  → PROPOSAL §3.1.
+
+- [ ] **C-2.3** Define node record layout for every IR node kind.  
+  → PROPOSAL §3.2.
+
+- [ ] **C-2.4** Define unit discriminant enum and Quantity encoding.  
+  → PROPOSAL §3.2, §6.
+
+- [ ] **C-2.5** Define edge table (dense and/or CSR).  
+  → PROPOSAL §3.3.
+
+- [ ] **C-2.6** Define string heap and blob heap (content-addressed).  
+  → PROPOSAL §3.4.
+
+- [ ] **C-2.7** Define annotation table and provenance block.  
+  → PROPOSAL §3.4, §9.
+
+- [ ] **C-2.8** Write formal layout document under `docs/spec/layout.md` and keep it in sync with code.  
+  → PROPOSAL §3.
+
+---
+
+## Phase 3 — Encode, decode, validate, zero-copy
+
+- [ ] **C-3.1** Implement encoder from `active_core::Module` (or intermediate) to ABF bytes.  
+  → PROPOSAL §3, §8.
+
+- [ ] **C-3.2** Choose and integrate zero-copy foundation (`rkyv` preferred).  
+  → PROPOSAL §3.5.
+
+- [ ] **C-3.3** Implement safe zero-copy view types over a validated buffer.  
+  → PROPOSAL §3.5, §8.
+
+- [ ] **C-3.4** Implement structural Secret handling and redaction paths.  
+  → PROPOSAL §6.
+
+- [ ] **C-3.5** Implement full validator (magic, versions, offsets, bounds, UTF-8, etc.).  
+  → PROPOSAL §7.
+
+- [ ] **C-3.6** Public API: `encode_module`, `decode_module`, `validate`, `content_hash`, view constructors.  
+  → PROPOSAL §8.
+
+---
+
+## Phase 4 — Canonicalization and hashing
+
+- [ ] **C-4.1** Implement deterministic canonicalization rules.  
+  → PROPOSAL §4.
+
+- [ ] **C-4.2** Implement content hash (Blake3) and verify stability.  
+  → PROPOSAL §4.
+
+- [ ] **C-4.3** Round-trip tests: encode → decode → encode produces identical bytes when canonical.  
+  → PROPOSAL §4, §11.
+
+- [ ] **C-4.4** Provenance and annotation round-trips.  
+  → PROPOSAL §9.
+
+---
+
+## Phase 5 — Streaming / Infinity mode
+
+- [ ] **C-5.1** Define streaming frame format.  
+  → PROPOSAL §5.
+
+- [ ] **C-5.2** Implement streaming encoder (batches, deltas, patches).  
+  → PROPOSAL §5.
+
+- [ ] **C-5.3** Implement streaming decoder with reassembly.  
+  → PROPOSAL §5.
+
+- [ ] **C-5.4** Tests for unbounded / live update scenarios.  
+  → PROPOSAL §5, §11.
+
+---
+
+## Phase 6 — Testing matrix
+
+- [ ] **C-6.1** Unit tests for every encoder/decoder path and node kind.  
+  → PROPOSAL §11.
+
+- [ ] **C-6.2** Conformance vectors (checked into repo) for valid and invalid payloads.  
+  → PROPOSAL §11.
+
+- [ ] **C-6.3** Property / proptest tests (round-trip, canonical stability, hash stability).  
+  → PROPOSAL §11.
+
+- [ ] **C-6.4** Secret non-leakage tests (diagnostics, Debug, exports).  
+  → PROPOSAL §6, §11.
+
+- [ ] **C-6.5** Malformed / adversarial input tests (truncated, huge offsets, cycles, bomb attempts).  
+  → PROPOSAL §7, §11.
+
+- [ ] **C-6.6** Fuzz targets for the decoder (`fuzz/` directory).  
+  → PROPOSAL §11; MASTER-CHECKLIST M-5.2.
+
+---
+
+## Phase 7 — Agent features and interop
+
+- [ ] **C-7.1** Agent-facing helpers (intent extraction, provenance queries, content-addressed identity).  
+  → PROPOSAL §9.
+
+- [ ] **C-7.2** At least one interop projection (redacted JSON required; optional FlatBuffers/Cap’n Proto).  
+  → PROPOSAL §10; MASTER-CHECKLIST M-4.3.
+
+---
+
+## Phase 8 — Hardening and performance
+
+- [ ] **C-8.1** Security review against capability/deserialization/secret threats.  
+  → MASTER-CHECKLIST M-5.1.
+
+- [ ] **C-8.2** Resolve or ADR all fuzz and red-team findings.  
+  → MASTER-CHECKLIST M-5.2.
+
+- [ ] **C-8.3** Benchmarks vs rkyv / Cap’n Proto / FlatBuffers on representative modules; document results.  
+  → PROPOSAL §12; benches/.
+
+- [ ] **C-8.4** Supply-chain (SBOM, audit, signed release process).  
+  → MASTER-CHECKLIST M-5.4.
+
+---
+
+## Phase 9 — Documentation and release readiness
+
+- [ ] **C-9.1** Public README that explains value to humans and AI agents.  
+  → PROPOSAL §13.
+
+- [ ] **C-9.2** Complete `docs/spec/` and all ADRs.  
+  → PROPOSAL §13.
+
+- [ ] **C-9.3** Examples that an agent can run.  
+  → examples/.
+
+- [ ] **C-9.4** Dual-publish preparation (crates.io + both GitHub orgs).  
+  → MASTER-CHECKLIST Phase 6.
+
+---
+
+## Phase 10 — Production sign-off (Infinity)
+
+- [ ] **C-10.1** All items above `[x]`.  
+- [ ] **C-10.2** MASTER Phase 7 criteria satisfied for the Infinity side.  
+- [ ] **C-10.3** Human or simulated senior review recorded.

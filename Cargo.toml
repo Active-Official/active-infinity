@@ -1,0 +1,72 @@
+[package]
+name = "active-infinity"
+version = "1.1.0"
+edition = "2021"
+rust-version = "1.85"
+authors = ["Active Language Team"]
+license = "MIT OR Apache-2.0"
+description = "Active Infinity (Active ∞) — binary, zero-copy, content-addressable, graph-native, unit-aware and secret-safe data language for Active modules and AI agents"
+repository = "https://github.com/Active-Official/active-infinity"
+homepage = "https://github.com/Active-Official/active-infinity"
+documentation = "https://docs.rs/active-infinity"
+readme = "README.md"
+keywords = ["active", "binary", "serialization", "zero-copy", "agents"]
+categories = ["encoding", "config", "data-structures"]
+exclude = [
+    "target/**",
+    ".scratch/**",
+    "fuzz/corpus/**",
+    "fuzz/artifacts/**",
+    "fuzz/target/**",
+]
+
+[features]
+default = ["active-core", "json"]
+# Interoperability layer with the Active text language IR (`active_core`).
+# Turn it off for a dependency-free wire codec.
+active-core = ["dep:active-core"]
+# Redacted JSON projection (`to_redacted_json`).
+json = ["dep:serde_json"]
+
+[dependencies]
+blake3 = "1.5"
+thiserror = "1.0"
+active-core = { version = "1.4.0", optional = true }
+serde_json = { version = "1.0", optional = true }
+
+[dev-dependencies]
+proptest = "1"
+criterion = "0.5"
+blake3 = "1.5"
+
+[[bench]]
+name = "codec"
+harness = false
+
+[lib]
+name = "active_infinity"
+path = "src/lib.rs"
+
+[[test]]
+name = "unit_tests"
+path = "tests/unit_tests.rs"
+
+[[test]]
+name = "integration_tests"
+path = "tests/integration_tests.rs"
+
+[[test]]
+name = "property_tests"
+path = "tests/property_tests.rs"
+
+[[test]]
+name = "conformance_tests"
+path = "tests/conformance_tests.rs"
+
+[[test]]
+name = "redteam_tests"
+path = "tests/redteam_tests.rs"
+
+[[test]]
+name = "doc_gate"
+path = "tests/doc_gate.rs"

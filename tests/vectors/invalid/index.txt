@@ -1,0 +1,16 @@
+# name expected_code
+bad_magic infinity/magic
+bad_major infinity/version-major
+bad_minor infinity/version-minor
+bad_header_size infinity/header-size
+bad_flags infinity/flags
+truncated infinity/truncated
+trailing infinity/trailing-bytes
+bad_hash infinity/hash-mismatch
+count_bomb infinity/count
+short_count infinity/count
+bad_offset infinity/offset
+bad_unit infinity/unknown-unit
+bad_string_order infinity/offset
+bad_padding infinity/padding
+bad_edge infinity/edge

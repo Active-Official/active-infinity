@@ -1,0 +1,15 @@
+# Architecture Decision Records
+
+Every structural decision in Active Infinity is recorded here. An ADR is
+immutable once accepted: a later ADR supersedes it and says so.
+
+| ADR | Title |
+|-----|-------|
+| [0001](0001-purpose.md) | Purpose of Active Infinity |
+| [0002](0002-active-core-relationship.md) | Relationship to `active-core` and wire-format independence |
+| [0003](0003-versioning.md) | Versioning, MSRV and the crates.io name reservation |
+| [0004](0004-zero-copy.md) | Zero-copy views without `unsafe` |
+| [0005](0005-canonical-form.md) | Canonical form and content addressing |
+| [0006](0006-secrets.md) | Structural secrets, anti-oracle equality and locator promotion |
+| [0007](0007-streaming.md) | Streaming as canonical section transport plus semantic deltas |
+| [0008](0008-dependency-policy.md) | Dependency policy and supply chain |

@@ -544,8 +544,9 @@ mod bridge {
                 ))
             }
             Inode::Blob { .. } => {
-                // TODO(CHECKLIST R-6.1): map blob identity onto the blob
-                // extension once `active-core` exposes it (1.4.0 does not).
+                // Documented limitation (ADR-0002): `active-core` 1.4.0 has no
+                // blob value, so the bridge refuses instead of degrading the
+                // identity into an ordinary table. Keep the module in Infinity.
                 return Err(Error::Encode(
                     "active-core 1.4.0 has no blob value; keep the module in Infinity",
                 ));
@@ -598,8 +599,8 @@ mod bridge {
             TypeSpec::Secret => CoreType::Secret,
             TypeSpec::Any => CoreType::Any,
             TypeSpec::Blob => {
-                // TODO(CHECKLIST R-6.1): requires `active-core` to learn the
-                // Blob type (added after 1.4.0).
+                // Documented limitation (ADR-0002): the published `active-core`
+                // has no `Blob` schema type; refuse rather than approximate.
                 return Err(Error::Encode("active-core 1.4.0 has no Blob type"));
             }
         };

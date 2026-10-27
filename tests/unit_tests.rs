@@ -365,20 +365,10 @@ fn streaming_delta_produces_the_whole_module_encoding() {
     let number = fragment.push(Inode::Int(9090));
     fragment.set_root(Some(number));
 
-    let ops = vec![
-        stream::DeltaOp::PutNode {
-            target,
-            fragment: Box::new(fragment),
-        },
-        stream::DeltaOp::PushNode {
-            fragment: {
-                let mut fragment = InfinityModule::new();
-                let text = fragment.push(Inode::Str("extra".into()));
-                fragment.set_root(Some(text));
-                Box::new(fragment)
-            },
-        },
-    ];
+    let ops = vec![stream::DeltaOp::PutNode {
+        target,
+        fragment: Box::new(fragment),
+    }];
     encoder.push_delta(&base, &ops).unwrap();
 
     let bytes = encoder.to_bytes();

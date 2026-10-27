@@ -424,3 +424,174 @@ fn threat_empty_and_random_inputs_never_panic() {
         assert!(outcome.unwrap().is_err(), "crafted input accepted");
     }
 }
+
+// ---------------------------------------------------------------------------
+// Regressions from the independent review (2026-10-27)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn review_stream_finish_on_a_truncated_frame_does_not_panic() {
+    let module = fixture();
+    let frames = active_infinity::stream::encode_stream(&module, 32).unwrap();
+    let bytes = frames[0].to_bytes();
+    // Feed a prefix of the first frame (header only, then 4 payload bytes) and
+    // finish: this used to index past the buffer.
+    for cut in [1usize, 5, 17, 20, 24, 31] {
+        let mut decoder = StreamDecoder::new();
+        decoder.push_bytes(&bytes[..cut]).expect("partial push");
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| decoder.finish()));
+        assert!(outcome.is_ok(), "finish panicked at cut {cut}");
+        assert!(outcome.unwrap().is_err(), "truncated stream accepted");
+    }
+}
+
+#[test]
+fn review_stream_bounds_reject_unbounded_batches() {
+    // A stream that declares a small image but keeps sending batches must be
+    // refused before it can allocate without bound. Sequences increase, so the
+    // byte bound (not the sequence check) is what fires.
+    let module = fixture();
+    let frames = active_infinity::stream::encode_stream(&module, 8).unwrap();
+    let begin = frames[0].clone();
+    let batch = frames
+        .iter()
+        .find(|frame| frame.kind == FrameKind::Batch)
+        .expect("a batch")
+        .clone();
+    let mut decoder = StreamDecoder::new();
+    decoder.push(&begin).expect("begin");
+    let mut refused = None;
+    for sequence in 1..20_000u64 {
+        let frame = Frame::new(FrameKind::Batch, sequence, batch.payload.clone());
+        if let Err(error) = decoder.push(&frame) {
+            refused = Some(error);
+            break;
+        }
+    }
+    let error = refused.expect("an endless batch run must be refused");
+    assert_eq!(error.code(), "infinity/limit", "{error:?}");
+}
+
+#[test]
+fn review_depth_ceiling_applies_to_every_root() {
+    // Root A is shallow; binding `deep` is a long chain that is not reachable
+    // from A. Depth must still be enforced across all roots.
+    let mut module = InfinityModule::new();
+    let shallow = module.push(Inode::Int(1));
+    module.set_root(Some(shallow));
+    let mut deep = module.push(Inode::Int(0));
+    for _ in 0..200 {
+        deep = module.push(Inode::Ref(deep));
+    }
+    module.bind("deep", deep);
+    let bytes = encode(&module).unwrap();
+    let limits = DecodeOpts {
+        limits: Limits {
+            max_depth: 64,
+            ..Limits::default()
+        },
+        verify_hash: true,
+        verify_canonical: false,
+    };
+    let error = active_infinity::validate_with(&bytes, limits).unwrap_err();
+    assert_eq!(error.code(), "infinity/depth");
+}
+
+#[test]
+fn review_limits_cover_total_bytes_and_string_heap() {
+    let module = fixture();
+    let bytes = encode(&module).unwrap();
+
+    let tiny_total = DecodeOpts {
+        limits: Limits {
+            max_total_bytes: 128,
+            ..Limits::default()
+        },
+        verify_hash: true,
+        verify_canonical: false,
+    };
+    assert_eq!(
+        active_infinity::validate_with(&bytes, tiny_total)
+            .unwrap_err()
+            .code(),
+        "infinity/limit"
+    );
+
+    let mut sized = InfinityModule::new();
+    let text = sized.push(Inode::Str("x".repeat(4096)));
+    sized.set_root(Some(text));
+    let sized_bytes = encode(&sized).unwrap();
+    let tiny_strings = DecodeOpts {
+        limits: Limits {
+            max_string_bytes: 16,
+            ..Limits::default()
+        },
+        verify_hash: true,
+        verify_canonical: false,
+    };
+    assert_eq!(
+        active_infinity::validate_with(&sized_bytes, tiny_strings)
+            .unwrap_err()
+            .code(),
+        "infinity/limit"
+    );
+}
+
+#[test]
+fn review_provenance_is_a_map_and_reserved_kinds_are_refused() {
+    // Duplicate keys collapse to the last value, so the stored form can never
+    // carry the duplicates validation rejects.
+    let mut module = fixture();
+    module.set_provenance(Some(Provenance {
+        producer: Some("agent".into()),
+        timestamp_ms: 1,
+        model: None,
+        tool: None,
+        parent: None,
+        entries: vec![
+            ProvEntry {
+                key: "k".into(),
+                value: ProvValue::Text("first".into()),
+            },
+            ProvEntry {
+                key: "k".into(),
+                value: ProvValue::Text("last".into()),
+            },
+        ],
+    }));
+    let bytes = encode(&module).unwrap();
+    let meta = validate(&bytes).expect("duplicate keys must not reach the wire");
+    assert!(meta.has_provenance());
+    let decoded = decode(&bytes).unwrap();
+    let entries = decoded.provenance().unwrap().entries.clone();
+    assert_eq!(entries.len(), 1, "{entries:?}");
+    assert_eq!(entries[0].value, ProvValue::Text("last".into()));
+
+    // Kind 4 is reserved; a hand-edited block must be refused rather than
+    // decoded into something that re-encodes differently.
+    let span = header(&bytes).span(Section::Provenance);
+    let start = span.offset as usize;
+    let entry_kind_at = start + 96;
+    let mut mutated = bytes.clone();
+    mutated[entry_kind_at..entry_kind_at + 4].copy_from_slice(&4u32.to_le_bytes());
+    rewrite_hash(&mut mutated);
+    assert_eq!(
+        validate(&mutated).unwrap_err().code(),
+        "infinity/provenance"
+    );
+}
+
+#[cfg(feature = "json")]
+#[test]
+fn review_json_projection_refuses_cycles_instead_of_recursing() {
+    let mut module = InfinityModule::new();
+    let a = module.push(Inode::Null);
+    let b = module.push(Inode::Ref(a));
+    *module.node_mut(a).unwrap() = Inode::Ref(b);
+    module.set_root(Some(a));
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        active_infinity::interop::to_redacted_json(&module)
+    }));
+    assert!(outcome.is_ok(), "projection recursed on a cycle");
+    assert!(outcome.unwrap().is_err(), "cyclic module projected");
+}

@@ -948,15 +948,6 @@ impl PartialEq for InfinityModule {
     }
 }
 
-fn prov_rank(value: &ProvValue) -> u32 {
-    match value {
-        ProvValue::Text(_) => 0,
-        ProvValue::Int(_) => 1,
-        ProvValue::Flag(_) => 2,
-        ProvValue::Hash(_) => 3,
-    }
-}
-
 /// Compare two canonical nodes, blinding secret payloads.
 fn node_eq(left: &Inode, right: &Inode) -> bool {
     match (left, right) {
@@ -1100,14 +1091,20 @@ impl InfinityModule {
     }
 
     pub fn set_provenance(&mut self, provenance: Option<Provenance>) {
-        // Store provenance in canonical order so module state equals decoded
-        // state without a re-encode round trip.
-        self.provenance = provenance.map(|mut prov| {
-            prov.entries.sort_by(|a, b| {
-                (a.key.as_str(), prov_rank(&a.value)).cmp(&(b.key.as_str(), prov_rank(&b.value)))
-            });
-            prov.entries.dedup();
-            prov
+        // Provenance is a map keyed by name: the last value for a key wins, so
+        // the stored form can never contain the duplicate keys that validation
+        // (correctly) rejects. Entries stay sorted for canonical equality.
+        self.provenance = provenance.map(|prov| {
+            let mut by_key: std::collections::BTreeMap<String, ProvValue> =
+                std::collections::BTreeMap::new();
+            for entry in prov.entries {
+                by_key.insert(entry.key, entry.value);
+            }
+            let entries: Vec<ProvEntry> = by_key
+                .into_iter()
+                .map(|(key, value)| ProvEntry { key, value })
+                .collect();
+            Provenance { entries, ..prov }
         });
     }
 

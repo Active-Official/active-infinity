@@ -276,9 +276,11 @@ The `provenance` descriptor's `count` is a **byte length**. The block is:
 | 96 | … | entries, 16 bytes each `{ kind, key string id, a, b }` |
 
 Entry kinds: `0` text (`a` = string id), `1` int (`a` = numbers index),
-`2` flag (`a` = `0`/`1`), `3` hash (`a` = hashes index), `4` input hash
-(same as `3`, marks derivation lineage). `b` must be `0`. Entries are strictly
-increasing by key. The block length must equal `96 + 16 * count`.
+`2` flag (`a` = `0`/`1`), `3` hash (`a` = hashes index). `b` must be `0`.
+Kinds `4` and above are **reserved**: a reader refuses them with
+`infinity/provenance` rather than decoding a value that would re-encode as a
+different kind. Entries are strictly increasing by key (provenance is a map, so
+duplicate keys are refused). The block length must equal `96 + 16 * count`.
 
 ### 4.6 Extensions
 
@@ -525,7 +527,10 @@ report into a leak channel.
 
 `Limits` bounds nodes, edges, children, fields, parts, strings, string bytes,
 blobs, blob bytes, annotations, units, types, aux, numbers, secrets, secret
-bytes, extensions, provenance entries, total bytes and depth. Defaults accept
+bytes, extensions, provenance entries, total bytes and depth. The total-byte and
+string-heap ceilings are checked before anything is decoded, and the depth
+ceiling applies to **every** root (module root, bindings, annotation subjects) —
+a second shallow root cannot hide a deep chain. Defaults accept
 real modules (millions of nodes) and refuse bombs; `Limits::strict()` is the
 profile for adversarial surfaces. There is no unlimited mode: `0` in a ceiling
 is rejected with `infinity/invalid-argument`.

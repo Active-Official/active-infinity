@@ -626,15 +626,19 @@ mod projection {
     /// - quantities project `{"value": n, "unit": "<name>"}`;
     /// - annotations and provenance project as data, never as executable text.
     pub fn to_redacted_json(module: &InfinityModule) -> Result<String> {
+        // A projection walks the graph recursively; refuse a module that has
+        // cycles or dangling references instead of risking the stack.
+        module.validate_structure(u32::MAX as u64, 4096)?;
         let secrets = secret_literals(module);
-        let value = build_value(module, module.root(), &secrets);
+        let value = build_value(module, module.root(), &secrets, 0)?;
         serde_json::to_string(&value).map_err(|_| Error::Encode("json projection failed"))
     }
 
     /// Pretty-printed form of [`to_redacted_json`].
     pub fn to_redacted_json_pretty(module: &InfinityModule) -> Result<String> {
+        module.validate_structure(u32::MAX as u64, 4096)?;
         let secrets = secret_literals(module);
-        let value = build_value(module, module.root(), &secrets);
+        let value = build_value(module, module.root(), &secrets, 0)?;
         serde_json::to_string_pretty(&value).map_err(|_| Error::Encode("json projection failed"))
     }
 
@@ -663,12 +667,21 @@ mod projection {
         }
     }
 
+    /// Deepest graph the projection will follow. A validated module is at most
+    /// `Limits::max_depth` deep; this is a second, independent stop so a
+    /// hand-built module cannot exhaust the stack.
+    const PROJECTION_DEPTH: usize = 1024;
+
     fn build_value(
         module: &InfinityModule,
         id: Option<NodeId>,
         secrets: &[String],
-    ) -> serde_json::Value {
-        match id.and_then(|id| module.get(id)) {
+        depth: usize,
+    ) -> Result<serde_json::Value> {
+        if depth > PROJECTION_DEPTH {
+            return Err(Error::Encode("projection nesting exceeds the limit"));
+        }
+        let value = match id.and_then(|id| module.get(id)) {
             None => serde_json::Value::Null,
             Some(node) => match node {
                 Inode::Null => serde_json::Value::Null,
@@ -678,26 +691,29 @@ mod projection {
                 Inode::Str(text) | Inode::Ident(text) => redact_string(text, secrets),
                 Inode::DurationMs(ms) => serde_json::json!({ "ms": ms }),
                 Inode::Quantity { value, unit } => serde_json::json!({
-                    "value": build_value(module, Some(*value), secrets),
+                    "value": build_value(module, Some(*value), secrets, depth + 1)?,
                     "unit": unit.name(),
                 }),
                 Inode::Array { elements } => serde_json::Value::Array(
                     elements
                         .iter()
-                        .map(|id| build_value(module, Some(*id), secrets))
-                        .collect(),
+                        .map(|id| build_value(module, Some(*id), secrets, depth + 1))
+                        .collect::<Result<Vec<_>>>()?,
                 ),
                 Inode::Table { fields } => {
                     let mut map = serde_json::Map::new();
                     for (name, id) in fields {
-                        map.insert(name.clone(), build_value(module, Some(*id), secrets));
+                        map.insert(
+                            name.clone(),
+                            build_value(module, Some(*id), secrets, depth + 1)?,
+                        );
                     }
                     serde_json::Value::Object(map)
                 }
                 Inode::Secret(_) | Inode::SecretRef { .. } => {
                     serde_json::Value::from(SECRET_MARKER)
                 }
-                Inode::Ref(id) => build_value(module, Some(*id), secrets),
+                Inode::Ref(id) => build_value(module, Some(*id), secrets, depth + 1)?,
                 Inode::Env { name, .. } => serde_json::json!({ "$env": name }),
                 Inode::Interpolate { parts } => {
                     let mut text = String::new();
@@ -727,7 +743,9 @@ mod projection {
                 | Inode::ContentAddressed { .. } => {
                     serde_json::json!({ "$expr": crate::view::node_kind_name(node.kind_code()) })
                 }
-                Inode::Semantic { inner, .. } => build_value(module, Some(*inner), secrets),
+                Inode::Semantic { inner, .. } => {
+                    build_value(module, Some(*inner), secrets, depth + 1)?
+                }
                 Inode::Blob {
                     hash,
                     size,
@@ -743,7 +761,8 @@ mod projection {
                     }
                 }),
             },
-        }
+        };
+        Ok(value)
     }
 
     fn is_secret(module: &InfinityModule, id: NodeId) -> bool {
@@ -804,7 +823,12 @@ pub fn value_paths(module: &InfinityModule) -> HashMap<NodeId, String> {
     }
     if let Some(root) = module.root() {
         let mut stack = vec![(root, String::new())];
+        let mut expanded = std::collections::HashSet::new();
         while let Some((id, path)) = stack.pop() {
+            // A cyclic hand-built module must not hang the query.
+            if !expanded.insert(id) {
+                continue;
+            }
             match module.get(id) {
                 Some(Inode::Table { fields }) => {
                     for (key, child) in fields {

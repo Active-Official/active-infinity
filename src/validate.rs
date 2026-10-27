@@ -33,6 +33,7 @@ pub struct Validated<'a> {
     buf: &'a [u8],
     header: Header,
     ends: [u64; SECTION_COUNT],
+    limits: Limits,
 }
 
 impl<'a> Validated<'a> {
@@ -44,9 +45,20 @@ impl<'a> Validated<'a> {
             return Err(Error::DialectMismatch(header.dialect_hash));
         }
         let limits = opts.limits;
+        if buf.len() as u64 > limits.max_total_bytes {
+            return Err(Error::Limit {
+                kind: "total bytes",
+                limit: limits.max_total_bytes,
+            });
+        }
         validate_counts(&header, limits)?;
         let ends = validate_layout(buf, &header)?;
-        let validated = Validated { buf, header, ends };
+        let validated = Validated {
+            buf,
+            header,
+            ends,
+            limits,
+        };
 
         if header.flags & FLAG_ANNOTATIONS != 0 && validated.span(Section::Annotations).count == 0 {
             return Err(Error::Annotation {
@@ -127,6 +139,11 @@ impl<'a> Validated<'a> {
 
     pub fn buf(&self) -> &'a [u8] {
         self.buf
+    }
+
+    /// The limits this image was validated against.
+    pub fn limits_snapshot(&self) -> Limits {
+        self.limits
     }
 
     pub fn header(&self) -> &Header {
@@ -494,8 +511,10 @@ impl<'a> Validated<'a> {
             let key = self.string(read_u32(block, offset + 4)?)?.to_string();
             let a = read_u32(block, offset + 8)?;
             let b = read_u32(block, offset + 12)?;
-            if kind > 4 {
-                return Err(Error::Provenance("unknown entry kind"));
+            if kind > 3 {
+                // Kinds 4+ are reserved. Accepting them would decode to a
+                // value that re-encodes as kind 3, i.e. a non-canonical image.
+                return Err(Error::Provenance("reserved provenance entry kind"));
             }
             if b != 0 {
                 return Err(Error::Provenance("non-zero entry reserved word"));
@@ -509,7 +528,7 @@ impl<'a> Validated<'a> {
                     }
                     ProvValue::Flag(a == 1)
                 }
-                3 | 4 => ProvValue::Hash(self.hash_entry(a)?),
+                3 => ProvValue::Hash(self.hash_entry(a)?),
                 _ => unreachable!("kind checked above"),
             };
             entries.push(crate::ir::ProvEntry { key, value });
@@ -585,6 +604,12 @@ impl<'a> Validated<'a> {
                 offset: (base + 4) as u64,
             });
         }
+        if count as u64 > self.limits.max_nodes as u64 {
+            return Err(Error::Limit {
+                kind: "bindings",
+                limit: self.limits.max_nodes as u64,
+            });
+        }
         let mut previous: Option<&str> = None;
         for (name, _) in self.bindings()? {
             if let Some(previous) = previous {
@@ -605,6 +630,13 @@ impl<'a> Validated<'a> {
             return Ok(());
         }
         let table = self.header.span(Section::Strings).offset as usize;
+        let heap_len = self.string_heap_len();
+        if heap_len as u64 > self.limits_snapshot().max_string_bytes as u64 {
+            return Err(Error::Limit {
+                kind: "string bytes",
+                limit: self.limits_snapshot().max_string_bytes as u64,
+            });
+        }
         let heap_len = self.string_heap_len();
         let heap = table + (count as usize + 1) * 4;
         if heap + heap_len as usize > self.ends[Section::Strings as usize] as usize {
@@ -793,6 +825,12 @@ impl<'a> Validated<'a> {
 
     fn check_hashes(&self) -> Result<()> {
         let count = self.header.span(Section::Hashes).count;
+        if count as u64 > self.limits.max_nodes as u64 {
+            return Err(Error::Limit {
+                kind: "hashes",
+                limit: self.limits.max_nodes as u64,
+            });
+        }
         let base = self.header.span(Section::Hashes).offset as usize;
         let mut previous: Option<[u8; 32]> = None;
         for index in 0..count {
@@ -1781,9 +1819,25 @@ impl<'a> Validated<'a> {
             return Ok(());
         }
         let mut depth = vec![0u32; count as usize];
-        let mut stack: Vec<(u32, u32)> = vec![(0, 0)];
         let mut scratch: Vec<u32> = Vec::new();
-        depth[0] = 1;
+        // Every node with no incoming edge is a root (module root, bindings,
+        // annotation subjects). Starting only at node 0 would let a second root
+        // carry an arbitrarily deep chain past the ceiling.
+        let mut has_parent = vec![false; count as usize];
+        for node in 0..count {
+            let rec = self.node(NodeId(node))?;
+            self.node_children_into(&rec, &mut scratch)?;
+            for child in &scratch {
+                has_parent[*child as usize] = true;
+            }
+        }
+        let mut stack: Vec<(u32, u32)> = Vec::new();
+        for node in 0..count {
+            if !has_parent[node as usize] {
+                depth[node as usize] = 1;
+                stack.push((node, 0));
+            }
+        }
         while let Some((node, cursor)) = stack.pop() {
             let rec = self.node(NodeId(node))?;
             self.node_children_into(&rec, &mut scratch)?;

@@ -315,8 +315,6 @@ pub enum DeltaOp {
         target: NodeId,
         fragment: Box<InfinityModule>,
     },
-    /// Append a fragment module's node 0 and report the new id.
-    PushNode { fragment: Box<InfinityModule> },
     /// Bind (or rebind) a name.
     SetBinding { name: String, node: NodeId },
     /// Remove a binding by name (no-op when absent).
@@ -339,12 +337,6 @@ impl DeltaOp {
             DeltaOp::PutNode { target, fragment } => {
                 out.push(1);
                 out.extend_from_slice(&target.0.to_le_bytes());
-                let image = encode_with(fragment, EncodeOpts::default())?;
-                out.extend_from_slice(&(image.len() as u32).to_le_bytes());
-                out.extend_from_slice(&image);
-            }
-            DeltaOp::PushNode { fragment } => {
-                out.push(2);
                 let image = encode_with(fragment, EncodeOpts::default())?;
                 out.extend_from_slice(&(image.len() as u32).to_le_bytes());
                 out.extend_from_slice(&image);
@@ -444,10 +436,6 @@ impl DeltaOp {
                 let fragment = Box::new(decode_fragment(buf, cursor)?);
                 DeltaOp::PutNode { target, fragment }
             }
-            2 => {
-                let fragment = Box::new(decode_fragment(buf, cursor)?);
-                DeltaOp::PushNode { fragment }
-            }
             3 => {
                 let name = take_string(buf, cursor)?;
                 let node = NodeId(take_u32(buf, cursor)?);
@@ -542,12 +530,6 @@ pub fn apply_delta(module: &InfinityModule, ops: &[DeltaOp]) -> Result<InfinityM
                     .ok_or(Error::StreamDelta("fragment root missing"))?;
                 *out.node_mut(*target)? = content;
             }
-            DeltaOp::PushNode { fragment } => {
-                if fragment.node_count() == 0 {
-                    return Err(Error::StreamDelta("fragment is empty"));
-                }
-                let _ = merge_fragment(&mut out, fragment)?;
-            }
             DeltaOp::SetBinding { name, node } => {
                 if out.get(*node).is_none() {
                     return Err(Error::StreamDelta("binding target does not exist"));
@@ -592,6 +574,7 @@ pub struct StreamedModule {
 /// Streaming decoder state.
 #[derive(Debug, Default)]
 pub struct StreamDecoder {
+    limits: crate::layout::Limits,
     sections: [Vec<u8>; SECTION_COUNT],
     counts: [u32; SECTION_COUNT],
     seen: [bool; SECTION_COUNT],
@@ -611,6 +594,7 @@ pub struct StreamDecoder {
 impl StreamDecoder {
     pub fn new() -> Self {
         Self {
+            limits: crate::layout::Limits::default(),
             sections: Default::default(),
             counts: [0; SECTION_COUNT],
             seen: [false; SECTION_COUNT],
@@ -626,6 +610,13 @@ impl StreamDecoder {
             partial: Vec::new(),
             cursor: 0,
         }
+    }
+
+    /// Use explicit decode limits for the reassembled image and for every
+    /// intermediate bound.
+    pub fn with_limits(mut self, limits: crate::layout::Limits) -> Self {
+        self.limits = limits;
+        self
     }
 
     /// Feed raw frame bytes. Frames may be split across calls and several may
@@ -741,6 +732,26 @@ impl StreamDecoder {
                 self.seen[section] = true;
                 self.counts[section] = count;
                 self.sections[section].extend_from_slice(&frame.payload[9..]);
+                // A generation cannot occupy more than it declared. Without
+                // this bound, an endless run of batches for one section would
+                // allocate until the process dies before `End` is seen.
+                let accumulated: usize = self.sections.iter().map(|section| section.len()).sum();
+                let declared = self
+                    .total_size
+                    .map(|size| size.min(usize::MAX as u64) as usize)
+                    .unwrap_or(usize::MAX);
+                if accumulated > declared {
+                    return Err(Error::Limit {
+                        kind: "stream bytes",
+                        limit: declared as u64,
+                    });
+                }
+                if accumulated as u64 > self.limits.max_total_bytes {
+                    return Err(Error::Limit {
+                        kind: "stream bytes",
+                        limit: self.limits.max_total_bytes,
+                    });
+                }
             }
             FrameKind::Delta => {
                 if !self.ended {
@@ -750,6 +761,14 @@ impl StreamDecoder {
                 let count = take_u32(&frame.payload, &mut cursor)?;
                 if count > crate::layout::Limits::default().max_aux {
                     return Err(Error::StreamDelta("too many delta operations"));
+                }
+                if self.pending_deltas.len().saturating_add(count as usize)
+                    > self.limits.max_aux as usize
+                {
+                    return Err(Error::Limit {
+                        kind: "delta operations",
+                        limit: self.limits.max_aux as u64,
+                    });
                 }
                 for _ in 0..count {
                     self.pending_deltas
@@ -787,7 +806,14 @@ impl StreamDecoder {
                     if hash_image(&image)? != hash {
                         return Err(Error::StreamHashMismatch);
                     }
-                    let validated = Validated::new(&image, crate::layout::DecodeOpts::default())?;
+                    let validated = Validated::new(
+                        &image,
+                        crate::layout::DecodeOpts {
+                            limits: self.limits,
+                            verify_hash: true,
+                            verify_canonical: false,
+                        },
+                    )?;
                     let module = crate::decode::decode_validated(&validated)?;
                     self.module = Some(module);
                     self.image = Some(image);
@@ -797,7 +823,14 @@ impl StreamDecoder {
                 if hash_image(&image)? != hash {
                     return Err(Error::StreamHashMismatch);
                 }
-                let validated = Validated::new(&image, crate::layout::DecodeOpts::default())?;
+                let validated = Validated::new(
+                    &image,
+                    crate::layout::DecodeOpts {
+                        limits: self.limits,
+                        verify_hash: true,
+                        verify_canonical: false,
+                    },
+                )?;
                 let module = crate::decode::decode_validated(&validated)?;
                 self.module = Some(module);
                 self.image = Some(image);
@@ -862,11 +895,22 @@ impl StreamDecoder {
     /// half-received frame left over.
     pub fn finish(self) -> Result<StreamedModule> {
         if !self.partial.is_empty() {
+            // A partial frame at the end of the stream. Read the declared
+            // length only when the header itself arrived; never index past the
+            // buffer.
+            let needed = if self.partial.len() >= 20 {
+                let declared = u32::from_le_bytes([
+                    self.partial[16],
+                    self.partial[17],
+                    self.partial[18],
+                    self.partial[19],
+                ]) as u64;
+                FRAME_HEADER_SIZE as u64 + declared
+            } else {
+                FRAME_HEADER_SIZE as u64
+            };
             return Err(Error::Truncated {
-                needed: self.partial.len() as u64
-                    + self.partial[16..20]
-                        .iter()
-                        .fold(0u64, |acc, byte| acc * 256 + *byte as u64),
+                needed,
                 found: self.partial.len() as u64,
             });
         }

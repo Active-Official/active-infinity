@@ -70,7 +70,7 @@ a hash disagreement, which is `infinity/stream-hash`.
 |----:|-----------|---------|
 | 0 | `SetRoot` | `node u32` (`0xFFFF_FFFF` = no root) |
 | 1 | `PutNode` | `target u32, fragment_len u32, fragment` |
-| 2 | `PushNode` | `fragment_len u32, fragment` |
+| 2 | *retired* | refused with `infinity/stream-delta` |
 | 3 | `SetBinding` | `name_len u16, name, node u32` |
 | 4 | `RemoveBinding` | `name_len u16, name` |
 | 5 | `SetAnnotation` | `node u32, kind u8, payload` |
@@ -81,8 +81,12 @@ A **fragment** is a complete canonical `AINF` image. Its node 0 (its root, or it
 first node when rootless) is the payload:
 
 - `PutNode` merges the fragment's nodes into the module and replaces the
-  target's content with the fragment root's content;
-- `PushNode` merges the fragment and appends it.
+  target's content with the fragment root's content.
+
+Tag `2` (`PushNode`) was specified but retired before release: appending a
+fragment without a name produces nodes no root reaches, which canonicalization
+then drops — a silent no-op. Use `PutNode` (replace) or `SetBinding` (name) and
+a following `PutNode`.
 
 Merging renumbers node ids, so a delta never has to reason about the receiver's
 arena layout beyond the target id it names.
@@ -97,6 +101,10 @@ node), `2` ai-immutable (`0`/`1`).
 - Delta operation count is bounded by `Limits::max_aux`.
 - A `Batch` outside a generation, a `Begin` after `End`, a `Delta` before `End`
   and a section out of order are `infinity/stream-state`.
+- The bytes accumulated across a generation may never exceed the size declared by
+  `Begin` (or `Limits::max_total_bytes`), and pending delta operations are capped
+  by `Limits::max_aux`; both are `infinity/limit`. Without those bounds a producer
+  could stream batches forever and exhaust memory before `End`.
 - A stream that ends before `End`, or with a partially received frame, is
   `infinity/stream-unterminated` or `infinity/truncated`.
 

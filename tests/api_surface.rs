@@ -180,6 +180,16 @@ fn the_crate_exposes_no_plaintext_secret_accessor() {
                         "{relative}:{line_number}: glob re-export cannot be audited: {line}"
                     ));
                 }
+                // `pub use innocent as secret_x` hides the target behind a new
+                // name; a text scan cannot resolve it, so it fails closed.
+                if let Some((_, alias)) = line.split_once(" as ") {
+                    if alias.trim().trim_end_matches(';').contains("secret") {
+                        offenders.push(format!(
+                            "{relative}:{line_number}: aliased re-export with a secret \
+                             name cannot be audited: {line}"
+                        ));
+                    }
+                }
                 for forbidden in FORBIDDEN {
                     if line
                         .split(|c: char| !c.is_alphanumeric() && c != '_')
@@ -219,6 +229,33 @@ fn the_allowlist_entries_still_exist_and_are_argued() {
         assert!(
             reason.len() > 20,
             "{name} needs a real justification for the allowlist"
+        );
+    }
+}
+
+#[test]
+fn the_allowlisted_label_helper_never_returns_secret_material() {
+    // The allowlist is only honest if the function it names really returns
+    // redacted labels. Build a module whose binding name contains a copy of the
+    // secret and check the reported labels.
+    use active_infinity::{AnnotationKind, InfinityModule, Inode, SecretBytes};
+
+    let mut module = InfinityModule::new();
+    let secret = module.push(Inode::Secret(SecretBytes::from("hunter2-secret")));
+    let leaf = module.push(Inode::Int(7));
+    let root = module.push(Inode::Table {
+        fields: vec![("s".into(), secret), ("n".into(), leaf)],
+    });
+    module.set_root(Some(root));
+    module.bind("binding hunter2-secret", leaf);
+    module.annotate(leaf, AnnotationKind::Intent("note".into()));
+
+    let paths = active_infinity::interop::secret_tainted_paths(&module);
+    assert!(!paths.is_empty(), "the tainted cone must be reported");
+    for label in &paths {
+        assert!(
+            !label.contains("hunter2-secret"),
+            "the allowlisted helper leaked a secret copy: {label}"
         );
     }
 }

@@ -11,7 +11,10 @@ its job, so early versions exposed helpers that returned it:
 
 - `interop::secret_texts` — every secret as `Vec<String>`;
 - `interop::secret_bytes` (added in 1.2.5 for the byte-level extension check);
-- `interop::secret_literals` — the same plaintext behind the JSON feature.
+- `interop::secret_literals` — the same plaintext behind the JSON feature;
+- `interop::secret_table` — the same text table, used by the projections;
+- `Validated::secret` — raw secret bytes straight out of a validated image, with
+  a doc comment that claimed to be crate-internal while the signature was `pub`.
 
 Adversarial verification pointed out the obvious: a public function that returns
 secret plaintext *is* an unlock API. A caller can walk a module it received and
@@ -20,9 +23,16 @@ read every secret, which contradicts the threat model in
 
 ## Decision
 
-1. **No public API returns secret material.** The three helpers are
-   `pub(crate)`; the only public secret-related item is `SECRET_MARKER`, a
-   literal string that carries no secret.
+1. **No public API returns secret material.** All five helpers above are
+   `pub(crate)`. The public secret-related surface is limited to items that carry
+   no secret bytes:
+   - `SECRET_MARKER` — a literal string;
+   - `interop::secret_tainted_paths` — redacted dotted labels of the tainted
+     cone (allowlisted in the gates, with a test that proves the labels are
+     redacted);
+   - `Inode::has_secret` / `Inode::is_secret` — booleans;
+   - `Inode::Secret(SecretBytes)` — the container itself, whose payload has no
+     public read path and a redacting `Debug`/`Display`.
 2. **There is no exported replacement.** A consumer that needs to display a
    module uses `to_redacted_json` or `to_protobuf`; a consumer that needs to
    recognize a redacted value compares with `SECRET_MARKER`.
@@ -30,19 +40,23 @@ read every secret, which contradicts the threat model in
    - **Authoritative:** `scripts/api_surface.py` reads the rustdoc JSON
      (`cargo +nightly rustdoc -- -Zunstable-options --output-format json`) and
      walks the *resolved* public API — free functions, inherent methods, trait
-     methods and re-exports, including aliased and glob re-exports. It fails when
-     a public item's name is blacklisted or mentions secrets and its return type
-     resolves to raw text or bytes (`String`, `str`, `char`, `u8`, in any
-     container). CI runs it in the `api-surface` job. Because it reads the
-     compiler's own view rather than text, spelling tricks (line breaks,
-     modifiers, array lengths, attributes) do not matter.
+     methods and re-exports. It fails when a public item's name is blacklisted or
+     mentions secrets and its return type resolves to raw text or bytes
+     (`String`, `str`, `char`, `u8`, in any container, through any chain of
+     crate-local type aliases). A glob re-export is refused as unauditable, and an
+     alias whose public name mentions secrets is checked against the target's
+     shape (or refused when the target cannot be resolved). The gate fails closed
+     on schema drift: it pins the rustdoc `format_version`, requires a non-empty
+     item index, requires `inner`/`visibility` on every item, and fails when the
+     number of recognised functions drops to a suspicious level. CI runs it in
+     the `api-surface` job.
    - **Tripwire:** `tests/api_surface.rs` runs with plain `cargo test` and no
-     nightly toolchain. It catches the realistic textual forms — the blacklist,
-     a shape rule over the text after the last `->`, attributes, modifier chains,
-     glob and aliased re-exports — and documents the policy. It is deliberately
-     *not* the guarantee: a text scan can be spelled around, which is why the
-     semantic gate exists.
-4. **This is a breaking change, released as 2.0.0 (2.0.1-2.0.3 fixed the last
+     nightly toolchain. It catches the realistic textual forms — the blacklist, a
+     shape rule over the text after the last `->`, attributes, modifier chains,
+     glob re-exports and aliased re-exports with a secret name — and documents the
+     policy. It is deliberately *not* the guarantee: a text scan can be spelled
+     around, which is why the semantic gate exists.
+4. **This is a breaking change, released as 2.0.0 (2.0.1-2.0.6 fixed the last
    accessor and hardened the checks).** The wire format is unchanged; only the
    crate API shrank.
 
@@ -59,12 +73,30 @@ Some public accessors return bytes on purpose:
 - The redaction helpers take secret literals as *input* (`redact_text`,
   `provenance_json`); they return redacted text, never secret text.
 
+## Scope of the gate
+
+The gate is name-scoped: it flags a *public function-like item whose name mentions
+secrets* and whose resolved return is raw text or bytes. It deliberately does not
+model:
+
+- public associated constants and associated types (no such item exists in the
+  crate today);
+- public struct fields and enum-variant fields (the only secret-carrying type is
+  `SecretBytes`, whose field is private);
+- macro-generated items (`macro_export`), of which the crate has none;
+- an accessor with an unrelated name that returns `Vec<u8>`.
+
+Those are reviewed decisions, not scanner blind spots that a rename can open: a
+new item in any of those categories is visible in the diff, and the ADR is the
+place the reviewer has to argue against.
+
 ## Residual risk
 
-A deliberately obfuscated accessor — an unrelated name returning `Vec<u8>` — can
-evade a textual guard. That is a reviewed decision rather than an accident: the
-blacklist and shape rule catch the realistic forms, ADR-0010 states the policy,
-and a reviewer adding such a function would have to argue against this document.
+A deliberately obfuscated accessor — an unrelated name returning raw bytes — can
+evade both checks, because both are name-scoped. That is a reviewed decision
+rather than an accident: the blacklist and the shape rule catch the realistic
+forms, the schema-drift guards keep the authoritative gate honest, and a reviewer
+adding such a function would have to argue against this document.
 
 ## Consequences
 

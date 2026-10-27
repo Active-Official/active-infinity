@@ -1,5 +1,30 @@
 # Changelog — Active Infinity
 
+## 2.0.6 — 2026-10-27
+
+Hardening release for the secret-surface gate; no API or wire change.
+
+- **The semantic gate fails closed on schema drift.** It pins the rustdoc
+  `format_version`, requires a non-empty item index and the crate root, requires
+  `inner`/`visibility` on every item, and fails when the number of recognised
+  functions drops below a sanity threshold. A nightly that renames a JSON key now
+  breaks the gate loudly instead of printing "clean" (four synthetic probes:
+  wrong format, empty index, alias laundering, unresolvable alias).
+- **Alias laundering is closed.** `pub use innocent as secret_x` used to be
+  shape-checked against the *target's* name. The public name is what a caller
+  sees, so the check now runs against the alias, and an unresolvable target under
+  a secret-named alias is refused rather than guessed.
+- **The allowlist is validated behaviorally.** A new test builds a module whose
+  binding name contains a secret copy and asserts that `secret_tainted_paths`
+  returns only redacted labels, so the one allowlisted entry cannot rot into a
+  leak.
+- **The tripwire refuses aliased re-exports with a secret name** (it cannot
+  resolve targets textually, so it fails closed), matching the semantic gate.
+- **ADR-0010 is accurate**: four crate-private helpers plus `Validated::secret`
+  (not "three"), the real list of public secret-related items, the alias and
+  glob-re-export rules, the schema-drift guards, the scope limits (associated
+  items, fields, variants, macros) and the name-scoped residual risk.
+
 ## 2.0.5 — 2026-10-27
 
 Tooling release; no API or wire change.

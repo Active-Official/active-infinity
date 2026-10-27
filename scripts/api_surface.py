@@ -107,28 +107,56 @@ def check_function(item: dict, public: bool, where: str) -> list[str]:
     return findings
 
 
+# The rustdoc JSON format this script understands. A nightly bump that changes
+# the schema must fail loudly instead of silently reporting a clean surface.
+SUPPORTED_FORMAT = 61
+
+
 def main(argv: list[str]) -> int:
     if len(argv) != 2:
         print("usage: api_surface.py <rustdoc.json>", file=sys.stderr)
         return 2
     with open(argv[1], encoding="utf-8") as handle:
         doc = json.load(handle)
-    index = doc.get("index", {})
+
+    # Fail closed on schema drift: a renamed key would otherwise make every
+    # branch below skip and print "clean".
+    findings: list[str] = []
+    format_version = doc.get("format_version")
+    if format_version != SUPPORTED_FORMAT:
+        findings.append(
+            f"{argv[1]}: unsupported rustdoc format_version {format_version!r} "
+            f"(expected {SUPPORTED_FORMAT}); update scripts/api_surface.py"
+        )
+    index = doc.get("index")
+    if not isinstance(index, dict) or not index:
+        findings.append(f"{argv[1]}: rustdoc JSON has no item index")
+        index = {}
+    root = str(doc.get("root"))
+    if index and root not in index:
+        findings.append(f"{argv[1]}: crate root {root} missing from the index")
     global _INDEX
     _INDEX = index
 
-    findings: list[str] = []
-    for item in index.values():
-        inner = item.get("inner", {})
+    functions_seen = 0
+    for item_id, item in index.items():
+        inner = item.get("inner")
+        if not isinstance(inner, dict):
+            findings.append(f"item {item_id}: missing `inner`")
+            continue
         visibility = item.get("visibility")
+        if not isinstance(visibility, str):
+            findings.append(f"item {item_id}: missing `visibility`")
 
         if "function" in inner:
+            functions_seen += 1
             findings += check_function(item, visibility == "public", location(item))
 
         if "trait" in inner and visibility == "public":
             for member_id in inner["trait"].get("items", []):
                 member = index.get(str(member_id))
                 if member and "function" in member.get("inner", {}):
+                    functions_seen += 1
                     findings += check_function(member, True, location(member))
 
         if "impl" in inner:
@@ -147,19 +175,45 @@ def main(argv: list[str]) -> int:
             use = inner["use"]
             name = use.get("name") or ""
             source = (use.get("source") or "").split("::")[-1]
+            target = index.get(str(use.get("id")))
             if use.get("is_glob"):
                 findings.append(
                     f"{location(item)}: public glob re-export cannot be audited; "
                     "re-export the names explicitly"
                 )
-            elif name in BLACKLIST or source in BLACKLIST:
+                continue
+            if name in BLACKLIST or source in BLACKLIST:
                 findings.append(
                     f"{location(item)}: public re-export of `{name or source}`"
                 )
-            else:
-                target = index.get(str(use.get("id")))
-                if target and "function" in target.get("inner", {}):
-                    findings += check_function(target, True, location(item))
+                continue
+            # The *public* name is what a caller sees: apply the shape rule to
+            # the alias, not only to the target's own name, so
+            # `pub use innocent as secret_x` cannot launder a raw return.
+            if "secret" in name:
+                if target is None:
+                    findings.append(
+                        f"{location(item)}: public alias `{name}` cannot be "
+                        "resolved; refusing to guess"
+                    )
+                    continue
+                reuse = dict(target)
+                reuse["name"] = name
+                findings += check_function(reuse, True, location(item))
+            elif target is not None and "function" in target.get("inner", {}):
+                functions_seen += 1
+                findings += check_function(target, True, location(item))
+
+    # A schema rename would leave the counters at zero; that is drift, not a
+    # clean surface.
+    if index and functions_seen < 10:
+        findings.append(
+            f"{argv[1]}: only {functions_seen} functions recognised; "
+            "the rustdoc schema probably changed"
+        )
+
+    # Deduplicate: a trait method can be reached from more than one branch.
+    findings = list(dict.fromkeys(findings))
 
     if findings:
         print("public secret surface violations:", file=sys.stderr)
@@ -167,7 +221,7 @@ def main(argv: list[str]) -> int:
             print("  " + finding, file=sys.stderr)
         return 1
     print(
-        f"api surface clean: {len(index)} items, "
+        f"api surface clean: {len(index)} items, {functions_seen} functions, "
         f"{len(ALLOW)} justified allowlist entries"
     )
     return 0

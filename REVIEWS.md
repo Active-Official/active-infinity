@@ -241,3 +241,29 @@ the caller's own image, hashes, or redacted metadata. One hardening item:
 
 No such alias existed in the crate at the time (only `Result<T>`), so the gap was
 latent rather than exploitable.
+
+## Round 19 — 2026-10-27 (final independent review of 2.0.5, 2.0.6)
+
+The reviewer confirmed the panel's stale items against the tagged tree:
+`secret_texts`, `secret_bytes`, `secret_table`, `secret_literals` and
+`Validated::secret` are all `pub(crate)` in `v2.0.5`; the JSON re-export does not
+name `secret_literals`; `SecretBytes::expose` is crate-only; and
+`tests/protobuf_tests.rs` imports only `to_redacted_json`, `intents` and
+`SECRET_MARKER`. Evidence: `secret-surface-audit.log`, captured from a clean
+clone of the tag.
+
+It then found six problems in the new policy machinery itself, all fixed in
+2.0.6:
+
+| Finding | Severity | Disposition |
+|---|---|---|
+| The semantic gate failed **open** on schema drift: no `format_version` check, `doc.get("index", {})` default, unknown `inner` kinds skipped, so a renamed key printed "clean" | high | fixed: pins `format_version == 61`, requires a non-empty index, the crate root, `inner`/`visibility` per item, and a minimum recognised-function count; four synthetic probes (wrong format, empty index, alias laundering, unresolvable alias) fail as expected |
+| `pub use innocent as secret_x` passed: the shape rule used the target's name, not the public alias | medium | fixed: the alias name is checked, and an unresolvable target under a secret-named alias is refused |
+| The allowlist could rot: only existence and reason length were checked, never the return | medium | fixed: `the_allowlisted_label_helper_never_returns_secret_material` builds a module with a secret copy in a binding name and proves the labels are redacted |
+| ADR-0010 over-claimed (three helpers, "only SECRET_MARKER", aliased re-exports, textual-only residual) | medium | fixed: four helpers plus `Validated::secret`, the real public item list, alias/glob rules, schema-drift guards, scope limits and name-scoped residual risk |
+| Documented scope gaps (assoc consts/types, public fields, enum variants, macros) | low | documented in ADR-0010; no such item exists today |
+| Duplicate findings and an unpinned rustdoc invocation | low | fixed: findings are deduplicated, and the CI rustdoc step runs `--locked` |
+
+The reviewer also re-ran fmt, clippy `-D warnings` (both feature sets), tests in
+both configurations, `cargo doc` with `RUSTDOCFLAGS=-D warnings`, and `cargo deny`;
+all clean.

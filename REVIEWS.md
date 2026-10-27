@@ -104,3 +104,16 @@ Verification of round 7 found three medium and two low items; all fixed in
 ## Round 9 — 2026-10-27 (1.2.4)
 
 Verification round: **NO NEW FINDINGS**.
+
+## Round 10 — 2026-10-27 (adversarial verification, 1.2.5)
+
+An external adversarial pass over the released 1.2.4 found two issues the review
+rounds had missed. Both are fixed in 1.2.5.
+
+| Finding | Severity | Disposition |
+|---|---|---|
+| The extension check compared payloads against the *lossy text* form of each secret, so `SecretBytes::new(vec![0xff, 0xfe, 0x00])` copied into an extension was emitted instead of refused | high | fixed: `interop::secret_bytes` feeds the byte-level check; `projection_refuses_an_extension_that_copies_a_non_utf8_secret` covers a direct copy and an embedded one, and the exact probe was re-run against the published crate (refused, `infinity/encode`) |
+| `cargo doc` accepted a rustdoc warning (ambiguous intra-doc link to `crate::validate`, both a module and a function), while the release criteria require warning-free docs | gap | fixed: the link targets `crate::validate::validate`; both repositories run `cargo doc` with `RUSTDOCFLAGS=-D warnings`, locally and in CI |
+
+Lesson recorded: a byte-level surface needs the raw secret bytes, and documentation
+warnings are defects that a gate must fail on rather than print.

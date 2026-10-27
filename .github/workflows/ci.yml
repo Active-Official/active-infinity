@@ -40,7 +40,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - name: Package (no verify: path dependencies)
+      - name: "Package (no verify, path dependencies)"
         run: cargo package --no-verify --allow-dirty
 
   fuzz:

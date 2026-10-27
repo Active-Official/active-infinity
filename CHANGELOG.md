@@ -1,5 +1,35 @@
 # Changelog — Active Infinity
 
+## 2.0.0 — 2026-10-27
+
+**Breaking: the plaintext secret accessors are gone.** The AINF wire format is
+unchanged (still format 1.0), and every image written by 1.x remains valid.
+
+Adversarial verification pointed out that three public helpers handed out secret
+material, which defeats the structural-secret design:
+
+| Removed from the public API | Why |
+|---|---|
+| `interop::secret_texts` | returned every secret as plaintext `Vec<String>` |
+| `interop::secret_bytes` | returned the exact secret bytes (added in 1.2.5) |
+| `interop::secret_literals` (JSON feature) | re-exported the same plaintext |
+
+They are now `pub(crate)` and exist only for the redaction machinery inside the
+crate. There is **no replacement that reads a secret**: use
+`to_redacted_json` / `to_protobuf` for output, and `SECRET_MARKER` to recognize a
+redacted value. This is a deliberate one-way door.
+
+- `tests/api_surface.rs` is a static policy check: it fails if any
+  `pub fn secret_*` accessor or a `pub use` of one reappears, and it pins
+  `SECRET_MARKER` as the only public secret constant.
+- The Protobuf test that used to call `secret_texts` now asserts the guarantee
+  through the shipped projections instead: the literal appears in neither the
+  Protobuf bytes nor the JSON document, and the marker does.
+- `tests/protobuf_tests.rs` imports only the marker from `interop`.
+
+CI, the clean-clone gates and the release checklist are unchanged; the published
+artifact surface shrank, which is why this is a major version.
+
 ## 1.2.6 — 2026-10-27
 
 Test-strength release; no code change.

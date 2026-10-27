@@ -140,3 +140,23 @@ conformance coverage, and found one low test-strength gap:
 Everything else was re-confirmed: `cargo fmt`, `clippy -D warnings`,
 `cargo test` (both feature sets), `cargo doc` with `RUSTDOCFLAGS=-D warnings`,
 and the clean-clone gate suites for both tags.
+
+## Round 13 — 2026-10-27 (adversarial panel, 2.0.0)
+
+The panel rejected the 1.2.6 candidate because three public helpers still returned
+secret plaintext. The gap was real and had been missed by every earlier round
+(rounds 10-12 fixed the *use* of secrets in one check but never asked whether the
+accessors themselves should be public).
+
+| Finding | Severity | Disposition |
+|---|---|---|
+| `interop::secret_texts` was public and returned every secret as plaintext | high | fixed in 2.0.0: `pub(crate)` |
+| `interop::secret_bytes` was public and returned exact secret bytes | high | fixed in 2.0.0: `pub(crate)` |
+| `interop::secret_literals` was public and re-exported from the JSON module | high | fixed in 2.0.0: `pub(crate)`, removed from the re-export |
+| `tests/protobuf_tests.rs` drove the unlock API to assert the literal, so the test proved the leak existed rather than that the projection is safe | high | fixed: the test asserts the literal is absent from **both** the Protobuf bytes and the JSON document, and that the marker is present |
+| No regression guard against reintroducing the accessors | gap | fixed: `tests/api_surface.rs` is a static policy check over `src/`, with an explicit forbidden list and an exception only for `SECRET_MARKER` |
+| The removal was undocumented and unreleased | gap | fixed: ADR-0010, CHANGELOG 2.0.0, and a new signed release on crates.io and both organizations with regenerated gate logs |
+
+The remaining public secret-related item is `SECRET_MARKER`, a literal string with
+no secret material. The crate's own code, tests, examples and benches never needed
+the accessors, which is evidence they were accidental rather than load-bearing.

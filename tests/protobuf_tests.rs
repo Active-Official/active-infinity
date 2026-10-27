@@ -8,7 +8,7 @@
 
 #[cfg(feature = "json")]
 use active_infinity::interop::to_redacted_json;
-use active_infinity::interop::{intents, secret_texts, SECRET_MARKER};
+use active_infinity::interop::{intents, SECRET_MARKER};
 #[cfg(feature = "json")]
 use active_infinity::ir::InterpPart;
 use active_infinity::ir::{hash_hex, AnnotationKind, ProvEntry, ProvValue, Provenance};
@@ -634,11 +634,23 @@ fn projection_never_contains_secret_material() {
         !bytes.windows(needle.len()).any(|window| window == needle),
         "the secret literal appears in the projection"
     );
-    // The redaction rule itself still sees the secret — the point is that the
-    // projection applied it.
-    assert!(secret_texts(&module)
-        .iter()
-        .any(|text| text == "hunter2-secret"));
+    assert!(
+        bytes
+            .windows(SECRET_MARKER.len())
+            .any(|window| window == SECRET_MARKER.as_bytes()),
+        "the projected value must be the redaction marker"
+    );
+
+    // The same guarantee on the JSON side, which is the other export path.
+    #[cfg(feature = "json")]
+    {
+        let json = to_redacted_json(&module).expect("project");
+        assert!(
+            !json.contains("hunter2-secret"),
+            "the secret literal appears in the JSON projection: {json}"
+        );
+        assert!(json.contains(SECRET_MARKER), "the marker must be present");
+    }
 }
 
 #[test]

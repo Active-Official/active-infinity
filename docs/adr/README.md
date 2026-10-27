@@ -14,3 +14,4 @@ immutable once accepted: a later ADR supersedes it and says so.
 | [0007](0007-streaming.md) | Streaming as canonical section transport plus semantic deltas |
 | [0008](0008-dependency-policy.md) | Dependency policy and supply chain |
 | [0009](0009-protobuf-projection.md) | Protobuf interop projection |
+| [0010](0010-no-public-secret-accessor.md) | No public secret accessor |

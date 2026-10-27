@@ -36,9 +36,10 @@ pub use crate::canonical::SECRET_MARKER;
 
 /// Every secret literal in a module, as text.
 ///
-/// Used by the text projections (`provenance_lines`, `intents`) so a copy of a
-/// secret inside metadata cannot leave through them.
-pub fn secret_texts(module: &InfinityModule) -> Vec<String> {
+/// Crate-internal on purpose: secret bytes are structural, and a public
+/// accessor that returns them would be an unlock API. Redaction helpers consume
+/// this; callers outside the crate get only redacted projections.
+pub(crate) fn secret_texts(module: &InfinityModule) -> Vec<String> {
     module
         .nodes()
         .iter()
@@ -51,11 +52,12 @@ pub fn secret_texts(module: &InfinityModule) -> Vec<String> {
 
 /// Every secret literal in a module, as raw bytes.
 ///
-/// Text redaction uses the lossy UTF-8 view ([`secret_texts`]) because it
-/// compares against UTF-8 text. A byte-level surface (an opaque extension
-/// payload) must compare against the real bytes: a secret that is not valid
-/// UTF-8 would otherwise be lossily converted and never match its own copy.
-pub fn secret_bytes(module: &InfinityModule) -> Vec<Vec<u8>> {
+/// Crate-internal on purpose (see [`secret_texts`]): the only consumer is the
+/// byte-level extension check in the Protobuf projection. Text redaction uses
+/// the lossy UTF-8 view because it compares against UTF-8 text; a byte-level
+/// surface must compare against the real bytes, or a secret that is not valid
+/// UTF-8 would be lossily converted and never match its own copy.
+pub(crate) fn secret_bytes(module: &InfinityModule) -> Vec<Vec<u8>> {
     module
         .nodes()
         .iter()
@@ -908,8 +910,11 @@ mod projection {
         serde_json::to_string_pretty(&value).map_err(|_| Error::Encode("json projection failed"))
     }
 
-    /// Every secret literal in the module, as text. Used to redact copies.
-    pub fn secret_literals(module: &InfinityModule) -> Vec<String> {
+    /// Every secret literal in the module, as text, for the redaction helpers.
+    ///
+    /// Crate-internal: a public plaintext accessor would defeat structural
+    /// secrets. Callers outside the crate use the redacted projections.
+    pub(crate) fn secret_literals(module: &InfinityModule) -> Vec<String> {
         secret_texts(module)
     }
 
@@ -1005,8 +1010,7 @@ mod projection {
 
 #[cfg(feature = "json")]
 pub use projection::{
-    provenance_json, provenance_json_for, secret_literals, to_redacted_json,
-    to_redacted_json_pretty,
+    provenance_json, provenance_json_for, to_redacted_json, to_redacted_json_pretty,
 };
 
 // ---------------------------------------------------------------------------

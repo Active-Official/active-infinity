@@ -10,9 +10,13 @@
 //!    `Vec<u8>`, `&[u8]`, `Vec<Vec<u8>>`) is a leak unless it is allowlisted with
 //!    a reason. `secret_tainted_paths` is allowlisted: it returns redacted
 //!    labels, not secret material;
-//! 3. the scan walks every file under `src/` (not a fixed list), follows
-//!    multi-line signatures, and treats `pub fn`, `pub const fn`, `pub unsafe fn`
-//!    and `pub async fn` the same.
+//! 3. the scan walks every file under `src/`, follows declarations whose return
+//!    type is on its own line, and strips every modifier
+//!    (`const`/`async`/`unsafe`, in any order) before reading the name.
+//!
+//! The return type is read only after the last `->`, so an array length like
+//! `[u8; 32]` in the parameter list cannot confuse the scan, and the body is cut
+//! off before the check, so a one-line body cannot hide the type either.
 //!
 //! `SECRET_MARKER` is the one public secret constant, and it carries no secret.
 //! A deliberately obfuscated accessor (an unrelated name returning `Vec<u8>`)
@@ -53,20 +57,28 @@ fn rust_sources(root: &Path) -> Vec<PathBuf> {
     out
 }
 
-/// Join a declaration that spans lines into one logical line, keeping the line
-/// number where it started.
+/// Join a declaration that spans lines, including a return type that starts on
+/// its own line, keeping the line number where it started.
 fn logical_lines(text: &str) -> Vec<(usize, String)> {
+    let lines: Vec<&str> = text.lines().collect();
     let mut out = Vec::new();
     let mut buffer = String::new();
     let mut start = 0usize;
-    for (index, line) in text.lines().enumerate() {
+    for (index, line) in lines.iter().enumerate() {
+        let trimmed = line.trim();
         if buffer.is_empty() {
             start = index + 1;
         } else {
             buffer.push(' ');
         }
-        buffer.push_str(line.trim());
-        if buffer.matches('(').count() == buffer.matches(')').count() {
+        buffer.push_str(trimmed);
+
+        let balanced = buffer.matches('(').count() == buffer.matches(')').count();
+        let next_continues = lines.get(index + 1).is_some_and(|next| {
+            let next = next.trim();
+            next.starts_with("->") || next.starts_with("where")
+        });
+        if balanced && !next_continues {
             out.push((start, std::mem::take(&mut buffer)));
         }
     }
@@ -76,28 +88,36 @@ fn logical_lines(text: &str) -> Vec<(usize, String)> {
     out
 }
 
-/// The name of a public function, ignoring `const`/`async`/`unsafe` modifiers.
+/// The name of a public function, stripping `const`/`async`/`unsafe` in any order.
 fn public_fn_name(line: &str) -> Option<&str> {
-    let rest = line.strip_prefix("pub ")?;
-    let rest = rest
-        .strip_prefix("const ")
-        .or_else(|| rest.strip_prefix("async "))
-        .or_else(|| rest.strip_prefix("unsafe "))
-        .unwrap_or(rest);
+    let mut rest = line.strip_prefix("pub ")?;
+    loop {
+        let stripped = ["const ", "async ", "unsafe "]
+            .iter()
+            .find_map(|modifier| rest.strip_prefix(modifier));
+        match stripped {
+            Some(next) => rest = next,
+            None => break,
+        }
+    }
     let rest = rest.strip_prefix("fn ")?;
     Some(rest.split('(').next().unwrap_or("").trim())
 }
 
+/// Whether the declaration's return type is raw text or bytes.
+///
+/// Only the text after the last `->` can be a return type, so array lengths and
+/// generic parameters in the argument list cannot interfere.
 fn returns_raw_text(line: &str) -> bool {
-    // Keep only the signature: a one-line body would otherwise move the "last
-    // `)`" into the body and hide the return type.
-    let signature = line.split('{').next().unwrap_or(line);
-    let signature = signature.split(';').next().unwrap_or(signature);
-    let Some(close) = signature.rfind(')') else {
+    let Some(arrow) = line.rfind("->") else {
         return false;
     };
-    let tail = &signature[close + 1..];
-    tail.contains("String") || tail.contains("u8") || tail.contains("[u8]")
+    let tail = &line[arrow + 2..];
+    // Stop at the body (or an unexpected block close); a trait declaration ends
+    // with `;` and keeps its type in the tail.
+    let signature = tail.split('{').next().unwrap_or(tail);
+    let signature = signature.split('}').next().unwrap_or(signature);
+    signature.contains("String") || signature.contains("u8")
 }
 
 #[test]

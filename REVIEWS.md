@@ -190,3 +190,18 @@ fixed in 2.0.2:
 
 The reviewer re-ran fmt, clippy `-D warnings`, tests in both feature sets,
 `cargo doc` with `RUSTDOCFLAGS=-D warnings` and `cargo deny`; all clean.
+
+## Round 16 — 2026-10-27 (verification of 2.0.2, 2.0.3)
+
+The reviewer live-proved three ways past the API-surface guard. All are closed in
+2.0.3, and each bypass is now a probe that fails the suite when injected.
+
+| Finding | Severity | Disposition |
+|---|---|---|
+| `pub fn secret_x(x: [u8; 32]) -> Vec<u8>` passed: the scan split on `;`, cutting the parameter type and leaving the wrong tail | high | fixed: the return type is read only after the last `->`, so nothing in the parameter list can interfere |
+| A return type on its own line (`pub fn secret_x(...)` then `-> Vec<u8>`) passed: the joiner split on balanced parentheses | high | fixed: the joiner continues while the next line starts with `->` or `where` |
+| `pub const unsafe fn` passed: only one modifier was stripped | medium | fixed: `const`/`async`/`unsafe` are stripped in a loop, in any order; ADR-0010 updated |
+
+Guard probes now cover: blacklisted name, new name with raw return, a method on
+`Validated`, one-line body, array-length parameter, split return type, and
+`const unsafe`. Each fails the suite; each probe is reverted.

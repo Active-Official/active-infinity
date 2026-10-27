@@ -1,5 +1,19 @@
 # Changelog — Active Infinity
 
+## 2.0.3 — 2026-10-27
+
+Test release; no API or wire change. Three guard bypasses found by verification
+are closed, each proven by an injected accessor that now fails the suite.
+
+- **Array lengths in parameters no longer confuse the return-type check.** The
+  scan read the text after the last `)`, so `pub fn secret_x(x: [u8; 32]) ->
+  Vec<u8>` looked like a function returning `[u8; 32]`; it now reads only after
+  the last `->`.
+- **A return type on its own line is joined to the declaration**, so
+  `pub fn secret_x(...)` followed by `-> Vec<u8>` on the next line is caught.
+- **Modifiers are stripped in any order**, including `pub const unsafe fn`.
+- ADR-0010 is updated to describe exactly these rules.
+
 ## 2.0.2 — 2026-10-27
 
 Test-and-documentation release; no API or wire change.

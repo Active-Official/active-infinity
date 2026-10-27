@@ -33,9 +33,12 @@ read every secret, which contradicts the threat model in
      `secret_bytes`, `secret_literals`, `secret_values`, `secret`);
    - a **shape rule**: a public function whose name mentions secrets and whose
      return type is `String`, `Vec<String>`, `Vec<u8>`, `Vec<Vec<u8>>` or
-     `&[u8]` is a leak. Declarations are joined across lines and truncated at the
-     body, so a one-line body cannot hide the return type, and
-     `pub const fn` / `pub unsafe fn` / `pub async fn` are treated like `pub fn`;
+     `&[u8]` is a leak. The return type is read only after the last `->`, so an
+     array length such as `[u8; 32]` in the parameter list cannot confuse the
+     scan; the body is cut off at `{`, so a one-line body cannot hide the type;
+     declarations whose return type starts on its own line are joined;
+     `const`/`async`/`unsafe` modifiers are stripped in any order before the name
+     is read;
    - an allowlist with a written reason, currently only `secret_tainted_paths`
      (it returns redacted labels, never bytes), plus a check that fails if an
      allowlist entry goes stale.

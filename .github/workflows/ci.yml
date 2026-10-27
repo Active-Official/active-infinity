@@ -49,7 +49,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly
+      - name: Install clang (libFuzzer runtime)
+        run: sudo apt-get update && sudo apt-get install -y clang
       - name: Install cargo-fuzz
         run: cargo install cargo-fuzz --locked
+      - name: Seed the corpus with the conformance vectors
+        run: |
+          mkdir -p fuzz/corpus/decode
+          cp tests/vectors/valid/*.ainf tests/vectors/invalid/*.ainf fuzz/corpus/decode/
       - name: Bounded fuzz campaign
         run: cargo fuzz run decode -- -runs=20000

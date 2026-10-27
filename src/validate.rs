@@ -1833,7 +1833,8 @@ impl<'a> Validated<'a> {
         // Kahn's algorithm: peel nodes with no incoming edge. It is O(V + E)
         // with one child-list derivation per node, where a cursor-based depth
         // first search would re-derive a wide node's children once per edge and
-        // turn a 64k-field table into a quadratic validation.
+        // turn a 64k-field table into a quadratic validation. Counts saturate:
+        // an in-degree above `u32::MAX` needs more edges than `max_edges` allows.
         let mut incoming = vec![0u32; count as usize];
         let mut scratch: Vec<u32> = Vec::new();
         for node in 0..count {
@@ -1864,8 +1865,9 @@ impl<'a> Validated<'a> {
             }
         }
         if processed != count {
-            // Whatever the peel could not reach has an incoming edge from the
-            // cycle itself. Report the lowest such node so the answer is stable.
+            // Whatever the peel could not reach is on a cycle or depends on one
+            // (`incoming` counts edges from nodes that never got peeled). Report
+            // the lowest such node so the answer is stable.
             let node = incoming.iter().position(|degree| *degree > 0).unwrap_or(0) as u32;
             return Err(Error::Cycle { node });
         }
@@ -1923,9 +1925,8 @@ impl<'a> Validated<'a> {
     }
 
     fn check_depth(&self, limits: Limits) -> Result<()> {
-        if limits.max_depth == 0 {
-            return Ok(());
-        }
+        // `Limits::check` has already rejected a zero ceiling, so this function
+        // never sees `max_depth == 0`.
         let count = self.node_count();
         if count == 0 {
             return Ok(());

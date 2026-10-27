@@ -397,12 +397,28 @@ pub const SECRET_MARKER: &str = "***SECRET***";
 /// Every non-empty secret is replaced wherever it appears, at any length: a copy
 /// that survives canonicalization is stored in the image, and the projections
 /// would then have to hide bytes the image itself carries.
-fn redact_text(text: &str, secrets: &[String]) -> String {
+///
+/// One rule keeps the result a fixpoint: when any secret also occurs inside
+/// [`SECRET_MARKER`] (`S`, `*`, `SECRET`), inserting the marker would reintroduce
+/// that secret, and a second canonicalization pass would then change the text
+/// again. In that case the whole text collapses to the marker, which is the one
+/// value the rule maps to itself.
+pub(crate) fn redact_text(text: &str, secrets: &[String]) -> String {
+    let matched: Vec<&String> = secrets
+        .iter()
+        .filter(|secret| !secret.is_empty() && text.contains(secret.as_str()))
+        .collect();
+    if matched.is_empty() {
+        return text.to_string();
+    }
+    if secrets
+        .iter()
+        .any(|secret| !secret.is_empty() && SECRET_MARKER.contains(secret.as_str()))
+    {
+        return SECRET_MARKER.to_string();
+    }
     let mut out = text.to_string();
-    for secret in secrets {
-        if secret.is_empty() || !out.contains(secret.as_str()) {
-            continue;
-        }
+    for secret in matched {
         out = out.replace(secret.as_str(), SECRET_MARKER);
     }
     out
@@ -416,6 +432,9 @@ fn redact_provenance(mut prov: Provenance, secrets: &[String]) -> Provenance {
     prov.model = prov.model.map(|text| redact_text(&text, secrets));
     prov.tool = prov.tool.map(|text| redact_text(&text, secrets));
     for entry in &mut prov.entries {
+        // Keys live in the string heap too: a copy there would be stored in the
+        // image even though the projections hide it.
+        entry.key = redact_text(&entry.key, secrets);
         if let ProvValue::Text(text) = &entry.value {
             entry.value = ProvValue::Text(redact_text(text, secrets));
         }
@@ -744,7 +763,10 @@ fn sorted_provenance(mut prov: Provenance, strings: &HashMap<String, u32>) -> Pr
     prov.entries.sort_by(|a, b| {
         (a.key.as_str(), prov_kind_rank(&a.value)).cmp(&(b.key.as_str(), prov_kind_rank(&b.value)))
     });
-    prov.entries.dedup_by(|a, b| a == b);
+    // Redaction can map two keys onto the marker. Provenance is a map, so the
+    // first entry for a key wins; emitting both would produce an image the
+    // validator refuses (duplicate key).
+    prov.entries.dedup_by(|a, b| a.key == b.key);
     prov
 }
 fn prov_kind_rank(value: &ProvValue) -> u32 {

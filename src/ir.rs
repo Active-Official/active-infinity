@@ -1257,73 +1257,102 @@ impl InfinityModule {
         Ok(())
     }
 
-    /// Iterative cycle detection over the derived dependency graph.
+    /// Cycle detection over the derived dependency graph (Kahn sweep).
     ///
-    /// Explicit stack: a hostile 4M-node chain must not overflow the thread
-    /// stack (`active-core` treats cycles as fatal, so this is a hard
-    /// invariant, not a hint).
+    /// One child-list derivation per node, so a wide table stays linear; the
+    /// sweep is iterative by construction, because a hostile 4M-node chain must
+    /// not overflow the thread stack (`active-core` treats cycles as fatal, so
+    /// this is a hard invariant, not a hint).
     pub fn check_acyclic(&self, count: u32) -> Result<(), super::Error> {
         use super::Error;
-        // 0 = unvisited, 1 = on stack, 2 = done.
-        let mut state = vec![0u8; count as usize];
-        let mut stack: Vec<(u32, usize)> = Vec::new();
-        for start in 0..count {
-            if state[start as usize] != 0 {
-                continue;
+        let mut incoming = vec![0u32; count as usize];
+        for node in &self.nodes {
+            for child in node.children() {
+                if child.0 >= count {
+                    return Err(Error::NodeRef(child.0));
+                }
+                let slot = &mut incoming[child.index()];
+                *slot = slot.saturating_add(1);
             }
-            stack.push((start, 0));
-            state[start as usize] = 1;
-            while let Some((node, child_index)) = stack.pop() {
-                let children = self.nodes[node as usize].children();
-                if child_index < children.len() {
-                    stack.push((node, child_index + 1));
-                    let next = children[child_index].0;
-                    match state[next as usize] {
-                        0 => {
-                            state[next as usize] = 1;
-                            stack.push((next, 0));
-                        }
-                        1 => return Err(Error::Cycle { node: next }),
-                        _ => {}
-                    }
-                } else {
-                    state[node as usize] = 2;
+        }
+        let mut queue: std::collections::VecDeque<u32> = incoming
+            .iter()
+            .enumerate()
+            .filter(|(_, degree)| **degree == 0)
+            .map(|(node, _)| node as u32)
+            .collect();
+        let mut processed = 0u32;
+        while let Some(node) = queue.pop_front() {
+            processed += 1;
+            for child in self.nodes[node as usize].children() {
+                let slot = &mut incoming[child.index()];
+                *slot = slot.saturating_sub(1);
+                if *slot == 0 {
+                    queue.push_back(child.0);
                 }
             }
+        }
+        if processed != count {
+            // A node that could not be ordered depends on a cycle; report the
+            // lowest one so the answer is stable.
+            let node = incoming.iter().position(|degree| *degree > 0).unwrap_or(0) as u32;
+            return Err(Error::Cycle { node });
         }
         Ok(())
     }
 
-    /// Depth check over the derived dependency graph (iterative).
+    /// Depth check over the derived dependency graph (topological sweep).
+    ///
+    /// Each edge is examined exactly once, so a wide or diamond-shaped graph is
+    /// linear rather than polynomial.
     pub fn check_depth(&self, max_depth: u32) -> Result<(), super::Error> {
         use super::Error;
-        if max_depth == 0 {
-            return Ok(());
-        }
         let count = self.nodes.len();
-        let mut depth = vec![0u32; count];
-        let mut stack: Vec<(usize, usize)> = Vec::new();
-        for start in 0..count {
-            if depth[start] != 0 {
-                continue;
+        if max_depth == 0 {
+            // Zero means "no depth ceiling", not "no checks": a direct caller
+            // still gets cycle detection.
+            return self.check_acyclic(count as u32);
+        }
+        let mut incoming = vec![0u32; count];
+        for node in &self.nodes {
+            for child in node.children() {
+                if child.index() >= count {
+                    return Err(Error::NodeRef(child.0));
+                }
+                incoming[child.index()] = incoming[child.index()].saturating_add(1);
             }
-            stack.push((start, 0));
-            depth[start] = 1;
-            while let Some((node, child_index)) = stack.pop() {
-                let children = self.nodes[node].children();
-                if child_index < children.len() {
-                    stack.push((node, child_index + 1));
-                    let next = children[child_index].index();
-                    let candidate = depth[node].saturating_add(1);
-                    if candidate > max_depth {
-                        return Err(Error::Depth { limit: max_depth });
-                    }
-                    if candidate > depth[next] {
-                        depth[next] = candidate;
-                        stack.push((next, 0));
-                    }
+        }
+        let mut depth = vec![1u32; count];
+        let mut queue: std::collections::VecDeque<u32> = incoming
+            .iter()
+            .enumerate()
+            .filter(|(_, degree)| **degree == 0)
+            .map(|(node, _)| node as u32)
+            .collect();
+        if queue.is_empty() {
+            // Acyclicity runs first; stay total for a direct caller.
+            return Err(Error::Cycle { node: 0 });
+        }
+        let mut processed = 0u32;
+        while let Some(node) = queue.pop_front() {
+            processed += 1;
+            let next = depth[node as usize] + 1;
+            for child in self.nodes[node as usize].children() {
+                if next > max_depth {
+                    return Err(Error::Depth { limit: max_depth });
+                }
+                if next > depth[child.index()] {
+                    depth[child.index()] = next;
+                }
+                let slot = &mut incoming[child.index()];
+                *slot = slot.saturating_sub(1);
+                if *slot == 0 {
+                    queue.push_back(child.0);
                 }
             }
+        }
+        if processed as usize != count {
+            return Err(Error::Cycle { node: 0 });
         }
         Ok(())
     }

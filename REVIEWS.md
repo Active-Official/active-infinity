@@ -70,3 +70,20 @@ before the release candidate was tagged:
 
 Verified unchanged: JSON projection output, canonical bytes of every existing
 vector, the decoder's totality, and the stream layer.
+
+## Round 7 - 2026-10-27 (1.2.2)
+
+Verification of round 6 found that two of the fixes were incomplete. Both are
+fixed, with tests:
+
+| Finding | Severity | Disposition |
+|---|---|---|
+| Redaction was order-dependent: a marker-substring secret (`S`) that did not occur in the original text was reintroduced by another secret's replacement, so the second pass changed the text again | high | fixed: the marker-substring case is decided once per text, before any replacement; `redaction_is_idempotent_when_a_secret_is_part_of_the_marker` covers three secret orders |
+| `redact_provenance` rewrote values but not keys, so a copy in a provenance key stayed in the string heap | high | fixed: keys are redacted, and entries that collapse are deduplicated so no duplicate key reaches the encoder; `provenance_keys_do_not_carry_secret_copies` |
+| `InfinityModule::check_depth(0)` skipped the cycle check for a direct caller | medium | fixed: zero disables the ceiling, not validation |
+| Projection value/key rules disagreed (`intents`, `provenance_lines`, Protobuf text fields) | medium | fixed: value positions use the whole-value marker, key positions occurrence replacement; `docs/spec/projection.md` states both and documents structural names |
+| Unchecked `redact_text`/`redacted_key` duplication and two `SECRET_MARKER` constants | low | fixed: one implementation in `canonical`, re-exported |
+| Cycle semantics in `docs/spec/layout.md` described a bare "dependency cycle" | low | fixed: the table and the error message say the node is on a cycle or depends on one |
+
+Verified unchanged: JSON projection output for secret-free modules, every
+previously valid vector, and the stream layer.

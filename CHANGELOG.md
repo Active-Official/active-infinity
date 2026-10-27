@@ -1,5 +1,35 @@
 # Changelog — Active Infinity
 
+## 1.2.2 — 2026-10-27
+
+Second review pass over the 1.2.1 fixes. No wire-format change; the fixes make
+redaction a true fixpoint and close the last copy path.
+
+- **Redaction is a fixpoint for every secret.** The 1.2.1 rule only avoided
+  injecting the marker when a *matching* secret was itself part of the marker; a
+  second secret could still introduce it later, so a 1–3-byte secret such as `S`
+  changed the text on every pass. The rule is now decided once per text: if any
+  secret occurs inside `***SECRET***`, a text that needs redaction collapses to
+  the marker. `interop::redact_text` and the canonicalizer share one
+  implementation, and `SECRET_MARKER` has one definition.
+- **Provenance keys are redacted.** `redact_provenance` rewrote values but not
+  keys, so a copy embedded in a provenance key stayed in the string heap. Keys are
+  now redacted like values, and entries that collapse onto the same key are
+  deduplicated (provenance is a map), so the encoder cannot emit duplicate keys.
+- **Projection value and key rules are consistent.** Value positions
+  (`intents`, provenance producer/model/tool/text entries, Protobuf text fields)
+  use the whole-value marker; key positions use occurrence replacement. The spec
+  says the same, and `docs/spec/projection.md` now also states that structural
+  names (field, binding, env, identifier names, media types) are *not* rewritten
+  in the image — they are identity — while projections redact them and may merge
+  two keys.
+- **`InfinityModule::check_depth(0)` still checks cycles.** Zero means "no depth
+  ceiling", not "skip validation"; a direct caller no longer gets `Ok` for a
+  cyclic module.
+- **Documentation matches the code.** `infinity/cycle` is documented as "a node
+  on a cycle or depending on one" (the Kahn sweep reports the lowest such node),
+  and the same wording appears in the error message.
+
 ## 1.2.1 — 2026-10-27
 
 Independent review of the 1.2.0 candidate found eight issues; all are fixed here.

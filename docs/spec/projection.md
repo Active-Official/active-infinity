@@ -57,6 +57,21 @@ Redaction is structural, not textual:
   module whose payload contains a secret literal rather than shipping the copy
   (`infinity/encode`, reason `extension payload carries secret material`).
 
+Structural names are the exception, in both directions:
+
+- the canonical image **does not rewrite** table field names, binding names,
+  environment names, identifier names or blob media types. They are part of the
+  module's identity: rewriting them would change what the module means, and two
+  names that collapse onto the marker would create a duplicate field the encoder
+  must refuse.
+- the projections **do redact** those names, because an export must not carry a
+  copy. A projection is therefore lossy for a module that embeds a secret inside
+  a structural name: two keys may merge into one, and a consumer that needs the
+  exact names reads the AINF image instead.
+
+Metadata text (annotations, provenance, prose) is redacted in the image itself,
+with each occurrence replaced, so a copy cannot be stored there either.
+
 The test suite asserts that the secret literal does not appear anywhere in the
 projected bytes.
 

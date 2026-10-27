@@ -29,7 +29,10 @@ use crate::ir::{BinOp, Constraint, PatchOp, SchemaFieldSpec, SemanticTag, TypeSp
 use crate::unit::UnitTag;
 
 /// Marker substituted for secret material in every projection.
-pub const SECRET_MARKER: &str = "***SECRET***";
+///
+/// Re-exported from [`crate::canonical`] so the marker and the replacement rule
+/// have one definition.
+pub use crate::canonical::SECRET_MARKER;
 
 /// Every secret literal in a module, as text.
 ///
@@ -51,17 +54,10 @@ pub fn secret_texts(module: &InfinityModule) -> Vec<String> {
 /// The rule is unconditional, including for one- and two-byte secrets: a short
 /// secret that survives inside a note would be stored in the canonical image and
 /// then hidden only by the projections, so the copy has to go at the source.
-/// The cost is cosmetic (a pathological one-character secret redacts a lot of
-/// text); the alternative is a leak.
+/// It is the same implementation the canonicalizer uses, which is what makes a
+/// second pass a fixpoint (see [`crate::canonical`]).
 pub fn redact_text(text: &str, secrets: &[String]) -> String {
-    let mut out = text.to_string();
-    for secret in secrets {
-        if secret.is_empty() || !out.contains(secret.as_str()) {
-            continue;
-        }
-        out = out.replace(secret.as_str(), SECRET_MARKER);
-    }
-    out
+    crate::canonical::redact_text(text, secrets)
 }
 
 // ---------------------------------------------------------------------------
@@ -722,8 +718,9 @@ pub(crate) fn project_node_with(
 }
 
 /// A value-position string: the whole text becomes the marker as soon as it
-/// contains a secret literal, so a partial copy cannot leak.
-fn redacted_value(text: &str, secrets: &[String]) -> String {
+/// contains a secret literal, so a partial copy cannot leak and a second pass is
+/// a fixpoint.
+pub(crate) fn redacted_value(text: &str, secrets: &[String]) -> String {
     if secrets
         .iter()
         .any(|secret| !secret.is_empty() && text.contains(secret.as_str()))
@@ -735,16 +732,10 @@ fn redacted_value(text: &str, secrets: &[String]) -> String {
 }
 
 /// A key-position string: every occurrence of every secret is replaced, so a
-/// key that merely contains a copy of a secret does not leak it.
+/// key that merely contains a copy of a secret does not leak it. Same rule as
+/// [`redact_text`], including the marker-substring fixpoint.
 pub(crate) fn redacted_key(text: &str, secrets: &[String]) -> String {
-    let mut out = text.to_string();
-    for secret in secrets {
-        if secret.is_empty() || !out.contains(secret.as_str()) {
-            continue;
-        }
-        out = out.replace(secret.as_str(), SECRET_MARKER);
-    }
-    out
+    redact_text(text, secrets)
 }
 
 /// Whether a node resolves to secret material, following `Ref` and `Semantic`.
@@ -1283,7 +1274,7 @@ pub fn provenance_lines(module: &InfinityModule) -> Vec<String> {
             ProvValue::Flag(flag) => flag.to_string(),
             ProvValue::Hash(hash) => format!("blake3:{}", crate::ir::hash_hex(hash)),
         };
-        lines.push(format!("{}={value}", redact(&entry.key)));
+        lines.push(format!("{}={value}", redacted_key(&entry.key, &secrets)));
     }
     lines
 }
@@ -1300,7 +1291,7 @@ pub fn intents(module: &InfinityModule, id: NodeId) -> Vec<String> {
         .iter()
         .filter(|annotation| annotation.node == id)
         .filter_map(|annotation| match &annotation.kind {
-            AnnotationKind::Intent(text) => Some(redact_text(text, &secrets)),
+            AnnotationKind::Intent(text) => Some(redacted_value(text, &secrets)),
             _ => None,
         })
         .collect()

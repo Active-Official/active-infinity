@@ -514,7 +514,7 @@ messages. Every code below is part of the contract.
 | `infinity/secret-entry` | malformed secret entry or flags disagree |
 | `infinity/duplicate-field` | repeated table field name |
 | `infinity/duplicate-binding` | repeated or unsorted binding name |
-| `infinity/cycle` | dependency cycle |
+| `infinity/cycle` | a node is on a dependency cycle or depends on one; the reported id is the lowest such node |
 | `infinity/depth` | nesting deeper than the configured limit |
 | `infinity/limit` | a configured `Limits` ceiling was exceeded |
 | `infinity/invalid-argument` | caller-supplied argument outside its range |

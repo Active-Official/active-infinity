@@ -660,6 +660,82 @@ fn extension_payloads_must_be_packed() {
 }
 
 #[test]
+fn redaction_is_idempotent_when_a_secret_is_part_of_the_marker() {
+    // "S" is a substring of "***SECRET***": inserting the marker would
+    // reintroduce the secret, so the whole text must collapse to the marker and
+    // a second canonicalization pass must be a fixpoint. The order of the secret
+    // table must not matter, and a second, ordinary secret in the same module
+    // must not change the outcome.
+    for (index, secrets) in [
+        vec!["S"],
+        vec!["S", "hunter2-secret"],
+        vec!["hunter2-secret", "S"],
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut module = fixture();
+        for (position, secret) in secrets.iter().enumerate() {
+            let id = module.push(Inode::Secret(SecretBytes::from(*secret)));
+            module.bind(format!("secret-{index}-{position}"), id);
+        }
+        let root = module.root().unwrap();
+        module.annotate(
+            root,
+            AnnotationKind::Intent("prefix S hunter2-secret".into()),
+        );
+
+        let first = encode(&module).unwrap();
+        let second = encode(&decode(&first).unwrap()).unwrap();
+        assert_eq!(
+            first, second,
+            "canonical form must be a fixpoint for {secrets:?}"
+        );
+
+        let decoded = decode(&first).unwrap();
+        let intent = decoded
+            .annotations()
+            .iter()
+            .find_map(|annotation| match &annotation.kind {
+                AnnotationKind::Intent(text) => Some(text.clone()),
+                _ => None,
+            })
+            .expect("the intent annotation survives");
+        assert_eq!(intent, active_infinity::interop::SECRET_MARKER);
+    }
+}
+
+#[test]
+fn provenance_keys_do_not_carry_secret_copies() {
+    let mut module = fixture();
+    let secret = module.push(Inode::Secret(SecretBytes::from("hunter2-secret")));
+    module.bind("secret", secret);
+    module.set_provenance(Some(Provenance {
+        producer: Some("tester".into()),
+        timestamp_ms: 1,
+        model: None,
+        tool: None,
+        parent: None,
+        entries: vec![ProvEntry {
+            key: "note hunter2-secret".into(),
+            value: ProvValue::Text("value hunter2-secret".into()),
+        }],
+    }));
+    let bytes = encode(&module).unwrap();
+    // The secret itself lives in the secret heap by design; what must not
+    // survive is the *copy* in the provenance metadata.
+    let decoded = decode(&bytes).unwrap();
+    let entries = &decoded.provenance().unwrap().entries;
+    // Metadata keeps its non-secret text; only the copy is replaced.
+    assert_eq!(entries[0].key, "note ***SECRET***");
+    assert!(!entries[0].key.contains("hunter2-secret"));
+    assert_eq!(
+        entries[0].value,
+        ProvValue::Text("value ***SECRET***".to_string())
+    );
+}
+
+#[test]
 fn error_codes_are_stable_and_documented() {
     let expected = [
         (Error::Magic, "infinity/magic"),

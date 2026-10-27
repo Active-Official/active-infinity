@@ -85,7 +85,7 @@ pub enum Error {
     DuplicateField { node: u32 },
     /// A binding name repeats.
     DuplicateBinding,
-    /// A node participates in a dependency cycle.
+    /// A node is on a dependency cycle, or depends on one.
     Cycle { node: u32 },
     /// Nesting depth exceeds the configured limit while validating.
     Depth { limit: u32 },
@@ -234,7 +234,10 @@ impl fmt::Display for Error {
             Error::SecretEntry(id) => write!(f, "secret entry {id} is invalid"),
             Error::DuplicateField { node } => write!(f, "table node {node} repeats a field name"),
             Error::DuplicateBinding => write!(f, "duplicate binding name"),
-            Error::Cycle { node } => write!(f, "dependency cycle through node {node}"),
+            Error::Cycle { node } => write!(
+                f,
+                "dependency cycle: node {node} is on a cycle or depends on one"
+            ),
             Error::Depth { limit } => write!(f, "nesting deeper than {limit}"),
             Error::Limit { kind, limit } => write!(f, "{kind} limit {limit} exceeded"),
             Error::InvalidArgument(what) => write!(f, "invalid argument: {what}"),

@@ -114,7 +114,7 @@
 
 use crate::encode::{encode, hash_image};
 use crate::error::{Error, Result};
-use crate::interop::{project_node_with, redacted_key, secret_table, Projected};
+use crate::interop::{project_node_with, redacted_key, redacted_value, secret_table, Projected};
 use crate::ir::{AnnotationKind, InfinityModule, ProvValue};
 
 // ---------------------------------------------------------------------------
@@ -327,10 +327,10 @@ fn encode_annotation(annotation: &crate::ir::Annotation, secrets: &[String]) -> 
     let mut body = Vec::new();
     uint(&mut body, 1, annotation.node.index() as u64);
     match &annotation.kind {
-        AnnotationKind::Intent(text) => string(&mut body, 2, &redacted_key(text, secrets)),
+        AnnotationKind::Intent(text) => string(&mut body, 2, &redacted_value(text, secrets)),
         AnnotationKind::Constraint { source, expr } => {
             let mut constraint = Vec::new();
-            string(&mut constraint, 1, &redacted_key(source, secrets));
+            string(&mut constraint, 1, &redacted_value(source, secrets));
             uint(&mut constraint, 2, expr.index() as u64);
             message(&mut body, 3, &constraint);
         }
@@ -344,18 +344,18 @@ fn encode_provenance(prov: &crate::ir::Provenance, secrets: &[String]) -> Vec<u8
     string(
         &mut body,
         1,
-        &redacted_key(prov.producer.as_deref().unwrap_or(""), secrets),
+        &redacted_value(prov.producer.as_deref().unwrap_or(""), secrets),
     );
     uint(&mut body, 2, prov.timestamp_ms);
     string(
         &mut body,
         3,
-        &redacted_key(prov.model.as_deref().unwrap_or(""), secrets),
+        &redacted_value(prov.model.as_deref().unwrap_or(""), secrets),
     );
     string(
         &mut body,
         4,
-        &redacted_key(prov.tool.as_deref().unwrap_or(""), secrets),
+        &redacted_value(prov.tool.as_deref().unwrap_or(""), secrets),
     );
     if let Some(parent) = &prov.parent {
         bytes(&mut body, 5, parent);
@@ -364,7 +364,7 @@ fn encode_provenance(prov: &crate::ir::Provenance, secrets: &[String]) -> Vec<u8
         let mut encoded = Vec::new();
         string(&mut encoded, 1, &redacted_key(&entry.key, secrets));
         match &entry.value {
-            ProvValue::Text(text) => string(&mut encoded, 2, &redacted_key(text, secrets)),
+            ProvValue::Text(text) => string(&mut encoded, 2, &redacted_value(text, secrets)),
             ProvValue::Int(number) => sint(&mut encoded, 3, *number),
             ProvValue::Flag(flag) => boolean(&mut encoded, 4, *flag),
             ProvValue::Hash(hash) => bytes(&mut encoded, 5, hash),

@@ -1,16 +1,35 @@
-# name expected_code
+# name expected_code [limits=key:value,...] [verify=canonical]
 bad_magic infinity/magic
 bad_major infinity/version-major
 bad_minor infinity/version-minor
+header_truncated infinity/header-truncated
 bad_header_size infinity/header-size
 bad_flags infinity/flags
+reserved infinity/reserved
+bad_dialect infinity/dialect
 truncated infinity/truncated
 trailing infinity/trailing-bytes
 bad_hash infinity/hash-mismatch
 count_bomb infinity/count
 short_count infinity/count
 bad_offset infinity/offset
-bad_unit infinity/unknown-unit
-bad_string_order infinity/offset
+limit infinity/limit limits=max_nodes:1
 bad_padding infinity/padding
+bad_unit infinity/unknown-unit
+unit_ref infinity/unit-ref
+bad_type infinity/type
+secret_entry infinity/secret-entry
+string_ref infinity/string-ref
+node_ref infinity/node-ref
+bad_node infinity/node
+bad_utf8 infinity/utf8
 bad_edge infinity/edge
+cycle infinity/cycle
+duplicate_field infinity/duplicate-field
+duplicate_binding infinity/duplicate-binding
+bad_annotation infinity/annotation
+bad_provenance infinity/provenance
+bad_extension infinity/extension
+too_deep infinity/depth limits=max_depth:8
+bad_blob infinity/blob
+not_canonical infinity/not-canonical verify=canonical

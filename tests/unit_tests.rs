@@ -616,3 +616,59 @@ fn error_codes_are_stable_and_documented() {
         assert!(!format!("{error}").is_empty());
     }
 }
+
+#[test]
+fn extension_blocks_round_trip_and_are_order_independent() {
+    let mut first = fixture();
+    first.add_extension(7, b"seven".to_vec());
+    first.add_extension(3, b"three".to_vec());
+    let mut second = fixture();
+    second.add_extension(3, b"three".to_vec());
+    second.add_extension(7, b"seven".to_vec());
+
+    // Canonical order makes the two construction orders one image.
+    let a = encode(&first).unwrap();
+    let b = encode(&second).unwrap();
+    assert_eq!(a, b, "extension order must not change the image");
+
+    let meta = validate(&a).unwrap();
+    assert_eq!(meta.extensions, 2, "the directory is accounted for");
+
+    let decoded = decode(&a).unwrap();
+    let extensions = decoded.extensions();
+    assert_eq!(extensions.len(), 2);
+    assert_eq!(extensions[0].0, 3);
+    assert_eq!(extensions[0].1, b"three".to_vec());
+    assert_eq!(extensions[1].0, 7);
+    assert_eq!(extensions[1].1, b"seven".to_vec());
+    assert_eq!(encode(&decoded).unwrap(), a, "extensions survive a decode");
+
+    // The zero-copy view sees the same directory.
+    let validated = active_infinity::Validated::new(&a, DecodeOpts::default()).unwrap();
+    let (tag, offset, len) = validated.extension_entry(1).unwrap();
+    assert_eq!(tag, 7);
+    assert_eq!(validated.extension_payload(offset, len).unwrap(), b"seven");
+}
+
+#[test]
+fn duplicate_extension_tags_are_refused() {
+    let mut module = fixture();
+    module.add_extension(5, b"first".to_vec());
+    module.add_extension(5, b"second".to_vec());
+    let error = encode(&module).expect_err("duplicate tags must not encode");
+    assert_eq!(error.code(), "infinity/encode");
+    assert!(format!("{error}").contains("duplicate extension tag"));
+}
+
+#[test]
+fn an_extension_flag_without_blocks_is_rejected() {
+    let mut bytes = encode(&fixture()).unwrap();
+    let header = active_infinity::layout::Header::parse(&bytes).unwrap();
+    assert_eq!(header.span(active_infinity::Section::Extensions).count, 0);
+    let flags = u16::from_le_bytes([bytes[8], bytes[9]]) | active_infinity::layout::FLAG_EXTENSIONS;
+    bytes[8..10].copy_from_slice(&flags.to_le_bytes());
+    let hash = hash_image(&bytes).unwrap();
+    bytes[16..48].copy_from_slice(&hash);
+    let error = validate(&bytes).expect_err("a flag without blocks must be rejected");
+    assert_eq!(error.code(), "infinity/extension");
+}

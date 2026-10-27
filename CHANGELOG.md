@@ -1,13 +1,44 @@
 # Changelog — Active Infinity
 
+## 1.2.0 — 2026-10-27
+
+No wire-format change: images written by 1.1.x remain valid and canonical. This
+release adds a binary interop projection, first-class extension blocks, and a
+conformance suite that covers every byte-reachable failure class in the
+specification.
+
+- **Protobuf projection.** `to_protobuf` renders a module as Protobuf wire
+  format for consumers in other languages: root value, bindings, annotations,
+  provenance, extensions, and the canonical image's Blake3 hash and size. The
+  encoding is deterministic and redacted, uses no new dependency, and is
+  documented in `docs/spec/projection.md` and ADR-0009. An independent reader in
+  `tests/protobuf_tests.rs` checks the bytes.
+- **One redacted tree for both projections.** `interop::Projected` is built once
+  and rendered to JSON or Protobuf, so the two projections cannot disagree about
+  what is safe to expose. `to_redacted_json` output is unchanged.
+- **Extension blocks are first-class in the API.** `InfinityModule::add_extension`,
+  `extensions` and `set_extensions` carry application-defined `(tag, payload)`
+  blocks; encoding sorts them by tag and refuses duplicates, decoding returns
+  them, and the validator checks the directory, payload order and the section's
+  end.
+- **Acyclicity is its own validation step.** A cycle is reported as
+  `infinity/cycle` after reachability instead of surfacing as a depth failure,
+  so a peer can tell "too deep" from "cyclic". The check is iterative.
+- **Duplicate table fields name their node.** A repeated field key reports
+  `infinity/duplicate-field { node }`; an unsorted key still reports
+  `infinity/node`.
+- **Conformance vectors cover the specification.** 34 invalid images and 9
+  invalid streams, one per byte-reachable failure class, plus a
+  specification-to-vector test: a new error code fails the suite until it has a
+  vector or an explicit, justified waiver.
+
 ## 1.1.3 — 2026-10-27
 
 - **Begin respects the caller's ceilings.** The declared stream size is compared
   with the decoder's own max_total_bytes, not the defaults.
 - **Text projections redact keys and intent text.** provenance_lines redacts
   entry keys and intents() redacts intent text against the module's secret
-  literals, matching the JSON projection. New helpers: secret_texts,
-  edact_text.
+  literals, matching the JSON projection. New helpers: `secret_texts` and `redact_text`.
 
 ## 1.1.2 — 2026-10-27
 

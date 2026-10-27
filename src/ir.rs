@@ -931,6 +931,7 @@ pub struct InfinityModule {
     bindings: Vec<(String, NodeId)>,
     annotations: Vec<Annotation>,
     provenance: Option<Provenance>,
+    extensions: Vec<(u64, Vec<u8>)>,
 }
 
 impl PartialEq for InfinityModule {
@@ -1088,6 +1089,25 @@ impl InfinityModule {
                 .iter()
                 .zip(right.nodes.iter())
                 .all(|(a, b)| node_eq(a, b))
+    }
+
+    /// Append an extension block (tag, payload).
+    ///
+    /// Tags are unique; the canonical encoder sorts blocks by tag and refuses a
+    /// duplicate. Extension payloads are opaque bytes owned by the application;
+    /// the codec never interprets them.
+    pub fn add_extension(&mut self, tag: u64, payload: impl Into<Vec<u8>>) {
+        self.extensions.push((tag, payload.into()));
+    }
+
+    /// Extension blocks, in stored order.
+    pub fn extensions(&self) -> &[(u64, Vec<u8>)] {
+        &self.extensions
+    }
+
+    /// Replace the extension set.
+    pub fn set_extensions(&mut self, extensions: Vec<(u64, Vec<u8>)>) {
+        self.extensions = extensions;
     }
 
     pub fn set_provenance(&mut self, provenance: Option<Provenance>) {
@@ -1335,6 +1355,7 @@ impl InfinityModule {
             bindings,
             annotations,
             provenance,
+            extensions: Vec::new(),
         }
     }
 }

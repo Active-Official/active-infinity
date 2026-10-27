@@ -1,4 +1,6 @@
-# name total_size content_hash nodes strings blobs
+# name total_size content_hash nodes strings blobs [canonical=no]
 empty 232 c88757d688a39ad85bc3e0c6a034adf472e92690e4d8ddaaf946e530a6e92b01 0 0 0
+extensions 464 1565114f6fa28d5d4e77f80d0374fac084714c455346395293e1296f1f64d696 3 3 0
 full 1248 83ccd859c5612acb087826eea302dc8c2f04218b13ee306cd1d5c7af8302aad0 12 14 0
 simple 416 38f031c72022c7907a694ddab7903083be882afa0418f046d1723dea7b2ed2f7 3 3 0
+non_canonical 424 8d311d44597e9663027285d916194c8c890436ccb75fef1981ca73f0c70065e8 3 4 0 canonical=no

@@ -323,8 +323,14 @@ pub(crate) fn prepare(module: &InfinityModule) -> Result<Prepared> {
         })
         .collect();
 
-    // Extensions: no public setter yet, so encode to an empty table.
-    let extensions: Vec<(u64, Vec<u8>)> = Vec::new();
+    // Extensions: sorted by tag, unique tags, payloads preserved verbatim.
+    let mut extensions: Vec<(u64, Vec<u8>)> = module.extensions().to_vec();
+    extensions.sort_by_key(|(tag, _)| *tag);
+    for window in extensions.windows(2) {
+        if window[0].0 == window[1].0 {
+            return Err(Error::Encode("duplicate extension tag"));
+        }
+    }
 
     let prepared = Prepared {
         nodes,

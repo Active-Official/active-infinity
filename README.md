@@ -94,7 +94,25 @@ cargo run --example generate_vectors # regenerate the conformance vectors
 
 The normative specification is [`docs/spec/layout.md`](docs/spec/layout.md);
 streaming is [`docs/spec/streaming.md`](docs/spec/streaming.md); the threat model
-is [`docs/spec/security.md`](docs/spec/security.md).
+is [`docs/spec/security.md`](docs/spec/security.md); projections for consumers
+outside Active are [`docs/spec/projection.md`](docs/spec/projection.md).
+
+## Projections
+
+A consumer that does not speak AINF can still read a module, and it can never
+read a secret through the projection.
+
+```rust
+use active_infinity::{to_protobuf, InfinityModule};
+
+let module = InfinityModule::new();
+let protobuf = to_protobuf(&module)?;                 // typed, for other languages
+let json = active_infinity::interop::to_redacted_json(&module)?;
+```
+
+Both projections render the same redacted tree, so they cannot disagree about
+what is safe to expose. The protobuf message carries the canonical content hash,
+which a consumer can use to fetch and verify the authoritative bytes.
 
 ## Feature flags
 

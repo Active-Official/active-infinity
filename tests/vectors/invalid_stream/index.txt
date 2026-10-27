@@ -1,0 +1,10 @@
+# name expected_code
+frame_magic infinity/stream-magic
+frame_version infinity/stream-version
+frame_kind infinity/stream-frame-kind
+frame_len infinity/stream-frame-len
+sequence infinity/stream-sequence
+state infinity/stream-state
+hash infinity/stream-hash
+delta infinity/stream-delta
+unterminated infinity/stream-unterminated

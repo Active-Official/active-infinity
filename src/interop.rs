@@ -19,13 +19,12 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
-#[cfg(any(feature = "active-core", feature = "json"))]
 use crate::error::{Error, Result};
-use crate::ir::{AnnotationKind, InfinityModule, Inode, NodeId, ProvEntry, ProvValue, Provenance};
-#[cfg(feature = "active-core")]
 use crate::ir::{
-    BinOp, Constraint, InterpPart, PatchOp, SchemaFieldSpec, SemanticTag, TypeSpec, UnOp,
+    AnnotationKind, InfinityModule, Inode, InterpPart, NodeId, ProvEntry, ProvValue, Provenance,
 };
+#[cfg(feature = "active-core")]
+use crate::ir::{BinOp, Constraint, PatchOp, SchemaFieldSpec, SemanticTag, TypeSpec, UnOp};
 #[cfg(feature = "active-core")]
 use crate::unit::UnitTag;
 
@@ -643,6 +642,209 @@ mod bridge {
 pub use bridge::{evaluate, from_active_core, to_active_core};
 
 // ---------------------------------------------------------------------------
+// Shared redacted projection tree
+// ---------------------------------------------------------------------------
+
+/// Deepest graph the projection will follow. A validated module is at most
+/// `Limits::max_depth` deep; this is a second, independent stop so a
+/// hand-built module cannot exhaust the stack.
+const PROJECTION_DEPTH: usize = 1024;
+
+/// A redacted projection of a module's value tree.
+///
+/// Both the JSON and the Protobuf projection render this tree. Building it once
+/// keeps the two from drifting, which matters because the redaction rules are
+/// security invariants and every renderer has to reproduce them exactly.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Projected {
+    /// No value (a missing root or a dangling reference).
+    Null,
+    /// A boolean.
+    Bool(bool),
+    /// A signed integer.
+    Int(i64),
+    /// A double-precision float.
+    Float(f64),
+    /// Text with secret material already removed or replaced by the marker.
+    Text(String),
+    /// A duration in milliseconds.
+    DurationMs(u64),
+    /// A value with a unit: the inner value plus the unit's name.
+    Quantity(Box<Projected>, String),
+    /// Ordered list elements.
+    Array(Vec<Projected>),
+    /// A table, in canonical field order. Keys are already redacted.
+    Record(Vec<(String, Projected)>),
+    /// A blob by identity. Payloads are never projected.
+    Blob {
+        /// Blake3-256 of the payload.
+        hash: [u8; 32],
+        /// Payload size in bytes.
+        size: u64,
+        /// Media type, redacted when the blob is tainted.
+        media_type: String,
+        /// Whether the blob carries secret-derived bytes.
+        tainted: bool,
+    },
+    /// An environment lookup, by name.
+    Env(String),
+    /// A node kind that has no data projection (an operator, a schema, a patch).
+    Expr(&'static str),
+}
+
+/// Project a module's root value with every secret redacted.
+///
+/// A projection walks the graph recursively, so a module with cycles or
+/// dangling references is refused instead of risking the stack. The Protobuf
+/// projection starts from [`project_node_with`] because it already holds the
+/// secret table and the encoded image.
+#[cfg(feature = "json")]
+pub(crate) fn project_root(module: &InfinityModule) -> Result<Projected> {
+    module.validate_structure(u32::MAX as u64, 4096)?;
+    let secrets = secret_texts(module);
+    build_projected(module, module.root(), &secrets, 0)
+}
+
+/// The module's secret literals, for a caller that projects many nodes.
+pub(crate) fn secret_table(module: &InfinityModule) -> Vec<String> {
+    secret_texts(module)
+}
+
+/// Project one node with an already-computed secret table.
+pub(crate) fn project_node_with(
+    module: &InfinityModule,
+    id: NodeId,
+    secrets: &[String],
+) -> Result<Projected> {
+    build_projected(module, Some(id), secrets, 0)
+}
+
+/// A value-position string: the whole text becomes the marker as soon as it
+/// contains a secret literal, so a partial copy cannot leak.
+fn redacted_value(text: &str, secrets: &[String]) -> String {
+    if secrets
+        .iter()
+        .any(|secret| !secret.is_empty() && text.contains(secret.as_str()))
+    {
+        SECRET_MARKER.to_string()
+    } else {
+        text.to_string()
+    }
+}
+
+/// A key-position string: every occurrence of every secret is replaced, so a
+/// key that merely contains a copy of a secret does not leak it.
+pub(crate) fn redacted_key(text: &str, secrets: &[String]) -> String {
+    let mut out = text.to_string();
+    for secret in secrets {
+        if secret.is_empty() || !out.contains(secret.as_str()) {
+            continue;
+        }
+        out = out.replace(secret.as_str(), SECRET_MARKER);
+    }
+    out
+}
+
+fn is_secret(module: &InfinityModule, id: NodeId) -> bool {
+    module.get(id).map(|node| node.is_secret()).unwrap_or(false)
+}
+
+fn build_projected(
+    module: &InfinityModule,
+    id: Option<NodeId>,
+    secrets: &[String],
+    depth: usize,
+) -> Result<Projected> {
+    if depth > PROJECTION_DEPTH {
+        return Err(Error::Encode("projection nesting exceeds the limit"));
+    }
+    let value = match id.and_then(|id| module.get(id)) {
+        None => Projected::Null,
+        Some(node) => match node {
+            Inode::Null => Projected::Null,
+            Inode::Bool(flag) => Projected::Bool(*flag),
+            Inode::Int(number) => Projected::Int(*number),
+            Inode::Float(number) => Projected::Float(*number),
+            Inode::Str(text) | Inode::Ident(text) => Projected::Text(redacted_value(text, secrets)),
+            Inode::DurationMs(ms) => Projected::DurationMs(*ms),
+            Inode::Quantity { value, unit } => Projected::Quantity(
+                Box::new(build_projected(module, Some(*value), secrets, depth + 1)?),
+                redacted_value(unit.name(), secrets),
+            ),
+            Inode::Array { elements } => Projected::Array(
+                elements
+                    .iter()
+                    .map(|id| build_projected(module, Some(*id), secrets, depth + 1))
+                    .collect::<Result<Vec<_>>>()?,
+            ),
+            Inode::Table { fields } => {
+                let mut projected = Vec::with_capacity(fields.len());
+                for (name, id) in fields {
+                    projected.push((
+                        redacted_key(name, secrets),
+                        build_projected(module, Some(*id), secrets, depth + 1)?,
+                    ));
+                }
+                Projected::Record(projected)
+            }
+            Inode::Secret(_) | Inode::SecretRef { .. } => {
+                Projected::Text(SECRET_MARKER.to_string())
+            }
+            Inode::Ref(id) => build_projected(module, Some(*id), secrets, depth + 1)?,
+            Inode::Env { name, .. } => Projected::Env(redacted_value(name, secrets)),
+            Inode::Interpolate { parts } => {
+                let mut text = String::new();
+                let mut tainted = false;
+                for part in parts {
+                    match part {
+                        InterpPart::Literal(literal) => text.push_str(literal),
+                        InterpPart::Expr(id) => match id.index() {
+                            _ if is_secret(module, *id) => tainted = true,
+                            _ => text.push_str("${}"),
+                        },
+                    }
+                }
+                if tainted {
+                    Projected::Text(SECRET_MARKER.to_string())
+                } else {
+                    Projected::Text(redacted_value(&text, secrets))
+                }
+            }
+            Inode::Binary { .. }
+            | Inode::Unary { .. }
+            | Inode::Constrained { .. }
+            | Inode::Patch(_)
+            | Inode::SchemaField(_)
+            | Inode::SchemaTable { .. }
+            | Inode::SchemaArray { .. }
+            | Inode::ContentAddressed { .. } => {
+                Projected::Expr(crate::view::node_kind_name(node.kind_code()))
+            }
+            Inode::Semantic { inner, .. } => {
+                build_projected(module, Some(*inner), secrets, depth + 1)?
+            }
+            Inode::Blob {
+                hash,
+                size,
+                tainted,
+                media_type,
+                ..
+            } => Projected::Blob {
+                hash: *hash,
+                size: *size,
+                media_type: if *tainted {
+                    SECRET_MARKER.to_string()
+                } else {
+                    redacted_key(media_type, secrets)
+                },
+                tainted: *tainted,
+            },
+        },
+    };
+    Ok(value)
+}
+
+// ---------------------------------------------------------------------------
 // Redacted JSON projection
 // ---------------------------------------------------------------------------
 
@@ -658,179 +860,66 @@ mod projection {
     /// - quantities project `{"value": n, "unit": "<name>"}`;
     /// - annotations and provenance project as data, never as executable text.
     pub fn to_redacted_json(module: &InfinityModule) -> Result<String> {
-        // A projection walks the graph recursively; refuse a module that has
-        // cycles or dangling references instead of risking the stack.
-        module.validate_structure(u32::MAX as u64, 4096)?;
-        let secrets = secret_literals(module);
-        let value = build_value(module, module.root(), &secrets, 0)?;
+        let value = to_serde(&project_root(module)?);
         serde_json::to_string(&value).map_err(|_| Error::Encode("json projection failed"))
     }
 
     /// Pretty-printed form of [`to_redacted_json`].
     pub fn to_redacted_json_pretty(module: &InfinityModule) -> Result<String> {
-        module.validate_structure(u32::MAX as u64, 4096)?;
-        let secrets = secret_literals(module);
-        let value = build_value(module, module.root(), &secrets, 0)?;
+        let value = to_serde(&project_root(module)?);
         serde_json::to_string_pretty(&value).map_err(|_| Error::Encode("json projection failed"))
     }
 
-    /// Every secret literal in the module, as bytes. Used to redact copies.
+    /// Every secret literal in the module, as text. Used to redact copies.
     pub fn secret_literals(module: &InfinityModule) -> Vec<String> {
-        module
-            .nodes()
-            .iter()
-            .filter_map(|node| match node {
-                Inode::Secret(secret) => {
-                    Some(String::from_utf8_lossy(secret.expose()).into_owned())
-                }
-                _ => None,
-            })
-            .collect()
+        secret_texts(module)
     }
 
-    /// Redact every occurrence of a secret in a string, preserving the plain
-    /// text when nothing matches.
-    fn redact_plain(text: &str, secrets: &[String]) -> String {
-        let mut out = text.to_string();
-        for secret in secrets {
-            if secret.is_empty() || !out.contains(secret.as_str()) {
-                continue;
+    /// Render a projected value as JSON.
+    fn to_serde(value: &Projected) -> serde_json::Value {
+        match value {
+            Projected::Null => serde_json::Value::Null,
+            Projected::Bool(flag) => serde_json::Value::from(*flag),
+            Projected::Int(number) => serde_json::Value::from(*number),
+            Projected::Float(number) => serde_json::Value::from(*number),
+            Projected::Text(text) => serde_json::Value::from(text.clone()),
+            Projected::DurationMs(ms) => serde_json::json!({ "ms": ms }),
+            Projected::Quantity(value, unit) => serde_json::json!({
+                "value": to_serde(value),
+                "unit": unit,
+            }),
+            Projected::Array(items) => {
+                serde_json::Value::Array(items.iter().map(to_serde).collect())
             }
-            out = out.replace(secret.as_str(), SECRET_MARKER);
+            Projected::Record(fields) => {
+                let mut map = serde_json::Map::new();
+                for (name, value) in fields {
+                    map.insert(name.clone(), to_serde(value));
+                }
+                serde_json::Value::Object(map)
+            }
+            Projected::Blob {
+                hash,
+                size,
+                media_type,
+                tainted,
+            } => serde_json::json!({
+                "$active.blob": {
+                    "hash": format!("blake3:{}", crate::ir::hash_hex(hash)),
+                    "size": size,
+                    "media_type": media_type,
+                    "tainted": tainted,
+                }
+            }),
+            Projected::Env(name) => serde_json::json!({ "$env": name }),
+            Projected::Expr(kind) => serde_json::json!({ "$expr": kind }),
         }
-        out
-    }
-
-    /// A redacted value for a text field.
-    fn key_string(text: &str, secrets: &[String]) -> String {
-        redact_plain(text, secrets)
-    }
-
-    fn redact_string(text: &str, secrets: &[String]) -> serde_json::Value {
-        if secrets
-            .iter()
-            .any(|secret| !secret.is_empty() && text.contains(secret.as_str()))
-        {
-            serde_json::Value::from(SECRET_MARKER)
-        } else {
-            serde_json::Value::from(text)
-        }
-    }
-
-    /// Deepest graph the projection will follow. A validated module is at most
-    /// `Limits::max_depth` deep; this is a second, independent stop so a
-    /// hand-built module cannot exhaust the stack.
-    const PROJECTION_DEPTH: usize = 1024;
-
-    fn build_value(
-        module: &InfinityModule,
-        id: Option<NodeId>,
-        secrets: &[String],
-        depth: usize,
-    ) -> Result<serde_json::Value> {
-        if depth > PROJECTION_DEPTH {
-            return Err(Error::Encode("projection nesting exceeds the limit"));
-        }
-        let value = match id.and_then(|id| module.get(id)) {
-            None => serde_json::Value::Null,
-            Some(node) => match node {
-                Inode::Null => serde_json::Value::Null,
-                Inode::Bool(flag) => serde_json::Value::from(*flag),
-                Inode::Int(number) => serde_json::Value::from(*number),
-                Inode::Float(number) => serde_json::Value::from(*number),
-                Inode::Str(text) | Inode::Ident(text) => redact_string(text, secrets),
-                Inode::DurationMs(ms) => serde_json::json!({ "ms": ms }),
-                Inode::Quantity { value, unit } => serde_json::json!({
-                    "value": build_value(module, Some(*value), secrets, depth + 1)?,
-                    "unit": redact_string(unit.name(), secrets),
-                }),
-                Inode::Array { elements } => serde_json::Value::Array(
-                    elements
-                        .iter()
-                        .map(|id| build_value(module, Some(*id), secrets, depth + 1))
-                        .collect::<Result<Vec<_>>>()?,
-                ),
-                Inode::Table { fields } => {
-                    let mut map = serde_json::Map::new();
-                    for (name, id) in fields {
-                        // A key can be a copy of a secret literal too; redact it
-                        // like any other string.
-                        map.insert(
-                            key_string(name, secrets),
-                            build_value(module, Some(*id), secrets, depth + 1)?,
-                        );
-                    }
-                    serde_json::Value::Object(map)
-                }
-                Inode::Secret(_) | Inode::SecretRef { .. } => {
-                    serde_json::Value::from(SECRET_MARKER)
-                }
-                Inode::Ref(id) => build_value(module, Some(*id), secrets, depth + 1)?,
-                Inode::Env { name, .. } => {
-                    serde_json::json!({ "$env": redact_string(name, secrets) })
-                }
-                Inode::Interpolate { parts } => {
-                    let mut text = String::new();
-                    let mut tainted = false;
-                    for part in parts {
-                        match part {
-                            InterpPart::Literal(literal) => text.push_str(literal),
-                            InterpPart::Expr(id) => match id.index() {
-                                _ if is_secret(module, *id) => tainted = true,
-                                _ => text.push_str("${}"),
-                            },
-                        }
-                    }
-                    if tainted {
-                        serde_json::Value::from(SECRET_MARKER)
-                    } else {
-                        redact_string(&text, secrets)
-                    }
-                }
-                Inode::Binary { .. }
-                | Inode::Unary { .. }
-                | Inode::Constrained { .. }
-                | Inode::Patch(_)
-                | Inode::SchemaField(_)
-                | Inode::SchemaTable { .. }
-                | Inode::SchemaArray { .. }
-                | Inode::ContentAddressed { .. } => {
-                    serde_json::json!({ "$expr": crate::view::node_kind_name(node.kind_code()) })
-                }
-                Inode::Semantic { inner, .. } => {
-                    build_value(module, Some(*inner), secrets, depth + 1)?
-                }
-                Inode::Blob {
-                    hash,
-                    size,
-                    tainted,
-                    media_type,
-                    ..
-                } => serde_json::json!({
-                    "$active.blob": {
-                        "hash": format!("blake3:{}", crate::ir::hash_hex(hash)),
-                        "size": size,
-                        "media_type": if *tainted {
-                            SECRET_MARKER.to_string()
-                        } else {
-                            redact_plain(media_type, secrets)
-                        },
-                        "tainted": tainted,
-                    }
-                }),
-            },
-        };
-        Ok(value)
-    }
-
-    fn is_secret(module: &InfinityModule, id: NodeId) -> bool {
-        module.get(id).map(|node| node.is_secret()).unwrap_or(false)
     }
 
     /// Project provenance as JSON, redacting every text field and key against
     /// `secrets` (the module's secret literals).
     pub fn provenance_json(prov: &Provenance, secrets: &[String]) -> serde_json::Value {
-        let text = |value: &str| redact_string(value, secrets);
+        let text = |value: &str| serde_json::Value::from(redacted_value(value, secrets));
         let mut map = serde_json::Map::new();
         if let Some(producer) = &prov.producer {
             map.insert("producer".into(), text(producer));
@@ -861,7 +950,7 @@ mod projection {
                 ProvValue::Flag(flag) => serde_json::Value::from(*flag),
                 ProvValue::Hash(hash) => serde_json::Value::from(crate::ir::hash_hex(hash)),
             };
-            entries.insert(key_string(&entry.key, secrets), value);
+            entries.insert(redacted_key(&entry.key, secrets), value);
         }
         map.insert("entries".into(), serde_json::Value::Object(entries));
         serde_json::Value::Object(map)

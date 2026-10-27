@@ -70,9 +70,21 @@ pub fn decode_validated(validated: &Validated<'_>) -> Result<InfinityModule> {
     }
 
     let provenance = validated.provenance()?;
-    let module = InfinityModule::from_parts(nodes, root, bindings, annotations, provenance);
+    let mut module = InfinityModule::from_parts(nodes, root, bindings, annotations, provenance);
+    module.set_extensions(decode_extensions(validated)?);
     module.validate_structure(u32::MAX as u64, 0)?;
     Ok(module)
+}
+
+/// Read the extension directory and its payloads back into the module.
+fn decode_extensions(validated: &Validated<'_>) -> Result<Vec<(u64, Vec<u8>)>> {
+    let count = validated.span(crate::layout::Section::Extensions).count;
+    let mut out = Vec::with_capacity(count as usize);
+    for index in 0..count {
+        let (tag, offset, len) = validated.extension_entry(index)?;
+        out.push((tag, validated.extension_payload(offset, len)?.to_vec()));
+    }
+    Ok(out)
 }
 
 fn decode_node(validated: &Validated<'_>, id: NodeId) -> Result<Inode> {

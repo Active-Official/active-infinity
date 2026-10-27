@@ -287,8 +287,13 @@ duplicate keys are refused). The block length must equal `96 + 16 * count`.
 `count` directory entries of 16 bytes `{ tag u64, payload offset u32, payload
 length u32 }`, followed by payloads. Tags are unique and strictly increasing;
 payload offsets are absolute image offsets, aligned, non-overlapping and inside
-the section (`infinity/extension`). Tag `1` is reserved for future use by this
-specification; other tags are application-defined.
+the section (`infinity/extension`). The directory ends where the first payload
+begins, payloads are packed in tag order with each starting at the next
+multiple of 8, and the last payload ends the section body: padding to the next
+section is zero. Tag `1` is reserved for future use by this specification;
+other tags are application-defined and opaque to this layer, so an
+implementation that does not understand a tag can still copy it through
+unchanged.
 
 ### 4.7 Units
 
@@ -432,9 +437,10 @@ first failure:
    (`infinity/edge`), annotations (`infinity/annotation`), provenance
    (`infinity/provenance`), extensions (`infinity/extension`);
 8. reachability and binding order (`infinity/node`, `infinity/duplicate-binding`);
-9. depth (`infinity/depth`);
-10. content hash (`infinity/hash-mismatch`);
-11. optional canonical re-encode (`infinity/not-canonical`).
+9. acyclicity (`infinity/cycle`);
+10. depth (`infinity/depth`);
+11. content hash (`infinity/hash-mismatch`);
+12. optional canonical re-encode (`infinity/not-canonical`).
 
 Traversal is iterative: a 4-million-node chain must not overflow the stack.
 Allocation is bounded by the validated counts, never by header claims.

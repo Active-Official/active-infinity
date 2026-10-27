@@ -112,6 +112,7 @@ impl<'a> Validated<'a> {
         validated.check_provenance(limits)?;
         validated.check_extensions()?;
         validated.check_reachability(limits)?;
+        validated.check_acyclic()?;
         validated.check_depth(limits)?;
 
         if opts.verify_hash {
@@ -454,6 +455,41 @@ impl<'a> Validated<'a> {
         let mut hash = [0u8; 32];
         hash.copy_from_slice(&self.buf[offset..offset + 32]);
         Ok(hash)
+    }
+
+    /// Read one extension directory entry: (tag, payload offset, payload len).
+    pub fn extension_entry(&self, index: u32) -> Result<(u64, u32, u32)> {
+        let count = self.header.span(Section::Extensions).count;
+        if index >= count {
+            return Err(Error::Extension {
+                tag: index as u64,
+                reason: "index out of range",
+            });
+        }
+        let offset = self.header.span(Section::Extensions).offset as usize + index as usize * 16;
+        Ok((
+            read_u64(self.buf, offset)?,
+            read_u32(self.buf, offset + 8)?,
+            read_u32(self.buf, offset + 12)?,
+        ))
+    }
+
+    /// Borrow an extension payload (zero copy).
+    pub fn extension_payload(&self, offset: u32, len: u32) -> Result<&'a [u8]> {
+        let start = offset as usize;
+        let end = start.checked_add(len as usize).ok_or(Error::Extension {
+            tag: 0,
+            reason: "payload length overflows",
+        })?;
+        let section = self.header.span(Section::Extensions);
+        if start < section.offset as usize || end > self.ends[Section::Extensions as usize] as usize
+        {
+            return Err(Error::Extension {
+                tag: 0,
+                reason: "payload out of range",
+            });
+        }
+        Ok(&self.buf[start..end])
     }
 
     /// Parse the provenance block.
@@ -1099,7 +1135,10 @@ impl<'a> Validated<'a> {
                         string(name)?;
                         node(node_id.0 as u64)?;
                         if let Some(previous) = previous {
-                            if previous >= name {
+                            if previous == name {
+                                return Err(Error::DuplicateField { node: index });
+                            }
+                            if previous > name {
                                 return Err(Error::Node {
                                     id: index,
                                     reason: "table fields not sorted by key",
@@ -1751,11 +1790,53 @@ impl<'a> Validated<'a> {
             }
             previous_end = payload_offset + payload_len;
         }
-        if align8(previous_end) != end {
+        // `section_end` already reports the unaligned end of the last payload;
+        // the padding up to `align8(end)` belongs to the inter-section gap and
+        // is checked for zeroes by `validate_layout`.
+        if previous_end != end {
             return Err(Error::Extension {
                 tag: 0,
                 reason: "extension section has trailing bytes",
             });
+        }
+        Ok(())
+    }
+
+    /// Reject a dependency cycle with its own code.
+    ///
+    /// The depth ceiling would also stop a cycle, but it would report `depth`;
+    /// a peer needs to distinguish "too deep" from "cyclic" (the text language
+    /// treats a cycle as fatal before any value exists).
+    fn check_acyclic(&self) -> Result<()> {
+        let count = self.node_count();
+        // 0 = unvisited, 1 = on the stack, 2 = done.
+        let mut state = vec![0u8; count as usize];
+        let mut scratch: Vec<u32> = Vec::new();
+        let mut stack: Vec<(u32, usize)> = Vec::new();
+        for start in 0..count {
+            if state[start as usize] != 0 {
+                continue;
+            }
+            stack.push((start, 0));
+            state[start as usize] = 1;
+            while let Some((node, cursor)) = stack.pop() {
+                let rec = self.node(NodeId(node))?;
+                self.node_children_into(&rec, &mut scratch)?;
+                if cursor < scratch.len() {
+                    stack.push((node, cursor + 1));
+                    let next = scratch[cursor];
+                    match state[next as usize] {
+                        0 => {
+                            state[next as usize] = 1;
+                            stack.push((next, 0));
+                        }
+                        1 => return Err(Error::Cycle { node: next }),
+                        _ => {}
+                    }
+                } else {
+                    state[node as usize] = 2;
+                }
+            }
         }
         Ok(())
     }

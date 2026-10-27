@@ -64,6 +64,7 @@ pub mod error;
 pub mod interop;
 pub mod ir;
 pub mod layout;
+pub mod protobuf;
 pub mod stream;
 pub mod unit;
 pub mod validate;
@@ -81,6 +82,7 @@ pub use layout::{
     dialect_hash, DecodeOpts, EncodeOpts, Limits, Meta, Section, FLAG_CANONICAL, FORMAT_MAJOR,
     FORMAT_MINOR, HEADER_SIZE,
 };
+pub use protobuf::to_protobuf;
 pub use stream::{Frame, FrameKind, StreamDecoder, StreamEncoder};
 pub use unit::UnitTag;
 pub use validate::{validate, validate_canonical, validate_with, Validated};

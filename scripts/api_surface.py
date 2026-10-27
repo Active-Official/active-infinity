@@ -38,7 +38,16 @@ ALLOW = {
 RAW_TOKENS = {"String", "str", "u8", "char"}
 
 
+# The rustdoc index, set once in `main`, so alias resolution can look items up.
+_INDEX: dict = {}
+
+
 def type_tokens(node, out: set[str], depth: int = 0) -> None:
+    """Collect type names, following crate-local `type` aliases.
+
+    Alias resolution matters: `type Bytes = Vec<u8>; pub fn secret_x() -> Bytes`
+    would otherwise contribute only the token `Bytes`.
+    """
     if depth > 24 or node is None:
         return
     if isinstance(node, dict):
@@ -49,6 +58,13 @@ def type_tokens(node, out: set[str], depth: int = 0) -> None:
         if "resolved_path" in node:
             path = node["resolved_path"].get("path") or ""
             out.add(path.split("::")[-1])
+            target = _INDEX.get(str(node["resolved_path"].get("id")))
+            # Rustdoc JSON spells a type alias `inner.type_alias` with the
+            # aliased type under `.type`; follow it so an alias cannot hide a
+            # raw return type.
+            alias = (target or {}).get("inner", {}).get("type_alias")
+            if alias:
+                type_tokens(alias.get("type"), out, depth + 1)
         for value in node.values():
             type_tokens(value, out, depth + 1)
     elif isinstance(node, list):
@@ -98,6 +114,8 @@ def main(argv: list[str]) -> int:
     with open(argv[1], encoding="utf-8") as handle:
         doc = json.load(handle)
     index = doc.get("index", {})
+    global _INDEX
+    _INDEX = index
 
     findings: list[str] = []
     for item in index.values():

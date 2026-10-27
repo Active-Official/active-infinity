@@ -226,3 +226,18 @@ Evidence: `guard-probe-matrix.log` (tripwire), `tripwire-probe.log` (six shapes)
 `semantic-gate-probe.log` (free function), `semantic-gate-trait-probe.log` (trait
 method and glob). Each probe fails the relevant gate and is reverted; the working
 tree is clean afterwards.
+
+## Round 18 — 2026-10-27 (verification of 2.0.4, 2.0.5)
+
+The reviewer audited the semantic gate's blind spots (public fields, consts,
+aliases, `doc(hidden)`, macros, traits, the allowlist, `SecretBytes`) and found
+no active leak: `SecretBytes`'s field is private, `expose` is crate-only,
+Debug/Display redact, equality is always false, and the only raw-byte fields are
+the caller's own image, hashes, or redacted metadata. One hardening item:
+
+| Finding | Severity | Disposition |
+|---|---|---|
+| `scripts/api_surface.py` did not resolve crate-local type aliases, so `pub type Bytes = Vec<u8>` plus `pub fn secret_x() -> Bytes` would have passed | low | fixed in 2.0.5: the resolver reads `inner.type_alias.type`; a probe that injects exactly that pair makes the gate fail, and is reverted |
+
+No such alias existed in the crate at the time (only `Result<T>`), so the gap was
+latent rather than exploitable.

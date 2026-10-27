@@ -1,5 +1,17 @@
 # Changelog — Active Infinity
 
+## 2.0.5 — 2026-10-27
+
+Tooling release; no API or wire change.
+
+- **The semantic gate resolves crate-local type aliases.** It looked for the
+  alias target under the wrong rustdoc key, so a module that introduced
+  `pub type Bytes = Vec<u8>` and `pub fn secret_x() -> Bytes` would have passed.
+  It now follows `inner.type_alias.type`, so the resolved return type is checked
+  through any number of aliases. Proven by a probe that injects exactly that pair:
+  the gate fails with `public secret_alias returns raw ['u8']`, then the probe is
+  reverted.
+
 ## 2.0.4 — 2026-10-27
 
 The secret-surface check is now semantic. No API or wire change.

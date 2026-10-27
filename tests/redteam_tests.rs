@@ -595,3 +595,106 @@ fn review_json_projection_refuses_cycles_instead_of_recursing() {
     assert!(outcome.is_ok(), "projection recursed on a cycle");
     assert!(outcome.unwrap().is_err(), "cyclic module projected");
 }
+
+#[test]
+fn review_delta_fragments_honor_the_stream_limits() {
+    // Build a fragment image with more nodes than the decoder's limit allows,
+    // pack it into a Delta frame, and feed it to a decoder with strict limits.
+    // A chain keeps every node reachable, so canonicalization keeps them all.
+    let mut fragment = InfinityModule::new();
+    let mut current = fragment.push(Inode::Int(0));
+    for index in 0..128 {
+        current = fragment.push(Inode::Ref(current));
+        let _ = index;
+    }
+    fragment.set_root(Some(current));
+    let fragment_bytes = encode(&fragment).unwrap();
+
+    let mut payload = Vec::new();
+    let ops = 1u32;
+    payload.extend_from_slice(&ops.to_le_bytes());
+    payload.push(1); // PutNode
+    payload.extend_from_slice(&0u32.to_le_bytes()); // target
+    payload.extend_from_slice(&(fragment_bytes.len() as u32).to_le_bytes());
+    payload.extend_from_slice(&fragment_bytes);
+    let mut decoder = StreamDecoder::new().with_limits(Limits {
+        max_nodes: 32,
+        ..Limits::default()
+    });
+    // A generation must be open and closed first; drive the state machine with
+    // the fixture's own frames, then the delta.
+    let module = fixture();
+    let frames = active_infinity::stream::encode_stream(&module, 1024).unwrap();
+    let delta = Frame::new(FrameKind::Delta, frames.len() as u64, payload);
+    for frame in &frames {
+        if let Err(error) = decoder.push(frame) {
+            panic!("generation frame failed: {error:?}");
+        }
+    }
+    let error = decoder.push(&delta).unwrap_err();
+    assert_eq!(error.code(), "infinity/limit", "{error:?}");
+}
+
+#[cfg(feature = "json")]
+#[test]
+fn review_projection_redacts_secret_copies_in_keys_and_metadata() {
+    const CANARY: &str = "leak-canary-42";
+    let mut module = InfinityModule::new();
+    let secret = module.push(Inode::Secret(SecretBytes::from(CANARY)));
+    let one = module.push(Inode::Int(1));
+    let env = module.push(Inode::Env {
+        name: CANARY.into(),
+        default: None,
+    });
+    let media = module.push(Inode::Str("text/plain".into()));
+    let ca = module.push(Inode::ContentAddressed {
+        media_type: media,
+        data: one,
+    });
+    let payload = b"x".to_vec();
+    let blob = module.push(Inode::Blob {
+        hash: *blake3::hash(&payload).as_bytes(),
+        size: payload.len() as u64,
+        tainted: false,
+        media_type: CANARY.into(),
+        payload: Some(payload),
+    });
+    let quantity = {
+        let number = module.push(Inode::Int(5));
+        module.push(Inode::Quantity {
+            value: number,
+            unit: UnitTag::Named(CANARY.into()),
+        })
+    };
+    let root = module.push(Inode::Table {
+        // The key is itself a copy of the secret.
+        fields: vec![
+            (CANARY.into(), secret),
+            ("env".into(), env),
+            ("ca".into(), ca),
+            ("blob".into(), blob),
+            ("quantity".into(), quantity),
+        ],
+    });
+    module.set_root(Some(root));
+    module.set_provenance(Some(Provenance {
+        producer: Some(CANARY.into()),
+        timestamp_ms: 1,
+        model: Some(CANARY.into()),
+        tool: None,
+        parent: None,
+        entries: vec![ProvEntry {
+            key: CANARY.into(),
+            value: ProvValue::Text(CANARY.into()),
+        }],
+    }));
+
+    let json = active_infinity::interop::to_redacted_json(&module).unwrap();
+    assert!(!json.contains(CANARY), "value projection leaked: {json}");
+    let pretty = active_infinity::interop::to_redacted_json_pretty(&module).unwrap();
+    assert!(!pretty.contains(CANARY), "pretty projection leaked");
+
+    let prov = active_infinity::interop::provenance_json_for(&module).expect("provenance");
+    let rendered = prov.to_string();
+    assert!(!rendered.contains(CANARY), "provenance projection leaked");
+}

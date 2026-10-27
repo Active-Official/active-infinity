@@ -656,6 +656,24 @@ mod projection {
             .collect()
     }
 
+    /// Redact every occurrence of a secret in a string, preserving the plain
+    /// text when nothing matches.
+    fn redact_plain(text: &str, secrets: &[String]) -> String {
+        let mut out = text.to_string();
+        for secret in secrets {
+            if secret.is_empty() || !out.contains(secret.as_str()) {
+                continue;
+            }
+            out = out.replace(secret.as_str(), SECRET_MARKER);
+        }
+        out
+    }
+
+    /// A redacted value for a text field.
+    fn key_string(text: &str, secrets: &[String]) -> String {
+        redact_plain(text, secrets)
+    }
+
     fn redact_string(text: &str, secrets: &[String]) -> serde_json::Value {
         if secrets
             .iter()
@@ -692,7 +710,7 @@ mod projection {
                 Inode::DurationMs(ms) => serde_json::json!({ "ms": ms }),
                 Inode::Quantity { value, unit } => serde_json::json!({
                     "value": build_value(module, Some(*value), secrets, depth + 1)?,
-                    "unit": unit.name(),
+                    "unit": redact_string(unit.name(), secrets),
                 }),
                 Inode::Array { elements } => serde_json::Value::Array(
                     elements
@@ -703,8 +721,10 @@ mod projection {
                 Inode::Table { fields } => {
                     let mut map = serde_json::Map::new();
                     for (name, id) in fields {
+                        // A key can be a copy of a secret literal too; redact it
+                        // like any other string.
                         map.insert(
-                            name.clone(),
+                            key_string(name, secrets),
                             build_value(module, Some(*id), secrets, depth + 1)?,
                         );
                     }
@@ -714,7 +734,9 @@ mod projection {
                     serde_json::Value::from(SECRET_MARKER)
                 }
                 Inode::Ref(id) => build_value(module, Some(*id), secrets, depth + 1)?,
-                Inode::Env { name, .. } => serde_json::json!({ "$env": name }),
+                Inode::Env { name, .. } => {
+                    serde_json::json!({ "$env": redact_string(name, secrets) })
+                }
                 Inode::Interpolate { parts } => {
                     let mut text = String::new();
                     let mut tainted = false;
@@ -756,7 +778,11 @@ mod projection {
                     "$active.blob": {
                         "hash": format!("blake3:{}", crate::ir::hash_hex(hash)),
                         "size": size,
-                        "media_type": if *tainted { SECRET_MARKER } else { media_type.as_str() },
+                        "media_type": if *tainted {
+                            SECRET_MARKER.to_string()
+                        } else {
+                            redact_plain(media_type, secrets)
+                        },
                         "tainted": tainted,
                     }
                 }),
@@ -769,11 +795,13 @@ mod projection {
         module.get(id).map(|node| node.is_secret()).unwrap_or(false)
     }
 
-    /// Project provenance as redacted JSON.
-    pub fn provenance_json(prov: &Provenance) -> serde_json::Value {
+    /// Project provenance as JSON, redacting every text field and key against
+    /// `secrets` (the module's secret literals).
+    pub fn provenance_json(prov: &Provenance, secrets: &[String]) -> serde_json::Value {
+        let text = |value: &str| redact_string(value, secrets);
         let mut map = serde_json::Map::new();
         if let Some(producer) = &prov.producer {
-            map.insert("producer".into(), serde_json::Value::from(producer.clone()));
+            map.insert("producer".into(), text(producer));
         }
         if prov.timestamp_ms != 0 {
             map.insert(
@@ -782,10 +810,10 @@ mod projection {
             );
         }
         if let Some(model) = &prov.model {
-            map.insert("model".into(), serde_json::Value::from(model.clone()));
+            map.insert("model".into(), text(model));
         }
         if let Some(tool) = &prov.tool {
-            map.insert("tool".into(), serde_json::Value::from(tool.clone()));
+            map.insert("tool".into(), text(tool));
         }
         if let Some(parent) = prov.parent {
             map.insert(
@@ -796,20 +824,31 @@ mod projection {
         let mut entries = serde_json::Map::new();
         for entry in &prov.entries {
             let value = match &entry.value {
-                ProvValue::Text(text) => serde_json::Value::from(text.clone()),
+                ProvValue::Text(t) => text(t),
                 ProvValue::Int(number) => serde_json::Value::from(*number),
                 ProvValue::Flag(flag) => serde_json::Value::from(*flag),
                 ProvValue::Hash(hash) => serde_json::Value::from(crate::ir::hash_hex(hash)),
             };
-            entries.insert(entry.key.clone(), value);
+            entries.insert(key_string(&entry.key, secrets), value);
         }
         map.insert("entries".into(), serde_json::Value::Object(entries));
         serde_json::Value::Object(map)
     }
+
+    /// Project a module's provenance, collecting its secret table first.
+    pub fn provenance_json_for(module: &InfinityModule) -> Option<serde_json::Value> {
+        let secrets = secret_literals(module);
+        module
+            .provenance()
+            .map(|prov| provenance_json(prov, &secrets))
+    }
 }
 
 #[cfg(feature = "json")]
-pub use projection::{provenance_json, secret_literals, to_redacted_json, to_redacted_json_pretty};
+pub use projection::{
+    provenance_json, provenance_json_for, secret_literals, to_redacted_json,
+    to_redacted_json_pretty,
+};
 
 // ---------------------------------------------------------------------------
 // Agent graph queries

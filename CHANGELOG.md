@@ -1,5 +1,15 @@
 # Changelog — Active Infinity
 
+## 1.1.2 — 2026-10-27
+
+- **Delta fragments honour the caller's limits.** A Delta fragment is decoded
+  and validated under StreamDecoder's Limits, so a strict consumer cannot be
+  handed a larger module through a delta than through a generation.
+- **Projection redaction covers metadata.** Table keys, unit names, environment
+  names, blob media types and every provenance text field are redacted against
+  the module's secret literals, not only values; provenance_json takes the
+  secret table and provenance_json_for(module) supplies it.
+
 ## 1.1.1 — 2026-10-27
 
 Security and correctness fixes from the independent review. No wire-format

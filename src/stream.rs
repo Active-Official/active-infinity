@@ -420,7 +420,7 @@ impl DeltaOp {
         Ok(())
     }
 
-    fn decode(buf: &[u8], cursor: &mut usize) -> Result<DeltaOp> {
+    fn decode(buf: &[u8], cursor: &mut usize, limits: crate::layout::Limits) -> Result<DeltaOp> {
         let tag = take_u8(buf, cursor)?;
         let op = match tag {
             0 => {
@@ -433,7 +433,7 @@ impl DeltaOp {
             }
             1 => {
                 let target = NodeId(take_u32(buf, cursor)?);
-                let fragment = Box::new(decode_fragment(buf, cursor)?);
+                let fragment = Box::new(decode_fragment(buf, cursor, limits)?);
                 DeltaOp::PutNode { target, fragment }
             }
             3 => {
@@ -771,8 +771,11 @@ impl StreamDecoder {
                     });
                 }
                 for _ in 0..count {
-                    self.pending_deltas
-                        .push(DeltaOp::decode(&frame.payload, &mut cursor)?);
+                    self.pending_deltas.push(DeltaOp::decode(
+                        &frame.payload,
+                        &mut cursor,
+                        self.limits,
+                    )?);
                 }
                 if cursor != frame.payload.len() {
                     return Err(Error::StreamDelta("trailing bytes in delta payload"));
@@ -1075,14 +1078,28 @@ fn take_opt_string(buf: &[u8], cursor: &mut usize) -> Result<Option<String>> {
     }
 }
 
-fn decode_fragment(buf: &[u8], cursor: &mut usize) -> Result<InfinityModule> {
+fn decode_fragment(
+    buf: &[u8],
+    cursor: &mut usize,
+    limits: crate::layout::Limits,
+) -> Result<InfinityModule> {
     let len = take_u32(buf, cursor)? as usize;
     if *cursor + len > buf.len() {
         return Err(Error::StreamDelta("truncated fragment"));
     }
     let bytes = &buf[*cursor..*cursor + len];
     *cursor += len;
-    crate::decode::decode(bytes)
+    // A fragment is a complete image: validate it under the *stream's* limits,
+    // not the defaults, so a delta cannot smuggle a larger module past a strict
+    // caller.
+    crate::decode::decode_with(
+        bytes,
+        crate::layout::DecodeOpts {
+            limits,
+            verify_hash: true,
+            verify_canonical: false,
+        },
+    )
 }
 
 /// Apply a list of delta operations and return the re-encoded hash.

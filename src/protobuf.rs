@@ -115,7 +115,8 @@
 use crate::encode::{encode, hash_image};
 use crate::error::{Error, Result};
 use crate::interop::{
-    first_entry_per_key, project_node_with, redacted_key, redacted_value, secret_table, Projected,
+    first_entry_per_key, project_node_with, redacted_key, redacted_value, secret_bytes,
+    secret_table, Projected,
 };
 use crate::ir::{AnnotationKind, InfinityModule, ProvValue};
 
@@ -252,8 +253,8 @@ fn encode_value(value: &Projected, out: &mut Vec<u8>) {
 ///
 /// The result is deterministic and redacted. The `content_hash` field is the
 /// Blake3-256 of the canonical AINF image, so a consumer can request or verify
-/// the authoritative bytes with [`crate::validate`] and the usual content
-/// addressing.
+/// the authoritative bytes with [`validate()`](crate::validate::validate) and the
+/// usual content addressing.
 ///
 /// The projection is built from the *canonical* module (the decode of its own
 /// encoded image), so two logically equal modules — which share their AINF
@@ -270,6 +271,9 @@ pub fn to_protobuf(module: &InfinityModule) -> Result<Vec<u8>> {
     let canonical = crate::decode::decode(&image)?;
     let module = &canonical;
     let secrets = secret_table(module);
+    // The extension check is byte-level, so it compares against the raw secret
+    // bytes, not their lossy text form.
+    let raw_secrets = secret_bytes(module);
 
     let mut out = Vec::new();
     bytes(&mut out, 1, &hash);
@@ -301,7 +305,7 @@ pub fn to_protobuf(module: &InfinityModule) -> Result<Vec<u8>> {
     }
 
     for (tag, payload) in module.extensions() {
-        if carries_secret(payload, &secrets) {
+        if carries_secret(payload, &raw_secrets) {
             return Err(Error::Encode(
                 "extension payload carries secret material; a projection must not copy it",
             ));
@@ -315,13 +319,12 @@ pub fn to_protobuf(module: &InfinityModule) -> Result<Vec<u8>> {
     Ok(out)
 }
 
-/// Whether an opaque payload contains a secret literal.
-fn carries_secret(payload: &[u8], secrets: &[String]) -> bool {
+/// Whether an opaque payload contains a secret literal, comparing raw bytes.
+fn carries_secret(payload: &[u8], secrets: &[Vec<u8>]) -> bool {
     secrets.iter().any(|secret| {
-        let bytes = secret.as_bytes();
-        !bytes.is_empty()
-            && bytes.len() <= payload.len()
-            && payload.windows(bytes.len()).any(|window| window == bytes)
+        !secret.is_empty()
+            && secret.len() <= payload.len()
+            && payload.windows(secret.len()).any(|window| window == secret)
     })
 }
 

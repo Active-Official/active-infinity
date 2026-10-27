@@ -49,6 +49,23 @@ pub fn secret_texts(module: &InfinityModule) -> Vec<String> {
         .collect()
 }
 
+/// Every secret literal in a module, as raw bytes.
+///
+/// Text redaction uses the lossy UTF-8 view ([`secret_texts`]) because it
+/// compares against UTF-8 text. A byte-level surface (an opaque extension
+/// payload) must compare against the real bytes: a secret that is not valid
+/// UTF-8 would otherwise be lossily converted and never match its own copy.
+pub fn secret_bytes(module: &InfinityModule) -> Vec<Vec<u8>> {
+    module
+        .nodes()
+        .iter()
+        .filter_map(|node| match node {
+            Inode::Secret(secret) => Some(secret.expose().to_vec()),
+            _ => None,
+        })
+        .collect()
+}
+
 /// Replace every occurrence of a secret in `text` with the marker.
 ///
 /// The rule is unconditional, including for one- and two-byte secrets: a short

@@ -1,5 +1,20 @@
 # Changelog — Active Infinity
 
+## 1.2.5 — 2026-10-27
+
+Fixes from adversarial verification. No wire-format change.
+
+- **A non-UTF-8 secret cannot leak through an extension payload.** The extension
+  check compared the payload against the *lossy text* form of each secret, so a
+  `SecretBytes::new(vec![0xff, 0xfe, 0x00])` copy never matched and the
+  projection emitted it. The check now compares raw secret bytes
+  (`interop::secret_bytes`), with a regression test covering a direct copy and one
+  embedded after a prefix.
+- **The documentation gate fails on rustdoc warnings.** An ambiguous intra-doc
+  link (`crate::validate`, both a module and a function) produced a rustdoc
+  warning that the previous `cargo doc` step accepted. The link now targets the
+  function, and both repositories run `cargo doc` with `RUSTDOCFLAGS=-D warnings`.
+
 ## 1.2.4 — 2026-10-27
 
 Fourth review pass; no wire-format change. The verification round after these

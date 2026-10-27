@@ -783,6 +783,32 @@ fn projection_refuses_an_extension_that_copies_a_secret() {
 }
 
 #[test]
+fn projection_refuses_an_extension_that_copies_a_non_utf8_secret() {
+    // `SecretBytes::new` accepts arbitrary bytes. The extension check must
+    // compare the raw bytes: a lossy UTF-8 conversion would never match the
+    // copy and the projection would leak it.
+    let raw = vec![0xff, 0xfe, 0x00, 0x41];
+    let mut module = InfinityModule::new();
+    let secret = module.push(Inode::Secret(SecretBytes::new(raw.clone())));
+    module.set_root(Some(secret));
+    module.add_extension(7, raw.clone());
+    let error = to_protobuf(&module).expect_err("a raw secret copy must not leave");
+    assert_eq!(error.code(), "infinity/encode");
+    assert!(error.to_string().contains("extension payload"));
+
+    // The same bytes split by an unrelated payload are still refused.
+    let mut module = InfinityModule::new();
+    let secret = module.push(Inode::Secret(SecretBytes::new(raw.clone())));
+    module.set_root(Some(secret));
+    module.add_extension(7, b"prefix".to_vec());
+    module.add_extension(8, [b"padding".as_slice(), &raw].concat());
+    assert!(
+        to_protobuf(&module).is_err(),
+        "embedded raw copy is refused"
+    );
+}
+
+#[test]
 fn projection_renders_the_canonical_envelope() {
     // A module with an unreachable node: the canonical image drops it, and the
     // projection must describe what the image actually contains.

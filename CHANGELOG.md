@@ -1,5 +1,18 @@
 # Changelog — Active Infinity
 
+## 2.0.7 — 2026-10-27
+
+Test-and-documentation release; no API or wire change.
+
+- **The allowlist test now has teeth.** Its trap binding was attached to an
+  untainted node, so the redacted label never reached the helper's output and the
+  test would have passed even if label redaction regressed to identity. The trap
+  is bound to the secret node, the test asserts that the binding label is present
+  in the cone, and a probe that replaces `redacted_key` with identity makes the
+  test fail with `binding hunter2-secret`.
+- **ADR-0010 names the right types**: `InfinityModule::has_secret` and
+  `Inode::is_secret`, not `Inode::has_secret`.
+
 ## 2.0.6 — 2026-10-27
 
 Hardening release for the secret-surface gate; no API or wire change.

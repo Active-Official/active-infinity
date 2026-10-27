@@ -267,3 +267,19 @@ It then found six problems in the new policy machinery itself, all fixed in
 The reviewer also re-ran fmt, clippy `-D warnings` (both feature sets), tests in
 both configurations, `cargo doc` with `RUSTDOCFLAGS=-D warnings`, and `cargo deny`;
 all clean.
+
+## Round 20 — 2026-10-27 (verification of 2.0.6, 2.0.7)
+
+Verification of the six gate fixes confirmed all of them (schema-drift guards fire
+on five synthetic documents, alias laundering and unresolvable aliases fail,
+tripwire alias refusal works, ADR matches the code, the CI diff is exactly the
+`--locked` addition, and the panel's stale items are fixed in the tag). Two
+findings, both fixed in 2.0.7:
+
+| Finding | Severity | Disposition |
+|---|---|---|
+| The allowlist behavioral test bound its secret-copy trap to an **untainted** node, so the redacted label never appeared in the helper's output and the test would pass under identity redaction | medium | fixed: the trap binds to the secret node, the test asserts the binding label is present, and a probe that makes `redacted_key` the identity function fails it with `binding hunter2-secret` |
+| ADR-0010 attributed `has_secret` to `Inode`; it is `InfinityModule::has_secret` | low | fixed |
+
+Evidence: `allowlist-strength-probe.log`, `secret-surface-audit.log`,
+`semantic-gate-hardening.log`.

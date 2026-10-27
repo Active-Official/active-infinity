@@ -247,11 +247,19 @@ fn the_allowlisted_label_helper_never_returns_secret_material() {
         fields: vec![("s".into(), secret), ("n".into(), leaf)],
     });
     module.set_root(Some(root));
-    module.bind("binding hunter2-secret", leaf);
+    // The trap is bound to the *secret* node, so the redacted binding label is
+    // part of the tainted cone and appears in the helper's output. If redaction
+    // regressed to identity, this label would carry the literal and the test
+    // fails.
+    module.bind("binding hunter2-secret", secret);
     module.annotate(leaf, AnnotationKind::Intent("note".into()));
 
     let paths = active_infinity::interop::secret_tainted_paths(&module);
     assert!(!paths.is_empty(), "the tainted cone must be reported");
+    assert!(
+        paths.iter().any(|label| label.contains("binding")),
+        "the trap binding must appear in the tainted cone: {paths:?}"
+    );
     for label in &paths {
         assert!(
             !label.contains("hunter2-secret"),

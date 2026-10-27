@@ -30,7 +30,7 @@ read every secret, which contradicts the threat model in
    - `interop::secret_tainted_paths` — redacted dotted labels of the tainted
      cone (allowlisted in the gates, with a test that proves the labels are
      redacted);
-   - `Inode::has_secret` / `Inode::is_secret` — booleans;
+   - `InfinityModule::has_secret` and `Inode::is_secret` — booleans;
    - `Inode::Secret(SecretBytes)` — the container itself, whose payload has no
      public read path and a redacting `Debug`/`Display`.
 2. **There is no exported replacement.** A consumer that needs to display a

@@ -1,5 +1,13 @@
 # Changelog — Active Infinity
 
+## Unreleased
+
+- **CI tests the committed dependency graph.** Every job runs with `--locked`,
+  the MSRV job builds every feature and every target on 1.85.0, the fuzz job
+  runs on pushes as well as pull requests, and the package job verifies the
+  tarball instead of skipping verification. `proptest` is held at 1.9.0 in
+  `Cargo.lock`, the newest release that still builds on the declared MSRV.
+
 ## 1.2.0 — 2026-10-27
 
 No wire-format change: images written by 1.1.x remain valid and canonical. This

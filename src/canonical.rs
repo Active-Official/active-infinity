@@ -178,7 +178,8 @@ pub(crate) fn prepare(module: &InfinityModule) -> Result<Prepared> {
     let provenance = module
         .provenance()
         .cloned()
-        .map(|prov| redact_provenance(prov, &secret_literals));
+        .map(|prov| redact_provenance(prov, &secret_literals))
+        .transpose()?;
     if let Some(prov) = &provenance {
         if let Some(producer) = &prov.producer {
             strings.push(producer.clone());
@@ -337,7 +338,7 @@ pub(crate) fn prepare(module: &InfinityModule) -> Result<Prepared> {
         root,
         bindings,
         annotations: sorted_annotations(annotations, &string_index),
-        provenance: provenance.map(|prov| sorted_provenance(prov, &string_index)),
+        provenance: provenance.map(sorted_provenance).transpose()?,
         strings,
         units,
         types,
@@ -404,29 +405,39 @@ pub const SECRET_MARKER: &str = "***SECRET***";
 /// again. In that case the whole text collapses to the marker, which is the one
 /// value the rule maps to itself.
 pub(crate) fn redact_text(text: &str, secrets: &[String]) -> String {
-    let matched: Vec<&String> = secrets
+    let marker_tainted = secrets
         .iter()
-        .filter(|secret| !secret.is_empty() && text.contains(secret.as_str()))
-        .collect();
-    if matched.is_empty() {
-        return text.to_string();
-    }
-    if secrets
-        .iter()
-        .any(|secret| !secret.is_empty() && SECRET_MARKER.contains(secret.as_str()))
-    {
-        return SECRET_MARKER.to_string();
-    }
+        .any(|secret| !secret.is_empty() && SECRET_MARKER.contains(secret.as_str()));
     let mut out = text.to_string();
-    for secret in matched {
-        out = out.replace(secret.as_str(), SECRET_MARKER);
+    // A replacement can create a new secret by joining the text around it
+    // (`hid` + `***SECRET***` + `den` is a secret again), so a pass repeats
+    // until the text is clean. Every pass either removes an occurrence, collapses
+    // to the marker, or is bounded by the loop; the final fallback is the marker,
+    // which no rule can make dirty again when the marker itself is clean.
+    for _ in 0..8 {
+        let mut matched: Vec<&String> = secrets
+            .iter()
+            .filter(|secret| !secret.is_empty() && out.contains(secret.as_str()))
+            .collect();
+        if matched.is_empty() {
+            return out;
+        }
+        if marker_tainted {
+            return SECRET_MARKER.to_string();
+        }
+        // Longest first, then lexicographic: the result does not depend on the
+        // order of the secret table.
+        matched.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
+        for secret in matched {
+            out = out.replace(secret.as_str(), SECRET_MARKER);
+        }
     }
-    out
+    SECRET_MARKER.to_string()
 }
 
-fn redact_provenance(mut prov: Provenance, secrets: &[String]) -> Provenance {
+fn redact_provenance(mut prov: Provenance, secrets: &[String]) -> Result<Provenance> {
     if secrets.is_empty() {
-        return prov;
+        return Ok(prov);
     }
     prov.producer = prov.producer.map(|text| redact_text(&text, secrets));
     prov.model = prov.model.map(|text| redact_text(&text, secrets));
@@ -439,7 +450,7 @@ fn redact_provenance(mut prov: Provenance, secrets: &[String]) -> Provenance {
             entry.value = ProvValue::Text(redact_text(text, secrets));
         }
     }
-    prov
+    Ok(prov)
 }
 
 fn normalize_type(typ: &TypeSpec) -> TypeSpec {
@@ -758,16 +769,21 @@ fn sorted_annotations(
     annotations
 }
 
-fn sorted_provenance(mut prov: Provenance, strings: &HashMap<String, u32>) -> Provenance {
-    let _ = strings;
+fn sorted_provenance(mut prov: Provenance) -> Result<Provenance> {
     prov.entries.sort_by(|a, b| {
         (a.key.as_str(), prov_kind_rank(&a.value)).cmp(&(b.key.as_str(), prov_kind_rank(&b.value)))
     });
-    // Redaction can map two keys onto the marker. Provenance is a map, so the
-    // first entry for a key wins; emitting both would produce an image the
-    // validator refuses (duplicate key).
-    prov.entries.dedup_by(|a, b| a.key == b.key);
-    prov
+    // Redaction can map two keys onto the marker. Provenance is a map, and the
+    // validator refuses duplicate keys, so an image with two entries for one key
+    // can never be valid: refuse instead of silently dropping one.
+    for window in prov.entries.windows(2) {
+        if window[0].key == window[1].key {
+            return Err(crate::error::Error::Encode(
+                "provenance keys collide after redaction; use distinct keys",
+            ));
+        }
+    }
+    Ok(prov)
 }
 fn prov_kind_rank(value: &ProvValue) -> u32 {
     match value {

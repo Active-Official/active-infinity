@@ -203,3 +203,59 @@ fn serialized_kind_names_are_stable() {
     );
     assert_eq!(SerializedKind::Secret.name(), "Secret");
 }
+
+/// Redaction is a fixpoint for every secret set, and it never leaves a secret
+/// behind unless that secret is itself part of the marker (in which case the text
+/// collapses to the marker).
+#[test]
+fn redaction_is_a_fixpoint_for_arbitrary_secrets_and_texts() {
+    let text = "[a-z0-9 *]{0,24}";
+    let secret = "[a-z0-9*]{0,5}";
+    proptest!(|(text in text, secrets in prop::collection::vec(secret, 0..4))| {
+        let once = active_infinity::interop::redact_text(&text, &secrets);
+        let twice = active_infinity::interop::redact_text(&once, &secrets);
+        prop_assert_eq!(&once, &twice, "redaction must be a fixpoint");
+
+        let marker = active_infinity::interop::SECRET_MARKER;
+        let marker_tainted = secrets
+            .iter()
+            .any(|secret| !secret.is_empty() && marker.contains(secret.as_str()));
+        if !marker_tainted {
+            for secret in &secrets {
+                if secret.is_empty() {
+                    continue;
+                }
+                prop_assert!(
+                    !once.contains(secret.as_str()),
+                    "a clean-marker redaction left {secret:?} in {once:?}"
+                );
+            }
+        }
+    });
+}
+
+/// Canonicalization is a fixpoint for modules that embed secrets in metadata,
+/// including short secrets and secrets that are part of the marker.
+#[test]
+fn canonicalization_is_a_fixpoint_for_secret_metadata() {
+    proptest!(|(secret in "[a-zA-Z*]{1,6}", note in "[ -~]{0,24}", key in "[ -~]{0,16}")| {
+        let mut module = InfinityModule::new();
+        let root = module.push(Inode::Int(1));
+        module.set_root(Some(root));
+        let secret_node = module.push(Inode::Secret(active_infinity::SecretBytes::from(secret.as_str())));
+        module.bind("secret", secret_node);
+        module.annotate(root, AnnotationKind::Intent(note.clone()));
+        module.set_provenance(Some(active_infinity::Provenance {
+            producer: if key.is_empty() { None } else { Some(key.clone()) },
+            entries: vec![active_infinity::ProvEntry {
+                key: key.clone(),
+                value: active_infinity::ProvValue::Text(note.clone()),
+            }],
+            ..active_infinity::Provenance::default()
+        }));
+
+        let first = encode(&module).unwrap();
+        let second = encode(&decode(&first).unwrap()).unwrap();
+        prop_assert_eq!(first, second, "canonical form must be a fixpoint");
+    });
+}

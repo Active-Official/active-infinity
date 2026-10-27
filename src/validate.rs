@@ -1955,8 +1955,10 @@ impl<'a> Validated<'a> {
             .map(|(node, _)| node as u32)
             .collect();
         if queue.is_empty() {
-            // Acyclicity runs first; stay total for a hand-built order.
-            return Err(Error::Cycle { node: 0 });
+            // Acyclicity runs first; stay total for a hand-built order and
+            // report the same node the cycle check would.
+            let node = incoming.iter().position(|degree| *degree > 0).unwrap_or(0) as u32;
+            return Err(Error::Cycle { node });
         }
         let mut processed = 0u32;
         while let Some(node) = queue.pop_front() {
@@ -1981,7 +1983,8 @@ impl<'a> Validated<'a> {
             }
         }
         if processed != count {
-            return Err(Error::Cycle { node: 0 });
+            let node = incoming.iter().position(|degree| *degree > 0).unwrap_or(0) as u32;
+            return Err(Error::Cycle { node });
         }
         Ok(())
     }

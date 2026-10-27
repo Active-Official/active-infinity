@@ -736,6 +736,57 @@ fn provenance_keys_do_not_carry_secret_copies() {
 }
 
 #[test]
+fn an_empty_module_passes_the_graph_checks() {
+    let module = InfinityModule::new();
+    module.check_acyclic(0).expect("no nodes, no cycle");
+    module.check_depth(4096).expect("no nodes, no depth fault");
+    module
+        .check_depth(0)
+        .expect("zero disables the ceiling, not the checks");
+    validate(&encode(&module).unwrap()).expect("the empty module validates");
+}
+
+#[test]
+fn provenance_keys_that_collide_after_redaction_are_refused() {
+    // A secret that is part of the marker collapses both keys onto the marker;
+    // emitting two entries for one key would produce an image the validator
+    // refuses, so the encoder refuses first.
+    let mut module = fixture();
+    let secret = module.push(Inode::Secret(SecretBytes::from("S")));
+    module.bind("secret", secret);
+    module.set_provenance(Some(Provenance {
+        producer: Some("tester".into()),
+        entries: vec![
+            ProvEntry {
+                key: "a-S".into(),
+                value: ProvValue::Text("one".into()),
+            },
+            ProvEntry {
+                key: "b-S".into(),
+                value: ProvValue::Text("two".into()),
+            },
+        ],
+        ..Provenance::default()
+    }));
+    let error = encode(&module).expect_err("colliding keys cannot encode");
+    assert_eq!(error.code(), "infinity/encode");
+    assert!(error.to_string().contains("collide"));
+}
+
+#[test]
+fn value_paths_do_not_carry_secret_copies() {
+    let mut module = fixture();
+    let secret = module.push(Inode::Secret(SecretBytes::from("hunter2-secret")));
+    let leaf = module.push(Inode::Int(7));
+    module.bind("x hunter2-secret", leaf);
+    let paths = active_infinity::interop::value_paths(&module);
+    let label = paths.get(&leaf).expect("the binding has a path");
+    assert!(!label.contains("hunter2-secret"), "path leaked: {label}");
+    assert!(label.contains(active_infinity::interop::SECRET_MARKER));
+    let _ = secret;
+}
+
+#[test]
 fn error_codes_are_stable_and_documented() {
     let expected = [
         (Error::Magic, "infinity/magic"),

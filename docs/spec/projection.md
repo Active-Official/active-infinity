@@ -41,14 +41,21 @@ builder, and both projections gain it.
 Redaction is structural, not textual:
 
 - a secret node projects as the marker; its bytes never reach a renderer;
-- a text value that **contains** a secret literal becomes the marker as a whole,
-  so a partial copy cannot leak;
-- a table key or a provenance key that contains a secret has each occurrence
-  replaced, so a key cannot smuggle a copy;
+- **data text** that contains a secret literal becomes the marker as a whole, so a
+  partial copy cannot leak. This covers string values, provenance
+  producer/model/tool and text entries, intent annotations and constraint sources;
+- **labels** (table field names, binding names, unit names, environment names,
+  media types and provenance keys) have each occurrence replaced, because a label
+  is an identifier rather than a document and whole-value replacement would erase
+  the label entirely for every consumer;
 - the rule has **no length threshold**: a one- or two-byte secret is redacted
   exactly like a long one. Redaction in canonicalization (`interop::redact_text`,
   used for annotations and provenance) follows the same rule, so a copy cannot
   survive in the image and then be hidden only by the projections;
+- a replacement can create a new secret by joining the text around it, so the
+  canonicalizer repeats the pass until the text is clean and falls back to the
+  marker. That makes redaction a fixpoint for every secret set, including a
+  secret that is itself part of `***SECRET***`;
 - reference wrappers are transparent: an interpolated `${ref_to_secret}` redacts
   the whole string instead of rendering `${}`;
 - a blob projects its identity only (hash, size, media type, taint); its payload
@@ -60,17 +67,19 @@ Redaction is structural, not textual:
 Structural names are the exception, in both directions:
 
 - the canonical image **does not rewrite** table field names, binding names,
-  environment names, identifier names or blob media types. They are part of the
-  module's identity: rewriting them would change what the module means, and two
-  names that collapse onto the marker would create a duplicate field the encoder
-  must refuse.
+  unit names, environment names, identifier names or blob media types. They are
+  part of the module's identity: rewriting them would change what the module
+  means, and two names that collapse onto the marker would create a duplicate
+  field the encoder must refuse.
 - the projections **do redact** those names, because an export must not carry a
   copy. A projection is therefore lossy for a module that embeds a secret inside
-  a structural name: two keys may merge into one, and a consumer that needs the
-  exact names reads the AINF image instead.
+  such a name: two keys may merge into one, and a consumer that needs the exact
+  names reads the AINF image instead.
 
-Metadata text (annotations, provenance, prose) is redacted in the image itself,
-with each occurrence replaced, so a copy cannot be stored there either.
+Metadata prose (annotations and provenance) is redacted in the image itself, with
+each occurrence replaced, so a copy cannot be stored there either. String
+*values* are user data: they are stored as written and redacted only when they
+leave through a projection.
 
 The test suite asserts that the secret literal does not appear anywhere in the
 projected bytes.

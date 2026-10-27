@@ -114,7 +114,9 @@
 
 use crate::encode::{encode, hash_image};
 use crate::error::{Error, Result};
-use crate::interop::{project_node_with, redacted_key, redacted_value, secret_table, Projected};
+use crate::interop::{
+    first_entry_per_key, project_node_with, redacted_key, redacted_value, secret_table, Projected,
+};
 use crate::ir::{AnnotationKind, InfinityModule, ProvValue};
 
 // ---------------------------------------------------------------------------
@@ -360,7 +362,7 @@ fn encode_provenance(prov: &crate::ir::Provenance, secrets: &[String]) -> Vec<u8
     if let Some(parent) = &prov.parent {
         bytes(&mut body, 5, parent);
     }
-    for entry in &prov.entries {
+    for entry in first_entry_per_key(&prov.entries) {
         let mut encoded = Vec::new();
         string(&mut encoded, 1, &redacted_key(&entry.key, secrets));
         match &entry.value {

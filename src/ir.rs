@@ -1308,6 +1308,9 @@ impl InfinityModule {
     pub fn check_depth(&self, max_depth: u32) -> Result<(), super::Error> {
         use super::Error;
         let count = self.nodes.len();
+        if count == 0 {
+            return Ok(());
+        }
         if max_depth == 0 {
             // Zero means "no depth ceiling", not "no checks": a direct caller
             // still gets cycle detection.
@@ -1352,7 +1355,10 @@ impl InfinityModule {
             }
         }
         if processed as usize != count {
-            return Err(Error::Cycle { node: 0 });
+            // Acyclicity runs first, so this is defensive; report the lowest
+            // node that could not be ordered, like `check_acyclic`.
+            let node = incoming.iter().position(|degree| *degree > 0).unwrap_or(0) as u32;
+            return Err(Error::Cycle { node });
         }
         Ok(())
     }

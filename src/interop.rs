@@ -731,6 +731,19 @@ pub(crate) fn redacted_value(text: &str, secrets: &[String]) -> String {
     }
 }
 
+/// One entry per key, first occurrence wins, in the module's order.
+///
+/// The encoder refuses duplicate provenance keys, so this only decides what a
+/// projection shows for a hand-built module; all projections apply the same rule
+/// so they cannot disagree about a malformed input.
+pub(crate) fn first_entry_per_key(entries: &[ProvEntry]) -> Vec<&ProvEntry> {
+    let mut seen = std::collections::HashSet::new();
+    entries
+        .iter()
+        .filter(|entry| seen.insert(entry.key.as_str()))
+        .collect()
+}
+
 /// A key-position string: every occurrence of every secret is replaced, so a
 /// key that merely contains a copy of a secret does not leak it. Same rule as
 /// [`redact_text`], including the marker-substring fixpoint.
@@ -776,7 +789,7 @@ fn build_projected(
             Inode::DurationMs(ms) => Projected::DurationMs(*ms),
             Inode::Quantity { value, unit } => Projected::Quantity(
                 Box::new(build_projected(module, Some(*value), secrets, depth + 1)?),
-                redacted_value(unit.name(), secrets),
+                redacted_key(unit.name(), secrets),
             ),
             Inode::Array { elements } => Projected::Array(
                 elements
@@ -798,7 +811,7 @@ fn build_projected(
                 Projected::Text(SECRET_MARKER.to_string())
             }
             Inode::Ref(id) => build_projected(module, Some(*id), secrets, depth + 1)?,
-            Inode::Env { name, .. } => Projected::Env(redacted_value(name, secrets)),
+            Inode::Env { name, .. } => Projected::Env(redacted_key(name, secrets)),
             Inode::Interpolate { parts } => {
                 let mut text = String::new();
                 let mut tainted = false;
@@ -950,7 +963,7 @@ mod projection {
             );
         }
         let mut entries = serde_json::Map::new();
-        for entry in &prov.entries {
+        for entry in first_entry_per_key(&prov.entries) {
             let value = match &entry.value {
                 ProvValue::Text(t) => text(t),
                 ProvValue::Int(number) => serde_json::Value::from(*number),
@@ -984,9 +997,12 @@ pub use projection::{
 
 /// Dotted paths for every named node (bindings plus table paths from the root).
 pub fn value_paths(module: &InfinityModule) -> HashMap<NodeId, String> {
+    // A binding or field name can contain a copy of a secret, and these paths are
+    // handed to agents and logs, so keys are redacted here too.
+    let secrets = secret_texts(module);
     let mut paths: HashMap<NodeId, String> = HashMap::new();
     for (name, id) in module.bindings() {
-        paths.insert(*id, name.clone());
+        paths.insert(*id, redacted_key(name, &secrets));
     }
     if let Some(root) = module.root() {
         let mut stack = vec![(root, String::new())];
@@ -999,8 +1015,9 @@ pub fn value_paths(module: &InfinityModule) -> HashMap<NodeId, String> {
             match module.get(id) {
                 Some(Inode::Table { fields }) => {
                     for (key, child) in fields {
+                        let key = redacted_key(key, &secrets);
                         let child_path = if path.is_empty() {
-                            key.clone()
+                            key
                         } else {
                             format!("{path}.{key}")
                         };
@@ -1010,8 +1027,9 @@ pub fn value_paths(module: &InfinityModule) -> HashMap<NodeId, String> {
                 }
                 Some(Inode::SchemaTable { fields, .. }) => {
                     for (key, child) in fields {
+                        let key = redacted_key(key, &secrets);
                         let child_path = if path.is_empty() {
-                            key.clone()
+                            key
                         } else {
                             format!("{path}.{key}")
                         };
@@ -1267,9 +1285,9 @@ pub fn provenance_lines(module: &InfinityModule) -> Vec<String> {
     if let Some(parent) = prov.parent {
         lines.push(format!("parent=blake3:{}", crate::ir::hash_hex(&parent)));
     }
-    for entry in &prov.entries {
+    for entry in first_entry_per_key(&prov.entries) {
         let value = match &entry.value {
-            ProvValue::Text(text) => redact(text),
+            ProvValue::Text(text) => redacted_value(text, &secrets),
             ProvValue::Int(number) => number.to_string(),
             ProvValue::Flag(flag) => flag.to_string(),
             ProvValue::Hash(hash) => format!("blake3:{}", crate::ir::hash_hex(hash)),

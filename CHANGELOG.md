@@ -1,5 +1,35 @@
 # Changelog — Active Infinity
 
+## 1.2.3 — 2026-10-27
+
+Third review pass. No wire-format change. Two of these are regressions introduced
+by 1.2.2 and are the reason 1.2.2 is yanked.
+
+- **Redaction is a fixpoint for every secret, including one that contains the
+  marker.** A replacement can join the text around it into a new secret
+  (`"hid" + marker + "den"`), so the pass now repeats until the text is clean and
+  falls back to the marker, with matches applied longest-first so the result is
+  independent of the secret table's order. Property-tested over random secrets
+  and texts.
+- **An empty module is valid again.** `InfinityModule::check_depth` returned
+  `infinity/cycle` for a module with no nodes; it now returns `Ok`, and
+  `check_depth(0)` still runs the cycle check.
+- **Agent-facing labels are redacted.** `value_paths` and `node_label` returned
+  raw binding and field names, so a name containing a secret copy could reach a
+  log or a model. Keys are now redacted like every other label.
+- **Provenance key collisions are refused, not silently merged.** When redaction
+  maps two keys onto one, the encoder reports `infinity/encode`
+  (`provenance keys collide after redaction`) instead of dropping an entry; an
+  image with duplicate provenance keys was never valid.
+- **Projections agree on duplicate provenance keys** (first entry wins) for a
+  hand-built module that never went through the encoder.
+- **Labels and data text follow one documented rule**: data text that contains a
+  secret becomes the marker, labels have each occurrence replaced. Unit names and
+  environment names are labels; `docs/spec/projection.md` states the rule and the
+  reason structural names are not rewritten in the image.
+- **Cycle reports agree** between the depth and acyclicity sweeps (lowest node
+  that could not be ordered).
+
 ## 1.2.2 — 2026-10-27
 
 Second review pass over the 1.2.1 fixes. No wire-format change; the fixes make

@@ -1,5 +1,20 @@
 # Changelog — Active Infinity
 
+## 2.0.2 — 2026-10-27
+
+Test-and-documentation release; no API or wire change.
+
+- **The API-surface guard also catches one-line bodies.** `returns_raw_text`
+  used the last `)` of the whole line, so
+  `pub fn secret_x() -> Vec<u8> { Vec::new() }` hid its return type behind the
+  body's parentheses. The signature is now cut at `{`/`;` first, and the case is
+  covered by a probe that fails the suite when injected.
+- **ADR-0010 matches the guard**: it now documents the blacklist, the shape rule,
+  the line-joining and body truncation, the justified allowlist with its
+  staleness check, and the residual risk (a deliberately obfuscated name). It
+  also spells out why `buf()`, `section()`, `encode()` and the redaction helpers
+  are not leaks: they return the caller's own bytes or redacted text.
+
 ## 2.0.1 — 2026-10-27
 
 **Security fix. 2.0.0 is yanked: it still shipped one public secret accessor.**

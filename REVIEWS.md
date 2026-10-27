@@ -175,3 +175,18 @@ that the guard was too narrow. Both fixed in 2.0.1; 2.0.0 is yanked.
 The widened guard was probed adversarially: `pub fn secret_values` (blacklisted
 name), `pub fn secret_names` (new name, raw return) and `pub fn secret_raw` as a
 method on `Validated` each failed the suite, and each probe was reverted.
+
+## Round 15 — 2026-10-27 (verification of 2.0.1, 2.0.2)
+
+Verification of 2.0.1 confirmed the secret surface is closed (`Validated::secret`
+and `SecretBytes::expose` are crate-only, projections and Debug/Display redact,
+no doc or example tells a caller to read a secret) and found two low items, both
+fixed in 2.0.2:
+
+| Finding | Severity | Disposition |
+|---|---|---|
+| The shape rule used the last `)` of the whole line, so a one-line body (`pub fn secret_x() -> Vec<u8> { Vec::new() }`) hid its return type | low | fixed: the signature is cut at `{`/`;` before the return-type check; a probe with an inline body now fails the suite |
+| ADR-0010 did not describe the shape rule, the allowlist, its staleness check or the obfuscation residual, and did not explain why `buf()`/`section()`/`encode()` are not leaks | low | fixed: the ADR now documents all of it, plus the "caller's own bytes" distinction |
+
+The reviewer re-ran fmt, clippy `-D warnings`, tests in both feature sets,
+`cargo doc` with `RUSTDOCFLAGS=-D warnings` and `cargo deny`; all clean.

@@ -27,10 +27,40 @@ read every secret, which contradicts the threat model in
    module uses `to_redacted_json` or `to_protobuf`; a consumer that needs to
    recognize a redacted value compares with `SECRET_MARKER`.
 3. **The rule is enforced, not just documented.** `tests/api_surface.rs` fails the
-   build if a `pub fn secret_*` accessor or a `pub use` of one reappears. The
-   forbidden list is explicit, so adding a new accessor requires a visible edit.
-4. **This is a breaking change, released as 2.0.0.** The wire format is
-   unchanged; only the crate API shrank.
+   build when an accessor reappears. It applies three rules over every file under
+   `src/`:
+   - a blacklist of the names this crate ever exported (`secret_texts`,
+     `secret_bytes`, `secret_literals`, `secret_values`, `secret`);
+   - a **shape rule**: a public function whose name mentions secrets and whose
+     return type is `String`, `Vec<String>`, `Vec<u8>`, `Vec<Vec<u8>>` or
+     `&[u8]` is a leak. Declarations are joined across lines and truncated at the
+     body, so a one-line body cannot hide the return type, and
+     `pub const fn` / `pub unsafe fn` / `pub async fn` are treated like `pub fn`;
+   - an allowlist with a written reason, currently only `secret_tainted_paths`
+     (it returns redacted labels, never bytes), plus a check that fails if an
+     allowlist entry goes stale.
+4. **This is a breaking change, released as 2.0.0 (2.0.1 fixed the last
+   accessor).** The wire format is unchanged; only the crate API shrank.
+
+## What is not a leak
+
+Some public accessors return bytes on purpose:
+
+- `Validated::buf()`, `Validated::section()`, `decode()` and `encode()` return or
+  reproduce the caller's own buffer. The caller already holds those bytes;
+  reading them out adds no authority.
+- `Inode::Secret(SecretBytes)` carries the secret as a node the caller
+  constructed, and `SecretBytes` has no public accessor (`expose` is crate-only)
+  and a redacting `Debug`/`Display`.
+- The redaction helpers take secret literals as *input* (`redact_text`,
+  `provenance_json`); they return redacted text, never secret text.
+
+## Residual risk
+
+A deliberately obfuscated accessor — an unrelated name returning `Vec<u8>` — can
+evade a textual guard. That is a reviewed decision rather than an accident: the
+blacklist and shape rule catch the realistic forms, ADR-0010 states the policy,
+and a reviewer adding such a function would have to argue against this document.
 
 ## Consequences
 

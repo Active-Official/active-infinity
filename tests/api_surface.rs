@@ -89,11 +89,14 @@ fn public_fn_name(line: &str) -> Option<&str> {
 }
 
 fn returns_raw_text(line: &str) -> bool {
-    // The return type sits after the last `)` of the argument list.
-    let Some(close) = line.rfind(')') else {
+    // Keep only the signature: a one-line body would otherwise move the "last
+    // `)`" into the body and hide the return type.
+    let signature = line.split('{').next().unwrap_or(line);
+    let signature = signature.split(';').next().unwrap_or(signature);
+    let Some(close) = signature.rfind(')') else {
         return false;
     };
-    let tail = &line[close + 1..];
+    let tail = &signature[close + 1..];
     tail.contains("String") || tail.contains("u8") || tail.contains("[u8]")
 }
 

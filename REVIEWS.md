@@ -283,3 +283,17 @@ findings, both fixed in 2.0.7:
 
 Evidence: `allowlist-strength-probe.log`, `secret-surface-audit.log`,
 `semantic-gate-hardening.log`.
+
+## Round 21 — 2026-10-27 (verification of 2.0.7)
+
+Verification of the two 2.0.7 fixes. The reviewer re-ran the mutation that makes
+`redacted_key` the identity function and confirmed the allowlist test fails with
+the raw label, then checked the assertions, the ADR attribution, the
+`v2.0.6..v2.0.7` diff (version bump plus those two files) and the full gate
+battery.
+
+**NO NEW FINDINGS.**
+
+This entry is recorded after the `v2.0.7` tag was cut; it is a verification
+record, not a change to the crate. The audited sources at the tag are the ones
+this round verified.

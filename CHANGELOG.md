@@ -1,5 +1,14 @@
 # Changelog — Active Infinity
 
+## 1.1.3 — 2026-10-27
+
+- **Begin respects the caller's ceilings.** The declared stream size is compared
+  with the decoder's own max_total_bytes, not the defaults.
+- **Text projections redact keys and intent text.** provenance_lines redacts
+  entry keys and intents() redacts intent text against the module's secret
+  literals, matching the JSON projection. New helpers: secret_texts,
+  edact_text.
+
 ## 1.1.2 — 2026-10-27
 
 - **Delta fragments honour the caller's limits.** A Delta fragment is decoded

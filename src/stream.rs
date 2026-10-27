@@ -688,10 +688,12 @@ impl StreamDecoder {
                     return Err(Error::DialectMismatch(dialect));
                 }
                 let size = read_u64(&frame.payload, 16)?;
-                if size > crate::layout::Limits::default().max_total_bytes {
+                // Bound the declared size with the *caller's* ceiling: a strict
+                // decoder must not accept a generation sized for the defaults.
+                if size > self.limits.max_total_bytes {
                     return Err(Error::Limit {
                         kind: "total bytes",
-                        limit: crate::layout::Limits::default().max_total_bytes,
+                        limit: self.limits.max_total_bytes,
                     });
                 }
                 self.total_size = Some(size);

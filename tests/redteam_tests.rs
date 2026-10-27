@@ -698,3 +698,46 @@ fn review_projection_redacts_secret_copies_in_keys_and_metadata() {
     let rendered = prov.to_string();
     assert!(!rendered.contains(CANARY), "provenance projection leaked");
 }
+
+#[test]
+fn review_stream_begin_uses_the_caller_limits() {
+    let module = fixture();
+    let frames = active_infinity::stream::encode_stream(&module, 64).unwrap();
+    let mut decoder = StreamDecoder::new().with_limits(Limits {
+        max_total_bytes: 64,
+        ..Limits::default()
+    });
+    let error = decoder.push(&frames[0]).unwrap_err();
+    assert_eq!(error.code(), "infinity/limit");
+}
+
+#[test]
+fn review_text_projections_redact_secret_copies() {
+    const CANARY: &str = "text-canary-77";
+    let mut module = fixture();
+    let secret = module.push(Inode::Secret(SecretBytes::from(CANARY)));
+    let root = module.push(Inode::Table {
+        fields: vec![("s".into(), secret)],
+    });
+    module.set_root(Some(root));
+    module.annotate(root, AnnotationKind::Intent(format!("value is {CANARY}")));
+    module.set_provenance(Some(Provenance {
+        producer: None,
+        timestamp_ms: 1,
+        model: None,
+        tool: None,
+        parent: None,
+        entries: vec![ProvEntry {
+            key: CANARY.into(),
+            value: ProvValue::Text(format!("copy: {CANARY}")),
+        }],
+    }));
+
+    let lines = provenance_lines(&module).join("\n");
+    assert!(!lines.contains(CANARY), "provenance_lines leaked: {lines}");
+    let intents = active_infinity::interop::intents(&module, root);
+    assert!(
+        intents.iter().all(|text| !text.contains(CANARY)),
+        "intents leaked: {intents:?}"
+    );
+}

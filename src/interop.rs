@@ -32,6 +32,37 @@ use crate::unit::UnitTag;
 /// Marker substituted for secret material in every projection.
 pub const SECRET_MARKER: &str = "***SECRET***";
 
+/// Every secret literal in a module, as text.
+///
+/// Used by the text projections (`provenance_lines`, `intents`) so a copy of a
+/// secret inside metadata cannot leave through them.
+pub fn secret_texts(module: &InfinityModule) -> Vec<String> {
+    module
+        .nodes()
+        .iter()
+        .filter_map(|node| match node {
+            Inode::Secret(secret) => Some(String::from_utf8_lossy(secret.expose()).into_owned()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Replace every occurrence of a secret in `text` with the marker.
+pub fn redact_text(text: &str, secrets: &[String]) -> String {
+    let mut out = text.to_string();
+    for secret in secrets {
+        if secret.is_empty() || !out.contains(secret.as_str()) {
+            continue;
+        }
+        // Whole-value matches always redact; substring spreading applies to
+        // secrets of four bytes or more (the text language's rule).
+        if out == *secret || secret.len() >= 4 {
+            out = out.replace(secret.as_str(), SECRET_MARKER);
+        }
+    }
+    out
+}
+
 // ---------------------------------------------------------------------------
 // active-core bridge
 // ---------------------------------------------------------------------------
@@ -1146,19 +1177,24 @@ pub fn provenance_lines(module: &InfinityModule) -> Vec<String> {
             ProvValue::Flag(flag) => flag.to_string(),
             ProvValue::Hash(hash) => format!("blake3:{}", crate::ir::hash_hex(hash)),
         };
-        lines.push(format!("{}={value}", entry.key));
+        lines.push(format!("{}={value}", redact(&entry.key)));
     }
     lines
 }
 
 /// Intent annotations attached to a node (agent-facing helper).
+///
+/// Text is redacted against the module's secret literals: canonicalization also
+/// redacts annotation text at encode time, but this helper must be safe on an
+/// in-memory module that has not been through the codec yet.
 pub fn intents(module: &InfinityModule, id: NodeId) -> Vec<String> {
+    let secrets = secret_texts(module);
     module
         .annotations()
         .iter()
         .filter(|annotation| annotation.node == id)
         .filter_map(|annotation| match &annotation.kind {
-            AnnotationKind::Intent(text) => Some(text.clone()),
+            AnnotationKind::Intent(text) => Some(redact_text(text, &secrets)),
             _ => None,
         })
         .collect()

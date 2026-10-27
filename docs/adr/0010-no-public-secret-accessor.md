@@ -26,24 +26,25 @@ read every secret, which contradicts the threat model in
 2. **There is no exported replacement.** A consumer that needs to display a
    module uses `to_redacted_json` or `to_protobuf`; a consumer that needs to
    recognize a redacted value compares with `SECRET_MARKER`.
-3. **The rule is enforced, not just documented.** `tests/api_surface.rs` fails the
-   build when an accessor reappears. It applies three rules over every file under
-   `src/`:
-   - a blacklist of the names this crate ever exported (`secret_texts`,
-     `secret_bytes`, `secret_literals`, `secret_values`, `secret`);
-   - a **shape rule**: a public function whose name mentions secrets and whose
-     return type is `String`, `Vec<String>`, `Vec<u8>`, `Vec<Vec<u8>>` or
-     `&[u8]` is a leak. The return type is read only after the last `->`, so an
-     array length such as `[u8; 32]` in the parameter list cannot confuse the
-     scan; the body is cut off at `{`, so a one-line body cannot hide the type;
-     declarations whose return type starts on its own line are joined;
-     `const`/`async`/`unsafe` modifiers are stripped in any order before the name
-     is read;
-   - an allowlist with a written reason, currently only `secret_tainted_paths`
-     (it returns redacted labels, never bytes), plus a check that fails if an
-     allowlist entry goes stale.
-4. **This is a breaking change, released as 2.0.0 (2.0.1 fixed the last
-   accessor).** The wire format is unchanged; only the crate API shrank.
+3. **The rule is enforced at two layers.**
+   - **Authoritative:** `scripts/api_surface.py` reads the rustdoc JSON
+     (`cargo +nightly rustdoc -- -Zunstable-options --output-format json`) and
+     walks the *resolved* public API — free functions, inherent methods, trait
+     methods and re-exports, including aliased and glob re-exports. It fails when
+     a public item's name is blacklisted or mentions secrets and its return type
+     resolves to raw text or bytes (`String`, `str`, `char`, `u8`, in any
+     container). CI runs it in the `api-surface` job. Because it reads the
+     compiler's own view rather than text, spelling tricks (line breaks,
+     modifiers, array lengths, attributes) do not matter.
+   - **Tripwire:** `tests/api_surface.rs` runs with plain `cargo test` and no
+     nightly toolchain. It catches the realistic textual forms — the blacklist,
+     a shape rule over the text after the last `->`, attributes, modifier chains,
+     glob and aliased re-exports — and documents the policy. It is deliberately
+     *not* the guarantee: a text scan can be spelled around, which is why the
+     semantic gate exists.
+4. **This is a breaking change, released as 2.0.0 (2.0.1-2.0.3 fixed the last
+   accessor and hardened the checks).** The wire format is unchanged; only the
+   crate API shrank.
 
 ## What is not a leak
 

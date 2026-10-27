@@ -42,6 +42,17 @@ jobs:
       - name: MSRV check (no default features)
         run: cargo check --locked --no-default-features
 
+  api-surface:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      # The authoritative check: the resolved public API, not a text scan.
+      - name: Generate rustdoc JSON
+        run: cargo +nightly rustdoc --lib --all-features -- -Zunstable-options --output-format json
+      - name: No public secret accessor
+        run: python3 scripts/api_surface.py target/doc/active_infinity.json
+
   package:
     runs-on: ubuntu-latest
     steps:

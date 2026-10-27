@@ -1,27 +1,20 @@
 //! Public-surface policy: secrets are structural, never readable through the API.
 //!
-//! A function that returns secret plaintext (or a `pub use` of one) turns
-//! structural secrets into an unlock API. These checks fail the build when such
-//! an accessor reappears, by three rules:
+//! The authoritative check is `scripts/api_surface.py`, which reads the rustdoc
+//! JSON and therefore sees the resolved public API: free functions, inherent and
+//! trait methods, and re-exports. CI runs it in the `api-surface` job. This file
+//! is the **fast tripwire** that runs with `cargo test` and no nightly toolchain:
+//! it catches the realistic textual forms and documents the policy, but a
+//! determined author can spell around a text scan. ADR-0010 records that split.
 //!
-//! 1. a named blacklist of every accessor this crate ever exported;
+//! The tripwire rules:
+//! 1. a blacklist of every accessor this crate ever exported, including a public
+//!    `use` (aliased or glob) that names one;
 //! 2. a shape rule: any public function whose name mentions secrets and whose
-//!    return type is a raw byte/text container (`String`, `Vec<String>`,
-//!    `Vec<u8>`, `&[u8]`, `Vec<Vec<u8>>`) is a leak unless it is allowlisted with
-//!    a reason. `secret_tainted_paths` is allowlisted: it returns redacted
-//!    labels, not secret material;
-//! 3. the scan walks every file under `src/`, follows declarations whose return
-//!    type is on its own line, and strips every modifier
-//!    (`const`/`async`/`unsafe`, in any order) before reading the name.
-//!
-//! The return type is read only after the last `->`, so an array length like
-//! `[u8; 32]` in the parameter list cannot confuse the scan, and the body is cut
-//! off before the check, so a one-line body cannot hide the type either.
+//!    return type is raw text or bytes (`String`, `str`, `char`, `u8` and their
+//!    containers) is a leak unless allowlisted with a reason.
 //!
 //! `SECRET_MARKER` is the one public secret constant, and it carries no secret.
-//! A deliberately obfuscated accessor (an unrelated name returning `Vec<u8>`)
-//! can still evade a text check; ADR-0010 makes that a reviewed decision, and the
-//! allowlist below is the audit surface.
 
 use std::path::{Path, PathBuf};
 
@@ -58,7 +51,7 @@ fn rust_sources(root: &Path) -> Vec<PathBuf> {
 }
 
 /// Join a declaration that spans lines, including a return type that starts on
-/// its own line, keeping the line number where it started.
+/// its own line or after a trailing `->`.
 fn logical_lines(text: &str) -> Vec<(usize, String)> {
     let lines: Vec<&str> = text.lines().collect();
     let mut out = Vec::new();
@@ -74,11 +67,11 @@ fn logical_lines(text: &str) -> Vec<(usize, String)> {
         buffer.push_str(trimmed);
 
         let balanced = buffer.matches('(').count() == buffer.matches(')').count();
-        let next_continues = lines.get(index + 1).is_some_and(|next| {
-            let next = next.trim();
-            next.starts_with("->") || next.starts_with("where")
+        let next = lines.get(index + 1).map(|line| line.trim());
+        let continues = next.is_some_and(|next| {
+            buffer.ends_with("->") || next.starts_with("->") || next.starts_with("where")
         });
-        if balanced && !next_continues {
+        if balanced && !continues {
             out.push((start, std::mem::take(&mut buffer)));
         }
     }
@@ -88,13 +81,43 @@ fn logical_lines(text: &str) -> Vec<(usize, String)> {
     out
 }
 
-/// The name of a public function, stripping `const`/`async`/`unsafe` in any order.
+/// Strip `#[...]` attributes and leading comments, then return the declaration.
+fn declaration(line: &str) -> &str {
+    let mut rest = line.trim_start();
+    loop {
+        if rest.starts_with("#[") {
+            match rest.find(']') {
+                Some(close) => rest = rest[close + 1..].trim_start(),
+                None => return rest,
+            }
+        } else if rest.starts_with("///") || rest.starts_with("//") {
+            return "";
+        } else {
+            return rest;
+        }
+    }
+}
+
+/// The name of a public function, stripping modifiers in any order.
 fn public_fn_name(line: &str) -> Option<&str> {
     let mut rest = line.strip_prefix("pub ")?;
     loop {
         let stripped = ["const ", "async ", "unsafe "]
             .iter()
-            .find_map(|modifier| rest.strip_prefix(modifier));
+            .find_map(|modifier| rest.strip_prefix(modifier))
+            .or_else(|| {
+                if rest.starts_with("extern ") {
+                    // `extern "C"` / `extern "system"`: drop the ABI string too.
+                    let after = rest.trim_start_matches("extern ");
+                    let after = match after.strip_prefix('"') {
+                        Some(rest) => rest.split_once('"').map(|(_, rest)| rest).unwrap_or(after),
+                        None => after,
+                    };
+                    Some(after.trim_start())
+                } else {
+                    None
+                }
+            });
         match stripped {
             Some(next) => rest = next,
             None => break,
@@ -106,18 +129,21 @@ fn public_fn_name(line: &str) -> Option<&str> {
 
 /// Whether the declaration's return type is raw text or bytes.
 ///
-/// Only the text after the last `->` can be a return type, so array lengths and
-/// generic parameters in the argument list cannot interfere.
+/// The body is cut before the arrow is located, so a `->` in the body cannot
+/// move the window, and only the text after the last `->` is examined, so array
+/// lengths in parameters cannot interfere either.
 fn returns_raw_text(line: &str) -> bool {
-    let Some(arrow) = line.rfind("->") else {
+    let signature = line.split('{').next().unwrap_or(line);
+    let signature = signature.split(" where ").next().unwrap_or(signature);
+    let Some(arrow) = signature.rfind("->") else {
         return false;
     };
-    let tail = &line[arrow + 2..];
-    // Stop at the body (or an unexpected block close); a trait declaration ends
-    // with `;` and keeps its type in the tail.
-    let signature = tail.split('{').next().unwrap_or(tail);
-    let signature = signature.split('}').next().unwrap_or(signature);
-    signature.contains("String") || signature.contains("u8")
+    let tail = &signature[arrow + 2..];
+    tail.contains("String")
+        || tail.contains("Vec<String>")
+        || tail.contains("str")
+        || tail.contains("char")
+        || tail.contains("u8")
 }
 
 #[test]
@@ -131,23 +157,29 @@ fn the_crate_exposes_no_plaintext_secret_accessor() {
             .display()
             .to_string();
         let text = std::fs::read_to_string(&path).expect("source file");
-        for (line_number, line) in logical_lines(&text) {
-            if line.starts_with("//") {
+        for (line_number, raw) in logical_lines(&text) {
+            let line = declaration(&raw);
+            if line.is_empty() {
                 continue;
             }
-            if let Some(name) = public_fn_name(&line) {
+            if let Some(name) = public_fn_name(line) {
                 if FORBIDDEN.contains(&name) {
                     offenders.push(format!("{relative}:{line_number}: {line}"));
                     continue;
                 }
                 if name.contains("secret") {
                     let allowed = ALLOWED.iter().any(|(allowed, _)| *allowed == name);
-                    if !allowed && returns_raw_text(&line) {
+                    if !allowed && returns_raw_text(line) {
                         offenders.push(format!("{relative}:{line_number}: {line}"));
                     }
                 }
             }
             if line.starts_with("pub use") {
+                if line.contains("::*") {
+                    offenders.push(format!(
+                        "{relative}:{line_number}: glob re-export cannot be audited: {line}"
+                    ));
+                }
                 for forbidden in FORBIDDEN {
                     if line
                         .split(|c: char| !c.is_alphanumeric() && c != '_')
@@ -168,7 +200,7 @@ fn the_crate_exposes_no_plaintext_secret_accessor() {
 
 #[test]
 fn the_redaction_marker_is_the_only_public_secret_constant() {
-    // Pins the exception the check above relies on: the marker is a literal
+    // Pins the exception the checks rely on: the marker is a literal
     // `***SECRET***`, not secret material.
     assert_eq!(active_infinity::interop::SECRET_MARKER, "***SECRET***");
 }

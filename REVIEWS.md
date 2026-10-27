@@ -205,3 +205,24 @@ The reviewer live-proved three ways past the API-surface guard. All are closed i
 Guard probes now cover: blacklisted name, new name with raw return, a method on
 `Validated`, one-line body, array-length parameter, split return type, and
 `const unsafe`. Each fails the suite; each probe is reverted.
+
+## Round 17 — 2026-10-27 (verification of 2.0.3, 2.0.4)
+
+The reviewer live-proved seven more ways past the *textual* guard. Rather than
+patch a text scanner indefinitely, 2.0.4 adds a semantic gate over rustdoc JSON
+as the authoritative check and keeps the text scan as a documented tripwire.
+
+| Finding | Severity | Disposition |
+|---|---|---|
+| A public trait method (`fn secret_values(&self) -> Vec<u8>;`) evaded the text scan | high | the semantic gate walks trait items and catches it (probe proven) |
+| `rfind("->")` ran before cutting the body, so `-> Vec<u8> { let g: fn() -> i32 = ...; }` and a `// -> i32` comment evaded | high | tripwire cuts the body and strips `where` before locating the arrow; the semantic gate is unaffected |
+| A return type after a trailing `->` on the next line evaded | high | tripwire joins while the buffer ends with `->` |
+| `pub extern "C" fn ... -> Vec<u8>` evaded | medium | tripwire strips `extern "..."` (semantic gate unaffected) |
+| `&str` / `Box<str>` returns evaded the raw-type check | medium | both layers include `str` and `char` |
+| A method inside `impl` and an attribute-prefixed `pub fn` evaded | low | tripwire strips attributes and looks for `pub fn` after them; methods were already covered by the semantic gate |
+| `pub use ...::*` evaded the token check | low | both layers flag a glob re-export as unauditable |
+
+Evidence: `guard-probe-matrix.log` (tripwire), `tripwire-probe.log` (six shapes),
+`semantic-gate-probe.log` (free function), `semantic-gate-trait-probe.log` (trait
+method and glob). Each probe fails the relevant gate and is reverted; the working
+tree is clean afterwards.

@@ -1,5 +1,27 @@
 # Changelog — Active Infinity
 
+## 2.0.4 — 2026-10-27
+
+The secret-surface check is now semantic. No API or wire change.
+
+- **New authoritative gate: `scripts/api_surface.py` over rustdoc JSON.** It walks
+  the *resolved* public API — free functions, inherent and trait methods, and
+  re-exports — and fails when a public item is blacklisted, is a glob re-export,
+  or has a name mentioning secrets and a return type that resolves to raw text or
+  bytes (`String`, `str`, `char`, `u8`, in any container). A new CI job
+  (`api-surface`, nightly) runs it. The reviewer had live-proved seven ways past
+  the old text scan; a compiler-backed check does not care how a declaration is
+  spelled.
+- **The textual test is now explicitly a tripwire**, not the guarantee. It still
+  runs under plain `cargo test`, and it now also handles `extern "C"`, `&str` /
+  `char` returns, attributes before `pub fn`, glob re-exports, a trailing `->`
+  and a `->` inside a body. ADR-0010 states which layer is authoritative and why.
+- Probes that each fail the relevant gate and are then reverted: injected
+  free function, method on `Validated`, one-line body, array-length parameter,
+  split return type, `const unsafe`, `extern "C"`, `&str` return, attribute
+  prefix, glob re-export, `->` at end of line, `->` in body, and a trait method
+  (caught by the semantic gate).
+
 ## 2.0.3 — 2026-10-27
 
 Test release; no API or wire change. Three guard bypasses found by verification

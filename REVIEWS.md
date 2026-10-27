@@ -117,3 +117,12 @@ rounds had missed. Both are fixed in 1.2.5.
 
 Lesson recorded: a byte-level surface needs the raw secret bytes, and documentation
 warnings are defects that a gate must fail on rather than print.
+
+## Round 11 — 2026-10-27 (verification of 1.2.5)
+
+Verification round over the 1.2.5 diff: **NO NEW FINDINGS**. The reviewer
+confirmed the raw-byte scan is panic-free for any secret length, runs on the
+canonical module, that no other byte-level surface still uses the lossy text
+form, that the regression test drives `to_protobuf` and asserts the exact code
+for a direct and an embedded copy, and that `cargo doc` with
+`RUSTDOCFLAGS=-D warnings` is clean.

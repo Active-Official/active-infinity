@@ -205,5 +205,7 @@
 - C-8.4: `cargo audit` and `cargo deny` pass; a CycloneDX SBOM is produced per
   release; tags are annotated (a GPG-signed tag needs a maintainer key, tracked as
   a release-process gap).
-- Published: crates.io `active-infinity` 1.1.0; GitHub `Active-Official/active-infinity`
-  and `RatioArtificiosa/active-infinity` at tag `v1.1.0`.
+- Published: crates.io `active-infinity` 1.1.3 (1.1.1/1.1.2/1.1.3 are the review-driven
+  hardening releases, see `REVIEWS.md` and `CHANGELOG.md`); GitHub
+  `Active-Official/active-infinity` and `RatioArtificiosa/active-infinity` at tag
+  `v1.1.3` with a CycloneDX SBOM attached to the release.

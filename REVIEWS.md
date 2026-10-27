@@ -126,3 +126,17 @@ canonical module, that no other byte-level surface still uses the lossy text
 form, that the regression test drives `to_protobuf` and asserts the exact code
 for a direct and an embedded copy, and that `cargo doc` with
 `RUSTDOCFLAGS=-D warnings` is clean.
+
+## Round 12 — 2026-10-27 (re-run of the 1.2.5 verification)
+
+The verification round was re-run after the session resumed. It confirmed the
+raw-byte check, the doc gate, the absence of placeholder markers and the
+conformance coverage, and found one low test-strength gap:
+
+| Finding | Severity | Disposition |
+|---|---|---|
+| The embedded-copy case in `projection_refuses_an_extension_that_copies_a_non_utf8_secret` asserted only `is_err()`, while round 11 says it asserts the exact code | low | fixed in 1.2.6: both copies now assert `infinity/encode` and the reason |
+
+Everything else was re-confirmed: `cargo fmt`, `clippy -D warnings`,
+`cargo test` (both feature sets), `cargo doc` with `RUSTDOCFLAGS=-D warnings`,
+and the clean-clone gate suites for both tags.

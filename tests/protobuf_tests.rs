@@ -796,16 +796,16 @@ fn projection_refuses_an_extension_that_copies_a_non_utf8_secret() {
     assert_eq!(error.code(), "infinity/encode");
     assert!(error.to_string().contains("extension payload"));
 
-    // The same bytes split by an unrelated payload are still refused.
+    // The same bytes embedded after an unrelated payload are still refused, and
+    // for the same reason: the scan is a byte scan, not a text match.
     let mut module = InfinityModule::new();
     let secret = module.push(Inode::Secret(SecretBytes::new(raw.clone())));
     module.set_root(Some(secret));
     module.add_extension(7, b"prefix".to_vec());
     module.add_extension(8, [b"padding".as_slice(), &raw].concat());
-    assert!(
-        to_protobuf(&module).is_err(),
-        "embedded raw copy is refused"
-    );
+    let error = to_protobuf(&module).expect_err("embedded raw copy is refused");
+    assert_eq!(error.code(), "infinity/encode");
+    assert!(error.to_string().contains("extension payload"));
 }
 
 #[test]

@@ -1,5 +1,14 @@
 # Changelog — Active Infinity
 
+## 1.2.6 — 2026-10-27
+
+Test-strength release; no code change.
+
+- The non-UTF-8 secret regression test now asserts the exact failure code
+  (`infinity/encode`) and the reason for the **embedded** copy as well as the
+  direct one, so the committed test proves what `REVIEWS.md` claims it proves
+  rather than accepting any error.
+
 ## 1.2.5 — 2026-10-27
 
 Fixes from adversarial verification. No wire-format change.

@@ -23,7 +23,7 @@ dependencies = [
 
 [[package]]
 name = "active-infinity"
-version = "1.2.5"
+version = "1.2.6"
 dependencies = [
  "active-core",
  "blake3",

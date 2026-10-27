@@ -160,3 +160,18 @@ accessors themselves should be public).
 The remaining public secret-related item is `SECRET_MARKER`, a literal string with
 no secret material. The crate's own code, tests, examples and benches never needed
 the accessors, which is evidence they were accidental rather than load-bearing.
+
+## Round 14 — 2026-10-27 (verification of 2.0.0, 2.0.1)
+
+Verification of the 2.0.0 removal found that one public accessor survived and
+that the guard was too narrow. Both fixed in 2.0.1; 2.0.0 is yanked.
+
+| Finding | Severity | Disposition |
+|---|---|---|
+| `Validated::secret` was `pub` and returned raw secret bytes from a validated image (its doc claimed crate-internal) | high | fixed: `pub(crate)`; the decoder is the only caller |
+| The API-surface guard scanned a fixed file list that omitted `src/validate.rs` - the file with the leak - and missed `pub const fn`/`pub unsafe fn`/`pub async fn`, multi-line signatures and differently named accessors | medium | fixed: the guard walks all of `src/`, joins multi-line declarations, handles the modifiers, and adds a shape rule on the return type with a written allowlist |
+| `View::provenance_entries` returned unredacted entries with no "raw" note | low | fixed: documented as a raw accessor; the stored form is already redacted |
+
+The widened guard was probed adversarially: `pub fn secret_values` (blacklisted
+name), `pub fn secret_names` (new name, raw return) and `pub fn secret_raw` as a
+method on `Validated` each failed the suite, and each probe was reverted.

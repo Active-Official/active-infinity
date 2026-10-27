@@ -1,5 +1,30 @@
 # Changelog — Active Infinity
 
+## 2.0.1 — 2026-10-27
+
+**Security fix. 2.0.0 is yanked: it still shipped one public secret accessor.**
+
+- **`Validated::secret` is crate-internal.** The zero-copy validator exposed
+  `pub fn secret(&self, id) -> Result<&[u8]>`, which returned raw secret bytes
+  from a validated image; its own doc said "crate-internal" while the signature
+  said otherwise. The decoder is the only caller, so it is now `pub(crate)`.
+  This is the last public path to secret plaintext.
+- **The API-surface guard now scans every file under `src/`**, follows multi-line
+  signatures, treats `pub const fn` / `pub unsafe fn` / `pub async fn` like
+  `pub fn`, and applies a *shape* rule on top of the name blacklist: a public
+  function whose name mentions secrets and whose return type is `String`,
+  `Vec<String>`, `Vec<u8>`, `Vec<Vec<u8>>` or `&[u8]` is a leak unless allowlisted
+  with a written reason. `secret_tainted_paths` is the one allowlisted entry (it
+  returns redacted labels, never bytes), and a test fails if an allowlist entry
+  goes stale.
+- **`View::provenance_entries` is documented as a raw accessor** (the stored form
+  is already redacted; the doc now says so, matching `interop::provenance_pairs`).
+
+The guard was validated adversarially: injecting `pub fn secret_values` (a
+blacklisted name), `pub fn secret_names` (a new name with a raw return) and
+`pub fn secret_raw` inside `impl Validated` (a method) each made the suite fail,
+and the injected code was reverted.
+
 ## 2.0.0 — 2026-10-27
 
 **Breaking: the plaintext secret accessors are gone.** The AINF wire format is

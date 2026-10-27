@@ -427,8 +427,12 @@ impl<'a> Validated<'a> {
         Ok(read_u64(self.buf, offset)? as i64)
     }
 
-    /// Borrow a secret's raw bytes (crate-internal: no public unlock API).
-    pub fn secret(&self, id: u32) -> Result<&'a [u8]> {
+    /// Borrow a secret's raw bytes.
+    ///
+    /// Crate-internal on purpose: a public accessor would be an unlock API, and
+    /// the whole point of structural secrets is that they cannot be read out.
+    /// The decoder and the redaction paths are the only callers.
+    pub(crate) fn secret(&self, id: u32) -> Result<&'a [u8]> {
         let count = self.header.span(Section::Secrets).count;
         if id >= count {
             return Err(Error::SecretEntry(id));

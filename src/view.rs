@@ -241,6 +241,11 @@ impl<'a> InfinityView<'a> {
     }
 
     /// Provenance entries, borrowed.
+    ///
+    /// A raw accessor: it returns the stored entries as they are. The encoded
+    /// form is already redacted against the module's secrets, so this is safe
+    /// for a validated image; a caller that builds a view over hand-made bytes
+    /// should use `interop::provenance_json` for output that leaves the process.
     pub fn provenance_entries(&self) -> Result<Vec<(String, ProvEntry)>> {
         Ok(self
             .validated

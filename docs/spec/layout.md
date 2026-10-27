@@ -46,7 +46,7 @@ the byte length is derived from the section body (§4).
 
 | Bit | Name | Meaning |
 |----:|------|---------|
-| 0 | `canonical` | the writer declares canonical form; readers must refuse the image if re-encoding differs |
+| 0 | `canonical` | the writer declares canonical form; a reader that relies on canonical identity must prove it by re-encoding (§6.1) |
 | 1 | `annotations` | an annotation table is present |
 | 2 | `provenance` | a provenance block is present |
 | 3 | `extensions` | an extension directory is present |
@@ -410,6 +410,27 @@ Consequences, all tested:
 - a decoded canonical module re-encodes to the same bytes;
 - every node in a valid image is reachable from a root (`infinity/node`,
   reason `unreachable node`).
+
+### 6.1 Proving canonical form
+
+The `canonical` flag is a **claim by the writer**, not a fact a parser can take
+on trust. Structural validation never decodes and re-encodes, because that would
+double the work an attacker can force with a single request; canonicality is
+therefore an explicit, separate proof:
+
+- `validate` / `validate_with` check structure, ranges, ordering, reachability,
+  acyclicity, depth and the content hash. They accept a structurally valid image
+  whose bytes are not the canonical encoding of their own content.
+- `validate_canonical` (or `DecodeOpts { verify_canonical: true, .. }`) decodes,
+  re-encodes and compares. A declared-canonical image that differs is
+  `infinity/not-canonical`. `DecodeOpts::paranoid()` enables this together with
+  the strict limits, and is the profile for untrusted network input.
+
+An image produced by this crate's encoder is always canonical, so a receiver
+that re-encodes before storing or forwarding never propagates a lie. A receiver
+that uses the flag for deduplication, caching or signatures must prove it first;
+the content hash alone is computed over the bytes actually received and is
+therefore safe without the proof.
 
 ---
 

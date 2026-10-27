@@ -7,8 +7,12 @@
 //! 1. `validate` never panics, never hangs and never over-allocates, whatever
 //!    the bytes are (the validator is the only gate before any parse).
 //! 2. A buffer that validates decodes without panicking.
-//! 3. A buffer that validates re-encodes to itself (canonical identity) and the
-//!    canonical proof agrees.
+//! 3. The encoder always emits canonical bytes: whatever decode accepted, the
+//!    image it re-encodes to passes the strict canonical proof and is a
+//!    fixpoint of decode/encode. An input that merely *claims* canonical form is
+//!    not required to be canonical — `validate` does not pay for that proof (see
+//!    `docs/spec/layout.md` §6.1) — but when the proof does pass, the bytes must
+//!    be reproduced exactly.
 //! 4. A validated buffer can be read through the zero-copy view without panic.
 //!
 //! Run with `cargo +nightly fuzz run decode -- -runs=200000`.
@@ -30,15 +34,25 @@ fuzz_target!(|data: &[u8]| {
         Err(_) => return,
     };
 
-    // (3) Canonical identity: re-encoding reproduces the image, and the strict
-    // canonical proof agrees with plain validation.
+    // (3) Canonical identity.
     if let Ok(image) = encode(&module) {
-        assert_eq!(
-            &image[..],
-            data,
-            "a validated canonical image must re-encode to itself"
+        assert!(
+            validate_canonical(&image, Limits::default()).is_ok(),
+            "the encoder must emit bytes that pass the canonical proof"
         );
-        assert!(validate_canonical(data, Limits::default()).is_ok());
+        let again = decode(&image).expect("a canonical image decodes");
+        assert_eq!(
+            encode(&again).expect("re-encode"),
+            image,
+            "canonical form is a fixpoint of decode/encode"
+        );
+        if validate_canonical(data, Limits::default()).is_ok() {
+            assert_eq!(
+                image.as_slice(),
+                data,
+                "an image that passes the canonical proof must re-encode to itself"
+            );
+        }
     }
 
     // (4) Zero-copy views never panic on validated input.

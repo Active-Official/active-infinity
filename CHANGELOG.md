@@ -7,6 +7,14 @@
   runs on pushes as well as pull requests, and the package job verifies the
   tarball instead of skipping verification. `proptest` is held at 1.9.0 in
   `Cargo.lock`, the newest release that still builds on the declared MSRV.
+- **The fuzz target states the right canonical invariant.** Running the decoder
+  target on every push (instead of only on pull requests) surfaced an assertion
+  that was wrong, not a decoder bug: `validate` deliberately does not prove
+  canonical form (that is `validate_canonical`'s job, and doing it on every
+  request would double the work an attacker can force). The target now proves
+  that the encoder's output is canonical and a fixpoint, and that an image which
+  *passes* the canonical proof re-encodes to itself. The rule is written down in
+  `docs/spec/layout.md` §6.1.
 
 ## 1.2.0 — 2026-10-27
 

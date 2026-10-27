@@ -30,6 +30,7 @@ duplicate_binding infinity/duplicate-binding
 bad_annotation infinity/annotation
 bad_provenance infinity/provenance
 bad_extension infinity/extension
+bad_extension_gap infinity/extension
 too_deep infinity/depth limits=max_depth:8
 bad_blob infinity/blob
 not_canonical infinity/not-canonical verify=canonical

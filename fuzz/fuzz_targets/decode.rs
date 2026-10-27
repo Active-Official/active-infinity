@@ -14,6 +14,8 @@
 //!    `docs/spec/layout.md` §6.1) — but when the proof does pass, the bytes must
 //!    be reproduced exactly.
 //! 4. A validated buffer can be read through the zero-copy view without panic.
+//! 5. Every projection is total on validated input, and the Protobuf projection
+//!    is deterministic.
 //!
 //! Run with `cargo +nightly fuzz run decode -- -runs=200000`.
 
@@ -66,6 +68,23 @@ fuzz_target!(|data: &[u8]| {
         if let Ok(node) = view.node(id) {
             let _ = view.children(id);
             let _ = node.kind_name();
+        }
+    }
+
+    // (5) Projections are total on validated input. A projection walks the
+    // graph, so the work is bounded here; the conformance suite covers the
+    // large-module cases.
+    if meta.nodes <= 4096 {
+        let _ = active_infinity::interop::to_redacted_json(&module);
+        let _ = active_infinity::interop::provenance_lines(&module);
+        let _ = active_infinity::interop::value_paths(&module);
+        if let Ok(first) = active_infinity::to_protobuf(&module) {
+            let second = active_infinity::to_protobuf(&module)
+                .expect("projecting the same module twice succeeds");
+            assert_eq!(
+                first, second,
+                "the protobuf projection must be deterministic"
+            );
         }
     }
 });

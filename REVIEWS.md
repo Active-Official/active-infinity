@@ -51,3 +51,22 @@ Three new findings, all fixed in 1.1.3:
 ## Round 5 — 2026-10-27
 
 Verification round: **NO NEW FINDINGS**.
+
+## Round 6 - 2026-10-27 (1.2.0 release candidate)
+
+Review of `v1.1.3..HEAD` through the Muse proxy. Eight findings, all fixed
+before the release candidate was tagged:
+
+| Finding | Severity | Disposition |
+|---|---|---|
+| Extension payloads were emitted verbatim by `to_protobuf`, so a secret copy inside an opaque payload could leave through the projection | high | fixed: `to_protobuf` refuses a payload containing a secret literal (`infinity/encode`); `projection_refuses_an_extension_that_copies_a_secret` |
+| Protobuf bindings/annotations/extensions were emitted in insertion order, so logically equal modules projected to different bytes | high | fixed: the projection is built from the canonical module (decode of its own image); `projection_is_canonical_for_logically_equal_modules` |
+| `check_acyclic` / `check_depth` re-derived a node's children once per edge — quadratic on wide tables | medium | fixed: Kahn topological sweep, O(V+E), one child-list derivation per node |
+| Extension payloads could leave gaps (only an `align8` lower bound was checked) and the trailing-bytes comparison was derived from the payloads themselves | medium | fixed: payloads must start exactly at `align8(previous end)`, padding must be zero, and the end is compared with the packed end; new vector `bad_extension_gap`; `extension_payloads_must_be_packed` |
+| `DecodeOpts::verify_canonical` only proved when the header declared canonical, while `validate_canonical` always proved (and encoded twice) | medium | fixed: the option proves unconditionally; `validate_canonical` is the same path with one encode; `canonical_proof_is_unconditional` |
+| Redaction used a length threshold in `redact_text` but not in the projections, so 1–3-byte secret copies could survive canonicalization and appear in the image | medium | fixed: one unconditional rule in both places; `short_secrets_are_redacted_in_metadata_text` |
+| Interpolation taint did not follow `Ref`/`Semantic`, so `${ref_to_secret}` laundered to `"prefix ${}"` | medium | fixed: `resolves_to_secret` follows wrappers and fails closed past the depth guard; `taint_follows_references_in_interpolations` |
+| Test gaps: the wire reader did not check field order or minimal varints; no scalar extremes, no projection determinism across construction orders, no secret-in-extension case, projections never fuzzed | low | fixed: reader asserts ascending fields and minimal varints; new tests for `i64::MIN/MAX`, NaN, `-0.0`, empty text, canonical-envelope equality, and the fuzz target now exercises both projections |
+
+Verified unchanged: JSON projection output, canonical bytes of every existing
+vector, the decoder's totality, and the stream layer.

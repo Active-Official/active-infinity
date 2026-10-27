@@ -36,6 +36,8 @@ jobs:
       # 1.9.0 are the newest releases that still build on 1.85.
       - name: MSRV check (every feature, every target)
         run: cargo check --locked --all-targets --all-features
+      - name: MSRV check (no default features)
+        run: cargo check --locked --no-default-features
 
   package:
     runs-on: ubuntu-latest

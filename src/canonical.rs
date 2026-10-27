@@ -392,18 +392,18 @@ fn normalize(node: &Inode) -> Inode {
 pub const SECRET_MARKER: &str = "***SECRET***";
 
 /// Replace secret material inside free text (annotations, provenance, model
-/// names). A whole-value match is always redacted; substring spreading applies
-/// to secrets of four bytes or more, mirroring the text language's rule, so a
-/// copy of a secret cannot ride along inside a note.
+/// names).
+///
+/// Every non-empty secret is replaced wherever it appears, at any length: a copy
+/// that survives canonicalization is stored in the image, and the projections
+/// would then have to hide bytes the image itself carries.
 fn redact_text(text: &str, secrets: &[String]) -> String {
     let mut out = text.to_string();
     for secret in secrets {
         if secret.is_empty() || !out.contains(secret.as_str()) {
             continue;
         }
-        if out == *secret || secret.len() >= 4 {
-            out = out.replace(secret.as_str(), SECRET_MARKER);
-        }
+        out = out.replace(secret.as_str(), SECRET_MARKER);
     }
     out
 }

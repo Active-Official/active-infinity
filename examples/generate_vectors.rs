@@ -133,6 +133,7 @@ fn with_extensions() -> InfinityModule {
     let mut module = simple();
     module.add_extension(10, b"first".to_vec());
     module.add_extension(20, b"second".to_vec());
+    module.add_extension(30, b"third".to_vec());
     module
 }
 
@@ -536,6 +537,25 @@ fn main() {
     bad_extension[ext + 16..ext + 24].copy_from_slice(&first_tag.to_le_bytes());
     fix_hash(&mut bad_extension);
     push("bad_extension", "infinity/extension", bad_extension, "");
+
+    // A directory that leaves a gap between payloads: the section stays in
+    // range and the tags are sorted, but the middle payload no longer starts
+    // where packing puts it. Shifting the *middle* entry keeps the section end
+    // unchanged, so this is not a layout fault.
+    let mut bad_extension_gap = extensions_bytes.clone();
+    let middle_offset = u32::from_le_bytes(
+        extensions_bytes[ext + 16 + 8..ext + 16 + 12]
+            .try_into()
+            .expect("4 bytes"),
+    );
+    patch_u32(&mut bad_extension_gap, ext + 16 + 8, middle_offset + 8);
+    fix_hash(&mut bad_extension_gap);
+    push(
+        "bad_extension_gap",
+        "infinity/extension",
+        bad_extension_gap,
+        "",
+    );
 
     // Depth: a chain deeper than the configured ceiling.
     let mut chain = InfinityModule::new();

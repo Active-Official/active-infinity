@@ -1,20 +1,44 @@
 # Changelog — Active Infinity
 
-## Unreleased
+## 1.2.1 — 2026-10-27
 
-- **CI tests the committed dependency graph.** Every job runs with `--locked`,
-  the MSRV job builds every feature and every target on 1.85.0, the fuzz job
-  runs on pushes as well as pull requests, and the package job verifies the
-  tarball instead of skipping verification. `proptest` is held at 1.9.0 in
-  `Cargo.lock`, the newest release that still builds on the declared MSRV.
-- **The fuzz target states the right canonical invariant.** Running the decoder
-  target on every push (instead of only on pull requests) surfaced an assertion
-  that was wrong, not a decoder bug: `validate` deliberately does not prove
-  canonical form (that is `validate_canonical`'s job, and doing it on every
-  request would double the work an attacker can force). The target now proves
-  that the encoder's output is canonical and a fixpoint, and that an image which
-  *passes* the canonical proof re-encodes to itself. The rule is written down in
-  `docs/spec/layout.md` §6.1.
+Independent review of the 1.2.0 candidate found eight issues; all are fixed here.
+No wire-format change: every previously valid image stays valid, and every
+previously canonical image stays canonical.
+
+- **The Protobuf projection is canonical.** It is built from the canonical module
+  (the decode of its own image), so logically equal modules — same AINF bytes and
+  hash — project to identical bytes, and bindings, annotations and extensions come
+  out in canonical order. Before, a table built with fields in a different order
+  produced a different projection.
+- **A projection cannot copy a secret through an opaque payload.** `to_protobuf`
+  refuses an extension whose payload contains a secret literal instead of emitting
+  it (`infinity/encode`, reason `extension payload carries secret material`).
+- **Validation is linear in edges, not quadratic.** Acyclicity and depth use a
+  Kahn topological sweep, with one child-list derivation per node; a wide table no
+  longer turns validation quadratic.
+- **Extension payloads must be packed.** Each payload now has to start exactly at
+  `align8(previous end)` and the padding between payloads must be zero, so a
+  directory cannot hide slack. New conformance vector `bad_extension_gap`.
+- **One canonical proof.** `DecodeOpts::verify_canonical` now proves canonicality
+  unconditionally, exactly like `validate_canonical` (which no longer encodes
+  twice). An unflagged image fails the proof, because the canonical encoding of
+  its content carries the flag.
+- **One redaction rule.** `redact_text` (annotations, provenance, intents) no
+  longer has a four-byte threshold, matching the projections: a one- or two-byte
+  secret is replaced wherever it appears.
+- **Taint follows references.** An interpolation whose expression is a `Ref` (or
+  `Semantic` wrapper) around a secret redacts the whole string instead of
+  rendering `"prefix ${}"`.
+- **Tests and fuzzing cover the projections.** The independent Protobuf reader now
+  checks ascending field numbers and minimal varints; new tests cover
+  `i64::MIN`/`i64::MAX`, NaN, `-0.0`, empty text, canonical-envelope equality,
+  secret-bearing extensions and short secrets; the decoder fuzz target exercises
+  both projections and asserts the projection is deterministic.
+
+CI also tests the locked graph with `--locked`, builds every target and feature on
+the declared MSRV (1.85) with and without default features, verifies the package
+tarball, and fuzzes on pushes as well as pull requests.
 
 ## 1.2.0 — 2026-10-27
 

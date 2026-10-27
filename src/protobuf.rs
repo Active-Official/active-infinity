@@ -104,10 +104,16 @@
 //! - absent optional messages (`root`, `provenance`) and empty repeated fields
 //!   are omitted;
 //! - varints are minimal, `sint64` uses zig-zag, `double` is little-endian
-//!   IEEE-754, and every length prefix is exact.
+//!   IEEE-754, and every length prefix is exact;
+//! - the projection is built from the *canonical* module (the decode of its own
+//!   encoded image), so logically equal modules project to identical bytes and
+//!   bindings, annotations and extensions come out in canonical order;
+//! - a module whose opaque extension payload contains a secret literal is
+//!   refused: the projection must not copy secret material it cannot redact
+//!   without corrupting an opaque payload.
 
 use crate::encode::{encode, hash_image};
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::interop::{project_node_with, redacted_key, secret_table, Projected};
 use crate::ir::{AnnotationKind, InfinityModule, ProvValue};
 
@@ -247,11 +253,20 @@ fn encode_value(value: &Projected, out: &mut Vec<u8>) {
 /// the authoritative bytes with [`crate::validate`] and the usual content
 /// addressing.
 ///
+/// The projection is built from the *canonical* module (the decode of its own
+/// encoded image), so two logically equal modules — which share their AINF
+/// bytes and hash — also share their projection bytes. Bindings, annotations and
+/// extensions therefore come out in canonical order.
+///
 /// A module that cannot be encoded canonically (a cycle, a dangling reference,
-/// a duplicate binding) is refused instead of being projected approximately.
+/// a duplicate binding) is refused instead of being projected approximately, and
+/// so is a module whose opaque extension payload contains a copy of a secret
+/// literal: that copy would otherwise leave through the projection.
 pub fn to_protobuf(module: &InfinityModule) -> Result<Vec<u8>> {
     let image = encode(module)?;
     let hash = hash_image(&image)?;
+    let canonical = crate::decode::decode(&image)?;
+    let module = &canonical;
     let secrets = secret_table(module);
 
     let mut out = Vec::new();
@@ -284,6 +299,11 @@ pub fn to_protobuf(module: &InfinityModule) -> Result<Vec<u8>> {
     }
 
     for (tag, payload) in module.extensions() {
+        if carries_secret(payload, &secrets) {
+            return Err(Error::Encode(
+                "extension payload carries secret material; a projection must not copy it",
+            ));
+        }
         let mut extension = Vec::new();
         uint(&mut extension, 1, *tag);
         bytes(&mut extension, 2, payload);
@@ -291,6 +311,16 @@ pub fn to_protobuf(module: &InfinityModule) -> Result<Vec<u8>> {
     }
 
     Ok(out)
+}
+
+/// Whether an opaque payload contains a secret literal.
+fn carries_secret(payload: &[u8], secrets: &[String]) -> bool {
+    secrets.iter().any(|secret| {
+        let bytes = secret.as_bytes();
+        !bytes.is_empty()
+            && bytes.len() <= payload.len()
+            && payload.windows(bytes.len()).any(|window| window == bytes)
+    })
 }
 
 fn encode_annotation(annotation: &crate::ir::Annotation, secrets: &[String]) -> Vec<u8> {

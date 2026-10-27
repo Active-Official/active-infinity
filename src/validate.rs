@@ -21,9 +21,9 @@ use crate::error::{Error, Result};
 use crate::ir::{NodeId, ProvValue, Provenance};
 use crate::layout::{
     align8, dialect_hash, read_u32, read_u64, Header, Limits, Meta, Section, BLOB_ENTRY_SIZE,
-    EXT_DIR_SIZE, FIELD_SIZE, FLAG_ANNOTATIONS, FLAG_CANONICAL, FLAG_EXTENSIONS, FLAG_PROVENANCE,
-    FLAG_SECRETS, HEADER_SIZE, NODE_FLAG_0, NODE_FLAG_1, NODE_FLAG_KNOWN, NODE_RECORD_SIZE,
-    PROV_ENTRY_SIZE, PROV_HEADER_SIZE, SECTION_COUNT,
+    EXT_DIR_SIZE, FIELD_SIZE, FLAG_ANNOTATIONS, FLAG_EXTENSIONS, FLAG_PROVENANCE, FLAG_SECRETS,
+    HEADER_SIZE, NODE_FLAG_0, NODE_FLAG_1, NODE_FLAG_KNOWN, NODE_RECORD_SIZE, PROV_ENTRY_SIZE,
+    PROV_HEADER_SIZE, SECTION_COUNT,
 };
 use crate::unit::{UnitTag, UNIT_NAMED};
 
@@ -121,7 +121,7 @@ impl<'a> Validated<'a> {
                 return Err(Error::HashMismatch);
             }
         }
-        if opts.verify_canonical && header.flags & FLAG_CANONICAL != 0 {
+        if opts.verify_canonical {
             let module = crate::decode::decode_validated(&validated)?;
             let image = crate::encode::encode_with(
                 &module,
@@ -1782,13 +1782,34 @@ impl<'a> Validated<'a> {
                 }
             }
             previous_tag = Some(tag);
-            if payload_offset < align8(previous_end) || payload_offset + payload_len > end {
+            // Payloads are packed in tag order: the first starts right after the
+            // directory and each later one starts at the next multiple of 8, so
+            // there is no room for slack that a reader could not account for.
+            let expected = align8(previous_end);
+            if payload_offset != expected {
+                return Err(Error::Extension {
+                    tag,
+                    reason: "payloads are not packed in tag order",
+                });
+            }
+            for offset in previous_end..expected {
+                if self.buf[offset as usize] != 0 {
+                    return Err(Error::Padding { offset });
+                }
+            }
+            let payload_end = payload_offset
+                .checked_add(payload_len)
+                .ok_or(Error::Extension {
+                    tag,
+                    reason: "payload length overflows",
+                })?;
+            if payload_end > end {
                 return Err(Error::Extension {
                     tag,
                     reason: "payload out of range",
                 });
             }
-            previous_end = payload_offset + payload_len;
+            previous_end = payload_end;
         }
         // `section_end` already reports the unaligned end of the last payload;
         // the padding up to `align8(end)` belongs to the inter-section gap and
@@ -1809,34 +1830,44 @@ impl<'a> Validated<'a> {
     /// treats a cycle as fatal before any value exists).
     fn check_acyclic(&self) -> Result<()> {
         let count = self.node_count();
-        // 0 = unvisited, 1 = on the stack, 2 = done.
-        let mut state = vec![0u8; count as usize];
+        // Kahn's algorithm: peel nodes with no incoming edge. It is O(V + E)
+        // with one child-list derivation per node, where a cursor-based depth
+        // first search would re-derive a wide node's children once per edge and
+        // turn a 64k-field table into a quadratic validation.
+        let mut incoming = vec![0u32; count as usize];
         let mut scratch: Vec<u32> = Vec::new();
-        let mut stack: Vec<(u32, usize)> = Vec::new();
-        for start in 0..count {
-            if state[start as usize] != 0 {
-                continue;
+        for node in 0..count {
+            let rec = self.node(NodeId(node))?;
+            self.node_children_into(&rec, &mut scratch)?;
+            for child in &scratch {
+                let slot = &mut incoming[*child as usize];
+                *slot = slot.saturating_add(1);
             }
-            stack.push((start, 0));
-            state[start as usize] = 1;
-            while let Some((node, cursor)) = stack.pop() {
-                let rec = self.node(NodeId(node))?;
-                self.node_children_into(&rec, &mut scratch)?;
-                if cursor < scratch.len() {
-                    stack.push((node, cursor + 1));
-                    let next = scratch[cursor];
-                    match state[next as usize] {
-                        0 => {
-                            state[next as usize] = 1;
-                            stack.push((next, 0));
-                        }
-                        1 => return Err(Error::Cycle { node: next }),
-                        _ => {}
-                    }
-                } else {
-                    state[node as usize] = 2;
+        }
+        let mut queue: std::collections::VecDeque<u32> = incoming
+            .iter()
+            .enumerate()
+            .filter(|(_, degree)| **degree == 0)
+            .map(|(node, _)| node as u32)
+            .collect();
+        let mut processed = 0u32;
+        while let Some(node) = queue.pop_front() {
+            processed += 1;
+            let rec = self.node(NodeId(node))?;
+            self.node_children_into(&rec, &mut scratch)?;
+            for child in &scratch {
+                let slot = &mut incoming[*child as usize];
+                *slot = slot.saturating_sub(1);
+                if *slot == 0 {
+                    queue.push_back(*child);
                 }
             }
+        }
+        if processed != count {
+            // Whatever the peel could not reach has an incoming edge from the
+            // cycle itself. Report the lowest such node so the answer is stable.
+            let node = incoming.iter().position(|degree| *degree > 0).unwrap_or(0) as u32;
+            return Err(Error::Cycle { node });
         }
         Ok(())
     }
@@ -1899,44 +1930,57 @@ impl<'a> Validated<'a> {
         if count == 0 {
             return Ok(());
         }
-        let mut depth = vec![0u32; count as usize];
+        // A topological sweep, so each edge is examined exactly once. The old
+        // cursor walk re-derived a node's children every time its depth grew,
+        // which is quadratic on wide nodes and polynomial on diamond graphs.
+        let mut incoming = vec![0u32; count as usize];
         let mut scratch: Vec<u32> = Vec::new();
-        // Every node with no incoming edge is a root (module root, bindings,
-        // annotation subjects). Starting only at node 0 would let a second root
-        // carry an arbitrarily deep chain past the ceiling.
-        let mut has_parent = vec![false; count as usize];
         for node in 0..count {
             let rec = self.node(NodeId(node))?;
             self.node_children_into(&rec, &mut scratch)?;
             for child in &scratch {
-                has_parent[*child as usize] = true;
+                let slot = &mut incoming[*child as usize];
+                *slot = slot.saturating_add(1);
             }
         }
-        let mut stack: Vec<(u32, u32)> = Vec::new();
-        for node in 0..count {
-            if !has_parent[node as usize] {
-                depth[node as usize] = 1;
-                stack.push((node, 0));
-            }
+        // Every node with no incoming edge is a root (module root, bindings,
+        // annotation subjects). Starting only at node 0 would let a second root
+        // carry an arbitrarily deep chain past the ceiling.
+        let mut depth = vec![1u32; count as usize];
+        let mut queue: std::collections::VecDeque<u32> = incoming
+            .iter()
+            .enumerate()
+            .filter(|(_, degree)| **degree == 0)
+            .map(|(node, _)| node as u32)
+            .collect();
+        if queue.is_empty() {
+            // Acyclicity runs first; stay total for a hand-built order.
+            return Err(Error::Cycle { node: 0 });
         }
-        while let Some((node, cursor)) = stack.pop() {
+        let mut processed = 0u32;
+        while let Some(node) = queue.pop_front() {
+            processed += 1;
+            let next = depth[node as usize] + 1;
             let rec = self.node(NodeId(node))?;
             self.node_children_into(&rec, &mut scratch)?;
-            if cursor as usize >= scratch.len() {
-                continue;
+            for child in &scratch {
+                if next > limits.max_depth {
+                    return Err(Error::Depth {
+                        limit: limits.max_depth,
+                    });
+                }
+                if next > depth[*child as usize] {
+                    depth[*child as usize] = next;
+                }
+                let slot = &mut incoming[*child as usize];
+                *slot = slot.saturating_sub(1);
+                if *slot == 0 {
+                    queue.push_back(*child);
+                }
             }
-            stack.push((node, cursor + 1));
-            let child = scratch[cursor as usize];
-            let candidate = depth[node as usize] + 1;
-            if candidate > limits.max_depth {
-                return Err(Error::Depth {
-                    limit: limits.max_depth,
-                });
-            }
-            if candidate > depth[child as usize] {
-                depth[child as usize] = candidate;
-                stack.push((child, 0));
-            }
+        }
+        if processed != count {
+            return Err(Error::Cycle { node: 0 });
         }
         Ok(())
     }
@@ -2192,26 +2236,18 @@ pub fn validate_with(buf: &[u8], opts: crate::layout::DecodeOpts) -> Result<Meta
 
 /// Validate and additionally prove `buf` is exactly the canonical encoding of
 /// its own content.
+///
+/// This is the unconditional form of `DecodeOpts { verify_canonical: true }`:
+/// an image that is canonical in structure but lacks the `canonical` flag fails
+/// with `infinity/not-canonical`, because the canonical encoding of its content
+/// carries the flag. The check re-encodes once, inside validation.
 pub fn validate_canonical(buf: &[u8], limits: Limits) -> Result<Meta> {
     let opts = crate::layout::DecodeOpts {
         limits,
         verify_hash: true,
         verify_canonical: true,
     };
-    let validated = Validated::new(buf, opts)?;
-    let module = crate::decode::decode_validated(&validated)?;
-    let image = crate::encode::encode_with(
-        &module,
-        crate::layout::EncodeOpts {
-            write_hash: true,
-            mark_canonical: true,
-            streamed: validated.header.flags & crate::layout::FLAG_STREAMED != 0,
-        },
-    )?;
-    if image != buf {
-        return Err(Error::NotCanonical);
-    }
-    Ok(validated.meta())
+    Validated::new(buf, opts).map(|validated| validated.meta())
 }
 
 /// Parse a provenance block from bytes already validated (used by tests).

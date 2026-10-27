@@ -34,6 +34,7 @@ stream layer. It complements `docs/spec/layout.md` (normative wire contract) and
 | Hidden data in slack | zero padding enforced; unused record fields must be zero; unreachable nodes rejected | `validate_layout`, `check_nodes`, `check_reachability` |
 | Forged graph | edge table must equal the derived edges exactly | `check_edges` |
 | Content substitution | Blake3 content hash over the whole canonical payload | `hash_image` |
+| A writer lies in the `canonical` flag | the flag is a claim: `validate` checks structure and hash, `validate_canonical` / `DecodeOpts::paranoid()` proves canonicality; dedup and signatures must use the proof (layout §6.1) | `validate::validate_canonical` |
 | Cross-version confusion | dialect hash refused before parsing; version fields | `Header::parse` |
 | Secret leakage through `Debug` | hand-written redacting `Debug`; `SecretBytes` has no value-bearing formatting | `ir.rs` |
 | Secret leakage through equality | `SecretBytes::eq` always false; module equality blinds payloads | `ir.rs` |

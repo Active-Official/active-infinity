@@ -9,7 +9,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
-active-infinity = { path = "..", default-features = false }
+active-infinity = { path = "..", default-features = false, features = ["json"] }
 
 [[bin]]
 name = "decode"

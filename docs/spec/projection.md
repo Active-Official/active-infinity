@@ -45,10 +45,17 @@ Redaction is structural, not textual:
   so a partial copy cannot leak;
 - a table key or a provenance key that contains a secret has each occurrence
   replaced, so a key cannot smuggle a copy;
+- the rule has **no length threshold**: a one- or two-byte secret is redacted
+  exactly like a long one. Redaction in canonicalization (`interop::redact_text`,
+  used for annotations and provenance) follows the same rule, so a copy cannot
+  survive in the image and then be hidden only by the projections;
+- reference wrappers are transparent: an interpolated `${ref_to_secret}` redacts
+  the whole string instead of rendering `${}`;
 - a blob projects its identity only (hash, size, media type, taint); its payload
   is never rendered, and a tainted blob's media type is replaced by the marker;
-- an interpolated string whose expression part is secret projects as the marker
-  even though the literal parts are public.
+- an extension payload is opaque, so the Protobuf projection **refuses** a
+  module whose payload contains a secret literal rather than shipping the copy
+  (`infinity/encode`, reason `extension payload carries secret material`).
 
 The test suite asserts that the secret literal does not appear anywhere in the
 projected bytes.
@@ -154,7 +161,10 @@ message Expr { string kind = 1; }
   omitted.
 - Varints are minimal, `sint64` is zig-zag, `double` is little-endian IEEE-754,
   and length prefixes are exact.
-- Projecting the same module twice produces identical bytes.
+- The projection is built from the **canonical module** — the decode of its own
+  encoded image — so bindings, annotations and extensions come out in canonical
+  order and two logically equal modules (same AINF bytes, same hash) project to
+  identical bytes.
 
 ### 4.2 Compatibility
 
@@ -169,6 +179,15 @@ The Protobuf form is a **view**, not a second canonical form. Content addressing
 signatures and streaming all use the AINF image. A consumer that needs to verify
 what it received fetches the AINF bytes, checks them with `validate` or
 `validate_canonical`, and compares the hash with `Module.content_hash`.
+
+### 4.4 Envelope difference from JSON
+
+The two projections render the same tree but not the same envelope. JSON is the
+module's **root value**: the shape a legacy consumer expects, with no module
+metadata. Protobuf is the **module**: root, bindings, annotations, provenance,
+extensions, content hash and size. A consumer that needs the metadata reads the
+Protobuf form; a consumer that needs only the document reads JSON. Neither
+projection is a complete copy of the AINF bytes, and neither is meant to be.
 
 ## 5. Depth and refusals
 

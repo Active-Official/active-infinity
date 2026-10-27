@@ -484,7 +484,9 @@ pub struct DecodeOpts {
     /// Verify the stored content hash (always recommended; only tests that
     /// intentionally mutate bytes turn it off).
     pub verify_hash: bool,
-    /// When the header declares canonical form, verify re-encoding equality.
+    /// Prove that the image is exactly the canonical encoding of its own
+    /// content. This is unconditional: an unflagged image fails, because the
+    /// canonical encoding of its content carries the canonical flag.
     pub verify_canonical: bool,
 }
 

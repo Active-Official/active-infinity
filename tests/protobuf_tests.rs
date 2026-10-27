@@ -6,7 +6,11 @@
 //! properties a consumer relies on: exact length prefixes, no bytes left over
 //! after a message, and forward-compatible skipping of unknown fields.
 
-use active_infinity::interop::{secret_texts, SECRET_MARKER};
+#[cfg(feature = "json")]
+use active_infinity::interop::to_redacted_json;
+use active_infinity::interop::{intents, secret_texts, SECRET_MARKER};
+#[cfg(feature = "json")]
+use active_infinity::ir::InterpPart;
 use active_infinity::ir::{hash_hex, AnnotationKind, ProvEntry, ProvValue, Provenance};
 use active_infinity::{
     encode, hash_image, to_protobuf, InfinityModule, Inode, SecretBytes, UnitTag,
@@ -32,11 +36,17 @@ impl<'a> Cursor<'a> {
 
     fn varint(&mut self) -> u64 {
         let mut value = 0u64;
+        let mut width = 0usize;
         for shift in (0..64).step_by(7) {
             let byte = *self.buf.get(self.pos).expect("truncated varint");
             self.pos += 1;
+            width += 1;
             value |= u64::from(byte & 0x7f) << shift;
             if byte & 0x80 == 0 {
+                assert!(
+                    width == 1 || byte != 0,
+                    "non-minimal varint (trailing zero group)"
+                );
                 return value;
             }
         }
@@ -98,6 +108,17 @@ impl<'a> Cursor<'a> {
 
 fn zigzag_decode(value: u64) -> i64 {
     ((value >> 1) as i64) ^ -((value & 1) as i64)
+}
+
+/// Encoders must emit fields in ascending field-number order (repeated fields
+/// repeat the same number); a decoder that relies on it needs the guarantee
+/// checked.
+fn ascending(previous: &mut u32, field: u32) {
+    assert!(
+        field >= *previous,
+        "fields must ascend: {field} after {previous}"
+    );
+    *previous = field;
 }
 
 // ---------------------------------------------------------------------------
@@ -285,8 +306,10 @@ fn decode_annotation(bytes: &[u8]) -> PAnnotation {
         text: String::new(),
         flag: false,
     };
+    let mut previous = 1u32;
     while !cursor.done() {
         let (field, wire) = cursor.key();
+        ascending(&mut previous, field);
         match field {
             2 => {
                 assert_eq!(wire, 2);
@@ -329,8 +352,10 @@ fn decode_module(bytes: &[u8]) -> PModule {
         annotations: Vec::new(),
         extensions: Vec::new(),
     };
+    let mut previous = 0u32;
     while !cursor.done() {
         let (field, wire) = cursor.key();
+        ascending(&mut previous, field);
         match field {
             1 => {
                 assert_eq!(wire, 2);
@@ -359,8 +384,10 @@ fn decode_module(bytes: &[u8]) -> PModule {
             5 => {
                 assert_eq!(wire, 2);
                 let mut prov = Cursor::new(cursor.bytes());
+                let mut prov_previous = 0u32;
                 while !prov.done() {
                     let (prov_field, prov_wire) = prov.key();
+                    ascending(&mut prov_previous, prov_field);
                     match prov_field {
                         1 => {
                             assert_eq!(prov_wire, 2);
@@ -516,9 +543,11 @@ fn projection_round_trips_through_an_independent_reader() {
         panic!("the root is a table, got {root:?}");
     };
     let names: Vec<&str> = fields.iter().map(|(name, _)| name.as_str()).collect();
+    // The projection is built from the canonical module, so table fields come
+    // out sorted by key rather than in construction order.
     assert_eq!(
         names,
-        ["name", "port", "rate", "secret", "leaked", "env", "blob", "items"]
+        ["blob", "env", "items", "leaked", "name", "port", "rate", "secret"]
     );
 
     let value = |field: &str| {
@@ -649,4 +678,172 @@ fn readers_skip_unknown_fields() {
     bytes.extend_from_slice(b"future");
     let decoded = decode_module(&bytes);
     assert!(decoded.root.is_some());
+}
+
+#[test]
+fn projection_is_canonical_for_logically_equal_modules() {
+    // Same content, different construction order: one AINF image, one
+    // projection. This is what makes the bytes usable for caching and diffs.
+    let mut first = InfinityModule::new();
+    let z = first.push(Inode::Int(1));
+    let a = first.push(Inode::Int(2));
+    let root = first.push(Inode::Table {
+        fields: vec![("z".into(), z), ("a".into(), a)],
+    });
+    first.set_root(Some(root));
+    first.bind("beta", a);
+    first.bind("alpha", z);
+    first.add_extension(20, b"two".to_vec());
+    first.add_extension(10, b"one".to_vec());
+    first.annotate(root, AnnotationKind::AiImmutable(true));
+    first.annotate(root, AnnotationKind::Intent("note".into()));
+
+    let mut second = InfinityModule::new();
+    let z = second.push(Inode::Int(1));
+    let a = second.push(Inode::Int(2));
+    let root = second.push(Inode::Table {
+        fields: vec![("a".into(), a), ("z".into(), z)],
+    });
+    second.set_root(Some(root));
+    second.bind("alpha", z);
+    second.bind("beta", a);
+    second.add_extension(10, b"one".to_vec());
+    second.add_extension(20, b"two".to_vec());
+    second.annotate(root, AnnotationKind::Intent("note".into()));
+    second.annotate(root, AnnotationKind::AiImmutable(true));
+
+    assert_eq!(
+        encode(&first).unwrap(),
+        encode(&second).unwrap(),
+        "the AINF images must agree"
+    );
+    assert_eq!(
+        to_protobuf(&first).unwrap(),
+        to_protobuf(&second).unwrap(),
+        "equal modules must project to equal bytes"
+    );
+
+    let decoded = decode_module(&to_protobuf(&first).unwrap());
+    let names: Vec<&str> = decoded
+        .bindings
+        .iter()
+        .map(|binding| binding.name.as_str())
+        .collect();
+    assert_eq!(names, ["alpha", "beta"]);
+    let tags: Vec<u64> = decoded.extensions.iter().map(|(tag, _)| *tag).collect();
+    assert_eq!(tags, [10, 20]);
+}
+
+#[test]
+fn projection_handles_scalar_extremes() {
+    let mut module = InfinityModule::new();
+    let min = module.push(Inode::Int(i64::MIN));
+    let max = module.push(Inode::Int(i64::MAX));
+    let nan = module.push(Inode::Float(f64::NAN));
+    let zero = module.push(Inode::Float(-0.0));
+    let empty = module.push(Inode::Str(String::new()));
+    let root = module.push(Inode::Array {
+        elements: vec![min, max, nan, zero, empty],
+    });
+    module.set_root(Some(root));
+
+    let decoded = decode_module(&to_protobuf(&module).expect("project"));
+    let PValue::List(items) = decoded.root.expect("root") else {
+        panic!("the root is an array");
+    };
+    assert_eq!(items[0], PValue::Int(i64::MIN));
+    assert_eq!(items[1], PValue::Int(i64::MAX));
+    match items[2] {
+        PValue::Float(value) => assert!(value.is_nan(), "NaN survives the wire"),
+        ref other => panic!("expected a float, got {other:?}"),
+    }
+    match items[3] {
+        PValue::Float(value) => assert_eq!(
+            value.to_bits(),
+            0.0f64.to_bits(),
+            "-0.0 is canonicalized to +0.0"
+        ),
+        ref other => panic!("expected a float, got {other:?}"),
+    }
+    assert_eq!(items[4], PValue::Text(String::new()));
+}
+
+#[test]
+fn projection_refuses_an_extension_that_copies_a_secret() {
+    let mut module = InfinityModule::new();
+    let secret = module.push(Inode::Secret(SecretBytes::from("hunter2-secret")));
+    module.set_root(Some(secret));
+    module.add_extension(7, b"note hunter2-secret note".to_vec());
+    let error = to_protobuf(&module).expect_err("a secret copy must not leave");
+    assert_eq!(error.code(), "infinity/encode");
+    assert!(
+        error.to_string().contains("extension payload"),
+        "the message must name the reason, got {error}"
+    );
+}
+
+#[test]
+fn projection_renders_the_canonical_envelope() {
+    // A module with an unreachable node: the canonical image drops it, and the
+    // projection must describe what the image actually contains.
+    let mut module = fixture();
+    let stray = module.push(Inode::Int(999));
+    module.annotate(stray, AnnotationKind::Intent("stray".into()));
+    let bytes = to_protobuf(&module).expect("project");
+    let decoded = decode_module(&bytes);
+    let image = encode(&module).expect("encode");
+    assert_eq!(decoded.content_hash, hash_image(&image).expect("hash"));
+
+    // Bindings project as a name -> value map, not as nodes.
+    let mut names: Vec<&str> = decoded
+        .bindings
+        .iter()
+        .map(|binding| binding.name.as_str())
+        .collect();
+    names.sort_unstable();
+    assert_eq!(names, ["port", "root"]);
+}
+
+#[test]
+fn short_secrets_are_redacted_in_metadata_text() {
+    // Redaction is unconditional, including for one- and two-byte secrets.
+    let mut module = InfinityModule::new();
+    let value = module.push(Inode::Str("hello".into()));
+    let secret = module.push(Inode::Secret(SecretBytes::from("xy")));
+    let root = module.push(Inode::Table {
+        fields: vec![("k".into(), value), ("s".into(), secret)],
+    });
+    module.set_root(Some(root));
+    module.annotate(root, AnnotationKind::Intent("carries xy inside".into()));
+    let text = intents(&module, root);
+    assert!(
+        text.iter().all(|line| !line.contains("xy")),
+        "a two-byte secret must not survive in intent text: {text:?}"
+    );
+    assert!(text.iter().any(|line| line.contains(SECRET_MARKER)));
+}
+
+#[cfg(feature = "json")]
+#[test]
+fn taint_follows_references_in_interpolations() {
+    let mut module = InfinityModule::new();
+    let secret = module.push(Inode::Secret(SecretBytes::from("hunter2-secret")));
+    let reference = module.push(Inode::Ref(secret));
+    let text = module.push(Inode::Interpolate {
+        parts: vec![
+            InterpPart::Literal("prefix ".into()),
+            InterpPart::Expr(reference),
+        ],
+    });
+    let root = module.push(Inode::Table {
+        fields: vec![("t".into(), text)],
+    });
+    module.set_root(Some(root));
+
+    let json = to_redacted_json(&module).expect("project");
+    assert!(
+        json.contains(SECRET_MARKER),
+        "a reference to a secret taints the interpolation: {json}"
+    );
+    assert!(!json.contains("prefix"), "no literal prefix survives");
 }

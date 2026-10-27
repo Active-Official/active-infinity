@@ -6,9 +6,10 @@
 //! of the implementation.
 
 use active_infinity::{
-    content_hash, decode, encode, error::Error, hash_image, stream, validate, AnnotationKind,
-    Constraint, DecodeOpts, EncodeOpts, InfinityModule, InfinityView, Inode, Limits, PatchOp,
-    ProvEntry, ProvValue, Provenance, SchemaFieldSpec, SecretBytes, SemanticTag, TypeSpec, UnitTag,
+    content_hash, decode, encode, error::Error, hash_image, stream, validate, validate_canonical,
+    AnnotationKind, Constraint, DecodeOpts, EncodeOpts, InfinityModule, InfinityView, Inode,
+    Limits, PatchOp, ProvEntry, ProvValue, Provenance, SchemaFieldSpec, SecretBytes, SemanticTag,
+    TypeSpec, UnitTag,
 };
 
 fn fixture() -> InfinityModule {
@@ -600,6 +601,62 @@ fn encode_options_round_trip() {
     let meta = validate(&bytes).unwrap();
     assert_ne!(meta.flags & active_infinity::layout::FLAG_STREAMED, 0);
     assert!(decode(&bytes).is_ok());
+}
+
+#[test]
+fn canonical_proof_is_unconditional() {
+    let bytes = encode(&fixture()).unwrap();
+    validate_canonical(&bytes, Limits::default()).expect("the encoder emits canonical bytes");
+
+    // Clear the canonical flag without touching the payload. The image stays
+    // structurally valid, but it is no longer the canonical encoding of its own
+    // content, so the proof must refuse it.
+    let mut unflagged = bytes.clone();
+    let flags = u16::from_le_bytes([unflagged[8], unflagged[9]]) & !active_infinity::FLAG_CANONICAL;
+    unflagged[8..10].copy_from_slice(&flags.to_le_bytes());
+    let hash = hash_image(&unflagged).unwrap();
+    unflagged[16..48].copy_from_slice(&hash);
+
+    validate(&unflagged).expect("structure is still valid");
+    let error = validate_canonical(&unflagged, Limits::default())
+        .expect_err("an unflagged image is not the canonical encoding");
+    assert_eq!(error.code(), "infinity/not-canonical");
+
+    // The option form and the free function agree.
+    let opts = DecodeOpts {
+        limits: Limits::default(),
+        verify_hash: true,
+        verify_canonical: true,
+    };
+    let error = active_infinity::validate_with(&unflagged, opts)
+        .expect_err("the gated proof agrees with the free function");
+    assert_eq!(error.code(), "infinity/not-canonical");
+}
+
+#[test]
+fn extension_payloads_must_be_packed() {
+    // The gap vector is checked in the conformance suite; this pins the rule
+    // against a hand-built module as well: rewriting a middle payload offset
+    // moves that payload, so the section is rejected.
+    let mut module = fixture();
+    module.add_extension(10, b"first".to_vec());
+    module.add_extension(20, b"second".to_vec());
+    module.add_extension(30, b"third".to_vec());
+    let bytes = encode(&module).unwrap();
+    validate(&bytes).expect("the encoder packs payloads");
+
+    // Shifting the *middle* entry keeps the section end unchanged (the last
+    // payload still ends where it did), so this is a packing fault, not a
+    // layout fault.
+    let header = active_infinity::layout::Header::parse(&bytes).unwrap();
+    let ext = header.span(active_infinity::Section::Extensions).offset as usize;
+    let mut gapped = bytes.clone();
+    let middle = u32::from_le_bytes(gapped[ext + 16 + 8..ext + 16 + 12].try_into().unwrap());
+    gapped[ext + 16 + 8..ext + 16 + 12].copy_from_slice(&(middle + 8).to_le_bytes());
+    let hash = hash_image(&gapped).unwrap();
+    gapped[16..48].copy_from_slice(&hash);
+    let error = validate(&gapped).expect_err("a gap must be rejected");
+    assert_eq!(error.code(), "infinity/extension");
 }
 
 #[test]

@@ -47,17 +47,19 @@ pub fn secret_texts(module: &InfinityModule) -> Vec<String> {
 }
 
 /// Replace every occurrence of a secret in `text` with the marker.
+///
+/// The rule is unconditional, including for one- and two-byte secrets: a short
+/// secret that survives inside a note would be stored in the canonical image and
+/// then hidden only by the projections, so the copy has to go at the source.
+/// The cost is cosmetic (a pathological one-character secret redacts a lot of
+/// text); the alternative is a leak.
 pub fn redact_text(text: &str, secrets: &[String]) -> String {
     let mut out = text.to_string();
     for secret in secrets {
         if secret.is_empty() || !out.contains(secret.as_str()) {
             continue;
         }
-        // Whole-value matches always redact; substring spreading applies to
-        // secrets of four bytes or more (the text language's rule).
-        if out == *secret || secret.len() >= 4 {
-            out = out.replace(secret.as_str(), SECRET_MARKER);
-        }
+        out = out.replace(secret.as_str(), SECRET_MARKER);
     }
     out
 }
@@ -745,8 +747,22 @@ pub(crate) fn redacted_key(text: &str, secrets: &[String]) -> String {
     out
 }
 
-fn is_secret(module: &InfinityModule, id: NodeId) -> bool {
-    module.get(id).map(|node| node.is_secret()).unwrap_or(false)
+/// Whether a node resolves to secret material, following `Ref` and `Semantic`.
+///
+/// Reference wrappers must be transparent for taint: an interpolated
+/// `${ref_to_secret}` has to redact the whole string, not render it as `${}`.
+fn resolves_to_secret(module: &InfinityModule, id: NodeId, depth: usize) -> bool {
+    if depth > PROJECTION_DEPTH {
+        // A pathological chain is treated as secret: fail closed.
+        return true;
+    }
+    match module.get(id) {
+        Some(Inode::Secret(_)) | Some(Inode::SecretRef { .. }) => true,
+        Some(Inode::Ref(inner)) => resolves_to_secret(module, *inner, depth + 1),
+        Some(Inode::Semantic { inner, .. }) => resolves_to_secret(module, *inner, depth + 1),
+        Some(node) => node.is_secret(),
+        None => false,
+    }
 }
 
 fn build_projected(
@@ -799,7 +815,7 @@ fn build_projected(
                     match part {
                         InterpPart::Literal(literal) => text.push_str(literal),
                         InterpPart::Expr(id) => match id.index() {
-                            _ if is_secret(module, *id) => tainted = true,
+                            _ if resolves_to_secret(module, *id, 0) => tainted = true,
                             _ => text.push_str("${}"),
                         },
                     }

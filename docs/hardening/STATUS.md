@@ -11,10 +11,10 @@ the bottom is generated from `docs/hardening/invariant-map.toml` by
 
 | Field | Value |
 |---|---|
-| Crate | `active-infinity` 2.0.7 |
+| Crate | `active-infinity` 2.1.0 |
 | Baseline commit | `9b44242496568e2338c5e98b90e558d4b0999f4e` |
 | Baseline tag | `hardening-baseline` (annotated, SSH-signed) |
-| Released tag | `v2.0.7` on `8e83550075d35a6e1d564b61bc788d8177946e3e` |
+| Released tag | `v2.1.0` |
 | MSRV | 1.85 |
 | Wire format | AINF 1.0 |
 | Hardening commit | `3c50b6f` |
@@ -97,7 +97,7 @@ Invariants discovered in code comments and tests during the audit (now mapped):
   and attached to CI runs.
 - Tags are SSH-signed with the key in `release-signing.allowed_signers`;
   `v2.0.7` verifies with `scripts/verify_tag.sh`.
-- crates.io 2.0.7 is published and not yanked.
+- crates.io 2.1.0 is published and not yanked.
 - Tags are identical on `Active-Official` and `RatioArtificiosa` (same tag
   object, same commit).
 
@@ -262,7 +262,7 @@ Sign-off: 2026-10-27, Grok (AI coding and security agent)
 
 <!-- BEGIN GENERATED: hardening matrix (scripts/hardening_status.py) -->
 
-**Repository:** `active-infinity` **version:** `2.0.7` **baseline commit:** `9b44242496568e2338c5e98b90e558d4b0999f4e` **baseline tag:** `hardening-baseline` **measured:** 2026-10-27
+**Repository:** `active-infinity` **version:** `2.1.0` **baseline commit:** `9b44242496568e2338c5e98b90e558d4b0999f4e` **baseline tag:** `hardening-baseline` **measured:** 2026-10-27
 
 Invariants: 6 covered, 0 partial, 0 gap, 6 not applicable. Checklist items: 103 done, 0 partial, 0 gap, 57 not applicable. Criticals with an implemented negative control: 4/4. Distinct automated checks resolved: 121.
 

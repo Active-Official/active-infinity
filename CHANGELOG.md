@@ -1,4 +1,45 @@
-# Changelog — Active Infinity
+# Changelog - Active Infinity
+
+## 2.1.0 - 2026-10-28
+
+Hardening release. No wire-format change; `AINF` is still 1.0.
+
+### Security
+
+- **Projection memory is bounded across the whole projection.** The node budget
+  is threaded through the root and every binding, so many bindings aliasing one
+  DAG cannot multiply the old per-tree allowance. Over-budget projections fail
+  with `infinity/encode`.
+- **Debug, Display and DeltaOp no longer export free text.** `Inode`,
+  annotations, provenance, `InterpPart`, `Constraint`, `TypeSpec`, `PatchOp`,
+  `SchemaFieldSpec`, `UnitTag` and `DeltaOp` print lengths or markers. A caller
+  formatting a node outside module context cannot leak a secret copy.
+- **Stream deltas honour only the caller's `Limits`.** A widened `max_aux` is no
+  longer refused by a default-limits pre-check.
+- **Section length arithmetic is checked on 32-bit and 64-bit.** `section_body_len`
+  uses checked `u64` math and returns `infinity/too-large` instead of wrapping.
+- **`Header::try_write`** returns an error for a short buffer; `write` keeps a
+  documented panic contract.
+
+### Added
+
+- `PROJECTION_NODE_BUDGET` (100,000 materialised nodes per projection).
+- `Header::try_write`.
+- `examples/streaming.rs`: frame reassembly with chunk boundaries that do not
+  match frames.
+- `scripts/sbom.py`, `scripts/check_32bit.sh`, `scripts/coverage_gate.py`,
+  `scripts/verify_tag.sh`, and the nightly fuzz/coverage workflow.
+
+### Changed
+
+- `Debug` for the types above prints sizes/markers for text fields. This changes
+  human-readable output, not data or the wire format.
+
+### Verification
+
+- 120 tests (both feature sets), red-team battery (16 cases), six negative
+  controls, Docker fuzz (8 targets), i686 lane, benchmark matrix with recorded
+  numbers, and the rustdoc-JSON API-surface gate.
 
 ## 2.0.7 — 2026-10-27
 
@@ -382,3 +423,4 @@ change: images written by 1.1.0 remain valid and canonical.
 First production release: canonical `AINF` codec, fail-closed validator,
 zero-copy views, streaming frames and deltas, `active-core` bridge, agent graph
 queries, redacted JSON projection, conformance vectors, fuzz target.
+

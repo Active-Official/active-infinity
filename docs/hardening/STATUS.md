@@ -187,6 +187,28 @@ Run: `python scripts/negative_controls.py --check`. CI job `negative-controls`.
 | H8 compatibility | complete | `COMPATIBILITY.md`, 49 frozen vectors, unknown-flag and extension rules, deprecation window |
 | H9 continuous | complete | nightly fuzz matrix, coverage floor, review cadence, this public status page |
 
+## Verification at `d4b3e41` (2026-10-27)
+
+Fresh clone of `Active-Official/active-infinity`, checked out at
+`d4b3e41f6f68112b6555e47b43502832f77e7fb0`, then:
+
+| Step | Command | Result |
+|---|---|---|
+| Tests (all features) | `cargo test --locked --all-features` | 120 pass |
+| Tests (no default) | `cargo test --locked --no-default-features` | pass |
+| Lint (both feature sets) | `cargo clippy --locked --all-targets ... -- -D warnings` | pass |
+| Docs | `RUSTDOCFLAGS=-D warnings cargo doc --locked --no-deps --all-features` | pass |
+| API surface | rustdoc JSON + `python scripts/api_surface.py` | clean (1,980 items / 550 functions) |
+| Fuzz | 8 targets, 2,000 runs each, Docker Linux | no crash |
+| Red-team | `cargo test --test redteam_battery --test redteam_tests` | 16 + 26 pass |
+| Negative controls | `python scripts/negative_controls.py --check` | 6/6 fail as required |
+| Performance budgets | `cargo test --test perf_budget` | 4 pass |
+| CI | run [40648495363](https://github.com/Active-Official/active-infinity/actions/runs/40648495363) | all 9 jobs success |
+| Review | round 26 | NO NEW FINDINGS |
+
+The verification used the same commands CI runs; the committed tests are the
+durable evidence, and the CI run is the remote oracle.
+
 ## Residual risks
 
 - **Secret length is visible.** `SecretBytes::len` is public and is used by

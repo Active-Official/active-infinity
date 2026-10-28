@@ -165,6 +165,12 @@ walk, no invented throughput.
   <img src="docs/assets/control-plane-gauges-light.png" alt="The 20 live gauges, each captioned with its exact kernel or codec source">
 </picture>
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/control-plane-benchmark-dark.png">
+  <source media="(prefers-color-scheme: light)" srcset="docs/assets/control-plane-benchmark-light.png">
+  <img src="docs/assets/control-plane-benchmark-light.png" alt="Benchmark desk with measured p50/p99 samples and the one-click MCP configuration">
+</picture>
+
 Run it from the Active RPC repository:
 
 ```bash

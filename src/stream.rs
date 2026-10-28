@@ -33,6 +33,7 @@
 #![allow(missing_docs)]
 
 use std::collections::VecDeque;
+use std::fmt;
 
 use crate::canonical::remap_node;
 use crate::encode::{encode_with, hash_image};
@@ -220,7 +221,7 @@ pub fn encode_stream_with(
     for section in Section::ALL {
         let span = header.span(section);
         let start = span.offset as usize;
-        let len = section_body_len(&image, &header, section);
+        let len = section_body_len(&image, &header, section)?;
         let body = &image[start..start + len];
         if body.is_empty() {
             let mut payload = Vec::with_capacity(9);
@@ -250,63 +251,132 @@ pub fn encode_stream_with(
     Ok(frames)
 }
 
-fn section_body_len(image: &[u8], header: &crate::layout::Header, section: Section) -> usize {
+fn section_body_len(
+    image: &[u8],
+    header: &crate::layout::Header,
+    section: Section,
+) -> crate::Result<usize> {
     let span = header.span(section);
-    let start = span.offset as usize;
+    let start = span.offset as u64;
+    let count = span.count as u64;
+    let read_at = |offset: u64| -> crate::Result<usize> {
+        usize::try_from(offset).map_err(|_| Error::TooLarge)
+    };
     let end = match section {
         Section::Strings => {
-            if span.count == 0 {
+            if count == 0 {
                 start
             } else {
-                let heap = read_u32(image, start + span.count as usize * 4).unwrap_or(0) as usize;
-                start + (span.count as usize + 1) * 4 + heap
+                let index = start
+                    .checked_add(count.checked_mul(4).ok_or(Error::TooLarge)?)
+                    .ok_or(Error::TooLarge)?;
+                let heap = read_u32(image, read_at(index)?).unwrap_or(0) as u64;
+                start
+                    .checked_add(
+                        count
+                            .checked_add(1)
+                            .ok_or(Error::TooLarge)?
+                            .checked_mul(4)
+                            .ok_or(Error::TooLarge)?,
+                    )
+                    .and_then(|value| value.checked_add(heap))
+                    .ok_or(Error::TooLarge)?
             }
         }
         Section::Blobs => {
-            let mut heap = 0usize;
-            for index in 0..span.count {
-                let len = read_u32(image, start + index as usize * 40 + 36).unwrap_or(0) as usize;
-                heap += len;
+            let mut heap = 0u64;
+            for index in 0..count {
+                let offset = start
+                    .checked_add(index.checked_mul(40).ok_or(Error::TooLarge)?)
+                    .and_then(|value| value.checked_add(36))
+                    .ok_or(Error::TooLarge)?;
+                heap = heap
+                    .checked_add(u64::from(read_u32(image, read_at(offset)?).unwrap_or(0)))
+                    .ok_or(Error::TooLarge)?;
             }
-            start + span.count as usize * 40 + heap
+            start
+                .checked_add(count.checked_mul(40).ok_or(Error::TooLarge)?)
+                .and_then(|value| value.checked_add(heap))
+                .ok_or(Error::TooLarge)?
         }
-        Section::Provenance => start + span.count as usize,
+        Section::Provenance => start.checked_add(count).ok_or(Error::TooLarge)?,
         Section::Secrets => {
-            let mut heap = 0usize;
-            for index in 0..span.count {
-                let len = read_u32(image, start + index as usize * 8 + 4).unwrap_or(0) as usize;
-                heap += len;
+            let mut heap = 0u64;
+            for index in 0..count {
+                let offset = start
+                    .checked_add(index.checked_mul(8).ok_or(Error::TooLarge)?)
+                    .and_then(|value| value.checked_add(4))
+                    .ok_or(Error::TooLarge)?;
+                heap = heap
+                    .checked_add(u64::from(read_u32(image, read_at(offset)?).unwrap_or(0)))
+                    .ok_or(Error::TooLarge)?;
             }
-            start + span.count as usize * 8 + heap
+            start
+                .checked_add(count.checked_mul(8).ok_or(Error::TooLarge)?)
+                .and_then(|value| value.checked_add(heap))
+                .ok_or(Error::TooLarge)?
         }
         Section::Extensions => {
-            let mut end = start + span.count as usize * 16;
-            for index in 0..span.count {
-                let dir = start + index as usize * 16;
-                let offset = read_u32(image, dir + 8).unwrap_or(0) as usize;
-                let len = read_u32(image, dir + 12).unwrap_or(0) as usize;
-                end = end.max(offset + len);
+            let directory = count.checked_mul(16).ok_or(Error::TooLarge)?;
+            let mut end = start.checked_add(directory).ok_or(Error::TooLarge)?;
+            for index in 0..count {
+                let dir = start
+                    .checked_add(index.checked_mul(16).ok_or(Error::TooLarge)?)
+                    .ok_or(Error::TooLarge)?;
+                let offset = u64::from(
+                    read_u32(image, read_at(dir.checked_add(8).ok_or(Error::TooLarge)?)?)
+                        .unwrap_or(0),
+                );
+                let len = u64::from(
+                    read_u32(image, read_at(dir.checked_add(12).ok_or(Error::TooLarge)?)?)
+                        .unwrap_or(0),
+                );
+                end = end.max(offset.checked_add(len).ok_or(Error::TooLarge)?);
             }
             end
         }
-        Section::Nodes => start + span.count as usize * 32,
-        Section::Children => start + span.count as usize * 4,
-        Section::Fields => start + span.count as usize * 16,
-        Section::Parts => start + span.count as usize * 8,
-        Section::Edges => start + span.count as usize * 8,
-        Section::Annotations => start + span.count as usize * 16,
-        Section::Units => start + span.count as usize * 8,
-        Section::Types => start + span.count as usize * 16,
-        Section::Aux => start + span.count as usize * 8,
-        Section::Numbers => start + span.count as usize * 8,
-        Section::Hashes => start + span.count as usize * 32,
-        Section::Bindings => start + span.count as usize * 8,
+        Section::Nodes => start
+            .checked_add(count.checked_mul(32).ok_or(Error::TooLarge)?)
+            .ok_or(Error::TooLarge)?,
+        Section::Children => start
+            .checked_add(count.checked_mul(4).ok_or(Error::TooLarge)?)
+            .ok_or(Error::TooLarge)?,
+        Section::Fields => start
+            .checked_add(count.checked_mul(16).ok_or(Error::TooLarge)?)
+            .ok_or(Error::TooLarge)?,
+        Section::Parts => start
+            .checked_add(count.checked_mul(8).ok_or(Error::TooLarge)?)
+            .ok_or(Error::TooLarge)?,
+        Section::Edges => start
+            .checked_add(count.checked_mul(8).ok_or(Error::TooLarge)?)
+            .ok_or(Error::TooLarge)?,
+        Section::Annotations => start
+            .checked_add(count.checked_mul(16).ok_or(Error::TooLarge)?)
+            .ok_or(Error::TooLarge)?,
+        Section::Units => start
+            .checked_add(count.checked_mul(8).ok_or(Error::TooLarge)?)
+            .ok_or(Error::TooLarge)?,
+        Section::Types => start
+            .checked_add(count.checked_mul(16).ok_or(Error::TooLarge)?)
+            .ok_or(Error::TooLarge)?,
+        Section::Aux => start
+            .checked_add(count.checked_mul(8).ok_or(Error::TooLarge)?)
+            .ok_or(Error::TooLarge)?,
+        Section::Numbers => start
+            .checked_add(count.checked_mul(8).ok_or(Error::TooLarge)?)
+            .ok_or(Error::TooLarge)?,
+        Section::Hashes => start
+            .checked_add(count.checked_mul(32).ok_or(Error::TooLarge)?)
+            .ok_or(Error::TooLarge)?,
+        Section::Bindings => start
+            .checked_add(count.checked_mul(8).ok_or(Error::TooLarge)?)
+            .ok_or(Error::TooLarge)?,
     };
-    end.saturating_sub(start)
+    usize::try_from(end.saturating_sub(start)).map_err(|_| Error::TooLarge)
 }
 
 /// A semantic delta operation.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub enum DeltaOp {
     /// Replace the module root.
     SetRoot(Option<NodeId>),
@@ -325,6 +395,28 @@ pub enum DeltaOp {
     ClearAnnotations,
     /// Replace provenance.
     SetProvenance(Option<Provenance>),
+}
+
+impl fmt::Debug for DeltaOp {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            DeltaOp::SetRoot(root) => write!(f, "SetRoot({root:?})"),
+            DeltaOp::PutNode { target, fragment } => write!(
+                f,
+                "PutNode {{ target: {target}, fragment: <{} nodes> }}",
+                fragment.node_count()
+            ),
+            DeltaOp::SetBinding { node, .. } => {
+                write!(f, "SetBinding {{ name: <redacted>, node: {node} }}")
+            }
+            DeltaOp::RemoveBinding { .. } => f.write_str("RemoveBinding { name: <redacted> }"),
+            DeltaOp::SetAnnotation { node, kind } => {
+                write!(f, "SetAnnotation {{ node: {node}, kind: {kind:?} }}")
+            }
+            DeltaOp::ClearAnnotations => f.write_str("ClearAnnotations"),
+            DeltaOp::SetProvenance(provenance) => write!(f, "SetProvenance({provenance:?})"),
+        }
+    }
 }
 
 impl DeltaOp {
@@ -761,9 +853,8 @@ impl StreamDecoder {
                 }
                 let mut cursor = 0usize;
                 let count = take_u32(&frame.payload, &mut cursor)?;
-                if count > crate::layout::Limits::default().max_aux {
-                    return Err(Error::StreamDelta("too many delta operations"));
-                }
+                // Only the caller's limits decide. A default-limits pre-check
+                // here would refuse a delta that a caller explicitly widened.
                 if self.pending_deltas.len().saturating_add(count as usize)
                     > self.limits.max_aux as usize
                 {

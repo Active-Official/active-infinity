@@ -350,7 +350,24 @@ impl Header {
         })
     }
 
+    /// Serialize this header, returning an error when `out` is too short.
+    ///
+    /// Prefer this over [`Header::write`] in code that accepts a caller-owned
+    /// buffer: the failure is a value, not a panic.
+    pub fn try_write(&self, out: &mut [u8]) -> crate::Result<()> {
+        if out.len() < HEADER_SIZE {
+            return Err(crate::Error::Encode("header buffer is too short"));
+        }
+        self.write(out);
+        Ok(())
+    }
+
     /// Serialize this header into the first [`HEADER_SIZE`] bytes of `out`.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `out` is shorter than [`HEADER_SIZE`]. Use
+    /// [`Header::try_write`] for a fallible form.
     pub fn write(&self, out: &mut [u8]) {
         // Enforced in release too: a short output buffer is a caller bug, not a
         // debug-only precondition. The audit in `tests/redteam_battery.rs`

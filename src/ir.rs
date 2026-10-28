@@ -252,15 +252,24 @@ impl SemanticTag {
 }
 
 /// One interpolation part.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub enum InterpPart {
     Literal(String),
     Expr(NodeId),
 }
 
+impl fmt::Debug for InterpPart {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            InterpPart::Literal(text) => write!(f, "Literal(<{} bytes>)", text.len()),
+            InterpPart::Expr(id) => write!(f, "Expr({id})"),
+        }
+    }
+}
+
 /// A runtime constraint attached to a node (`@constraint` predicates and
 /// schema bounds).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub enum Constraint {
     MinMax { min: Option<i64>, max: Option<i64> },
     Enum(Vec<String>),
@@ -269,8 +278,22 @@ pub enum Constraint {
     Custom(String),
 }
 
+impl fmt::Debug for Constraint {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Constraint::MinMax { min, max } => {
+                write!(f, "MinMax {{ min: {min:?}, max: {max:?} }}")
+            }
+            Constraint::Enum(values) => write!(f, "Enum(<{} values>)", values.len()),
+            Constraint::Pattern(_) => f.write_str("Pattern(<redacted>)"),
+            Constraint::Odd => f.write_str("Odd"),
+            Constraint::Custom(_) => f.write_str("Custom(<redacted>)"),
+        }
+    }
+}
+
 /// Declared value type of a schema field.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub enum TypeSpec {
     Null,
     Bool,
@@ -284,6 +307,16 @@ pub enum TypeSpec {
     Secret,
     Any,
     Blob,
+}
+
+impl fmt::Debug for TypeSpec {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TypeSpec::Table { closed } => write!(f, "Table {{ closed: {closed} }}"),
+            TypeSpec::Enum(values) => write!(f, "Enum(<{} values>)", values.len()),
+            other => f.write_str(other.name().as_str()),
+        }
+    }
 }
 
 impl TypeSpec {
@@ -330,15 +363,25 @@ impl TypeSpec {
 }
 
 /// A structural patch operation.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub enum PatchOp {
     Set { path: String, value: NodeId },
     Remove { path: String },
     Rename { from: String, to: String },
 }
 
+impl fmt::Debug for PatchOp {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            PatchOp::Set { value, .. } => write!(f, "Set {{ path: <redacted>, value: {value} }}"),
+            PatchOp::Remove { .. } => f.write_str("Remove { path: <redacted> }"),
+            PatchOp::Rename { .. } => f.write_str("Rename { from: <redacted>, to: <redacted> }"),
+        }
+    }
+}
+
 /// One schema field's constraints.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct SchemaFieldSpec {
     pub typ: TypeSpec,
     pub min: Option<NodeId>,
@@ -348,6 +391,24 @@ pub struct SchemaFieldSpec {
     pub pattern: Option<NodeId>,
     pub default: Option<NodeId>,
     pub deprecated: Option<String>,
+}
+
+impl fmt::Debug for SchemaFieldSpec {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SchemaFieldSpec")
+            .field("typ", &self.typ)
+            .field("min", &self.min)
+            .field("max", &self.max)
+            .field("min_len", &self.min_len)
+            .field("max_len", &self.max_len)
+            .field("pattern", &self.pattern)
+            .field("default", &self.default)
+            .field(
+                "deprecated",
+                &self.deprecated.as_ref().map(|text| text.len()),
+            )
+            .finish()
+    }
 }
 
 impl SchemaFieldSpec {
@@ -461,31 +522,31 @@ impl fmt::Debug for Inode {
             Inode::Bool(value) => write!(f, "Bool({value})"),
             Inode::Int(value) => write!(f, "Int({value})"),
             Inode::Float(value) => write!(f, "Float({value})"),
-            Inode::Str(value) => write!(f, "Str({value:?})"),
+            Inode::Str(value) => write!(f, "Str(<{} bytes>)", value.len()),
             Inode::DurationMs(ms) => write!(f, "DurationMs({ms})"),
-            Inode::Quantity { value, unit } => write!(f, "Quantity({value}, {unit})"),
+            Inode::Quantity { value, .. } => write!(f, "Quantity({value}, <unit>)"),
             Inode::Array { elements } => write!(f, "Array({elements:?})"),
-            Inode::Table { fields } => write!(f, "Table({fields:?})"),
+            Inode::Table { fields } => write!(f, "Table(<{} fields>)", fields.len()),
             Inode::Secret(_) => f.write_str("Secret(***)"),
             Inode::SecretRef { locator } => write!(f, "SecretRef({locator})"),
             Inode::Ref(id) => write!(f, "Ref({id})"),
-            Inode::Env { name, default } => write!(f, "Env({name:?}, {default:?})"),
-            Inode::Ident(name) => write!(f, "Ident({name:?})"),
-            Inode::Interpolate { parts } => write!(f, "Interpolate({parts:?})"),
+            Inode::Env { name, default } => write!(f, "Env(<{} bytes>, {default:?})", name.len()),
+            Inode::Ident(name) => write!(f, "Ident(<{} bytes>)", name.len()),
+            Inode::Interpolate { parts } => write!(f, "Interpolate(<{} parts>)", parts.len()),
             Inode::Binary { op, lhs, rhs } => write!(f, "Binary({}, {lhs}, {rhs})", op.as_str()),
             Inode::Unary { op, expr } => write!(f, "Unary({}, {expr})", op.as_str()),
-            Inode::Constrained { target, constraint } => {
-                write!(f, "Constrained({target}, {constraint:?})")
+            Inode::Constrained { target, .. } => {
+                write!(f, "Constrained({target}, <constraint>)")
             }
-            Inode::Patch(op) => write!(f, "Patch({op:?})"),
-            Inode::SchemaField(spec) => write!(f, "SchemaField({spec:?})"),
+            Inode::Patch(_) => f.write_str("Patch(<op>)"),
+            Inode::SchemaField(_) => f.write_str("SchemaField(<spec>)"),
             Inode::SchemaTable { fields, closed } => {
-                write!(f, "SchemaTable({fields:?}, closed={closed})")
+                write!(f, "SchemaTable(<{} fields>, closed={closed})", fields.len())
             }
             Inode::SchemaArray { element } => write!(f, "SchemaArray({element})"),
             Inode::Semantic { tag, inner } => write!(f, "Semantic({}, {inner})", tag.as_str()),
-            Inode::ContentAddressed { media_type, data } => {
-                write!(f, "ContentAddressed({media_type}, {data})")
+            Inode::ContentAddressed { data, .. } => {
+                write!(f, "ContentAddressed(<media>, {data})")
             }
             Inode::Blob {
                 hash,
@@ -495,8 +556,9 @@ impl fmt::Debug for Inode {
                 payload,
             } => write!(
                 f,
-                "Blob(blake3:{}, size={size}, media={media_type:?}, tainted={tainted}, payload={})",
+                "Blob(blake3:{}, size={size}, media=<{} bytes>, tainted={tainted}, payload={})",
                 hash_hex(hash),
+                media_type.len(),
                 match payload {
                     Some(bytes) => format!("{} bytes", bytes.len()),
                     None => "absent".to_string(),
@@ -824,7 +886,7 @@ impl Inode {
 }
 
 /// Annotation kinds (spec/annotations.md §2–§4).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub enum AnnotationKind {
     /// Documentation only, never enforced.
     Intent(String),
@@ -832,6 +894,18 @@ pub enum AnnotationKind {
     Constraint { source: String, expr: NodeId },
     /// Agent-immutable flag.
     AiImmutable(bool),
+}
+
+impl fmt::Debug for AnnotationKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            AnnotationKind::Intent(text) => write!(f, "Intent(<{} bytes>)", text.len()),
+            AnnotationKind::Constraint { expr, .. } => {
+                write!(f, "Constraint {{ source: <redacted>, expr: {expr} }}")
+            }
+            AnnotationKind::AiImmutable(flag) => write!(f, "AiImmutable({flag})"),
+        }
+    }
 }
 
 /// One annotation attached to a node.
@@ -876,7 +950,7 @@ impl ProvKind {
 }
 
 /// A provenance value.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub enum ProvValue {
     Text(String),
     Int(i64),
@@ -884,11 +958,33 @@ pub enum ProvValue {
     Hash([u8; 32]),
 }
 
+impl fmt::Debug for ProvValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ProvValue::Text(text) => write!(f, "Text(<{} bytes>)", text.len()),
+            ProvValue::Int(value) => write!(f, "Int({value})"),
+            ProvValue::Flag(flag) => write!(f, "Flag({flag})"),
+            ProvValue::Hash(hash) => write!(f, "Hash(blake3:{})", hash_hex(hash)),
+        }
+    }
+}
+
 /// One provenance entry: a typed key/value pair.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct ProvEntry {
     pub key: String,
     pub value: ProvValue,
+}
+
+impl fmt::Debug for ProvEntry {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "ProvEntry {{ key: <{} bytes>, value: {:?} }}",
+            self.key.len(),
+            self.value
+        )
+    }
 }
 
 impl ProvEntry {
@@ -903,7 +999,7 @@ impl ProvEntry {
 }
 
 /// Module provenance: who produced this module, when, with what, from what.
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Clone, PartialEq, Default)]
 pub struct Provenance {
     /// Producer identity (agent, tool, human, pipeline).
     pub producer: Option<String>,
@@ -917,6 +1013,19 @@ pub struct Provenance {
     pub parent: Option<[u8; 32]>,
     /// Free-form typed entries, sorted by key in canonical form.
     pub entries: Vec<ProvEntry>,
+}
+
+impl fmt::Debug for Provenance {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Provenance")
+            .field("producer", &self.producer.as_ref().map(|text| text.len()))
+            .field("timestamp_ms", &self.timestamp_ms)
+            .field("model", &self.model.as_ref().map(|text| text.len()))
+            .field("tool", &self.tool.as_ref().map(|text| text.len()))
+            .field("parent", &self.parent)
+            .field("entries", &self.entries)
+            .finish()
+    }
 }
 
 /// A canonical Active Infinity module.

@@ -740,9 +740,9 @@ pub(crate) fn project_node_with(
     module: &InfinityModule,
     id: NodeId,
     secrets: &[String],
+    budget: &mut usize,
 ) -> Result<Projected> {
-    let mut budget = 0usize;
-    build_projected(module, Some(id), secrets, 0, &mut budget)
+    build_projected(module, Some(id), secrets, 0, budget)
 }
 
 /// A value-position string: the whole text becomes the marker as soon as it
@@ -822,7 +822,13 @@ fn build_projected(
             Inode::Ident(text) => Projected::Text(redacted_key(text, secrets)),
             Inode::DurationMs(ms) => Projected::DurationMs(*ms),
             Inode::Quantity { value, unit } => Projected::Quantity(
-                Box::new(build_projected(module, Some(*value), secrets, depth + 1, budget)?),
+                Box::new(build_projected(
+                    module,
+                    Some(*value),
+                    secrets,
+                    depth + 1,
+                    budget,
+                )?),
                 redacted_key(unit.name(), secrets),
             ),
             Inode::Array { elements } => Projected::Array(

@@ -4,6 +4,26 @@ This document is the threat model for the codec, the validator, the views and th
 stream layer. It complements `docs/spec/layout.md` (normative wire contract) and
 `active-core`'s `spec/threat-model.md` (language-level threats).
 
+## 0. Invariants (never weaken)
+
+These are the non-negotiable properties the hardening program defends. A change
+that would violate one stops and needs an ADR.
+
+| ID | Invariant |
+|---|---|
+| I-1 | Structural secret taint: a secret is a kind, not a removable flag. |
+| I-2 | Anti-oracle equality: a secret never equals anything, including itself. |
+| I-3 | Secret non-leakage: secrets never appear in Debug, Display, JSON, Protobuf, diagnostics, logs, errors, annotations, provenance or wire tags. |
+| I-4 | Capability unforgeability: capability ids are unguessable and possession is authority. |
+| I-5 | Attenuation only narrows: no operation may widen methods, budgets, paths or tool policy. |
+| I-6 | Revocation at dispatch: a capability revoked after queue but before the provider runs is refused. |
+| I-7 | Drop notification: the last handle drop notifies the provider. |
+| I-8 | Hard budgets: nodes, depth, bytes, calls, arrays, values and tool payloads fail closed. |
+| I-9 | Deterministic canonicalization: the same logical module maps to the same bytes and hash. |
+| I-10 | Fail-closed validation: malformed, truncated, overlapping, cyclic or over-budget input is rejected with a stable code. |
+| I-11 | No ambient authority: no hidden global permission in the kernel, tools or transports. |
+| I-12 | Domain operations run only under a valid capability and within budget. |
+
 ## 1. Assets
 
 1. **Secret material** in a module: values, secret locators, blob payloads

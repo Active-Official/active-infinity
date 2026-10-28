@@ -24,7 +24,7 @@ pub const UNIT_MAX_BUILTIN: u32 = 66;
 // The discriminants and their numeric ids are specified in
 // `docs/spec/layout.md` §5.2; variant names are the unit identifiers.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum UnitTag {
     // Time (canonical: nanoseconds)
     Nanoseconds,
@@ -349,7 +349,23 @@ impl UnitTag {
 
 impl fmt::Display for UnitTag {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.name())
+        match self {
+            // A named unit is free text and can hold a secret copy. The raw
+            // name stays available through `name()` for a deliberate transfer.
+            UnitTag::Named(name) => write!(f, "named-unit(<{} bytes>)", name.len()),
+            other => f.write_str(other.name()),
+        }
+    }
+}
+
+impl fmt::Debug for UnitTag {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // A named unit is caller text and can carry a secret copy. Debug prints
+        // its size; built-in discriminants are a closed, safe set.
+        match self {
+            UnitTag::Named(name) => write!(f, "Named(<{} bytes>)", name.len()),
+            other => f.write_str(other.name()),
+        }
     }
 }
 

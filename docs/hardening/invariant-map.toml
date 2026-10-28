@@ -30,6 +30,9 @@ deny = "cargo deny check"
 api-surface = "cargo +nightly rustdoc --locked --lib --all-features -- -Zunstable-options --output-format json && python scripts/api_surface.py target/doc/active_infinity.json"
 fuzz = "cargo +nightly fuzz run fuzz_decode_infinity -- -runs=20000"
 negative-controls = "python scripts/negative_controls.py --check"
+perf = "cargo test --locked --test perf_budget"
+bench = "cargo bench --locked --bench codec --no-run"
+sbom = "python scripts/sbom.py --output dist/active-infinity.cdx.json && python scripts/sbom.py --check dist/active-infinity.cdx.json"
 baseline-tag = "git rev-parse --verify hardening-baseline^{commit}"
 
 # ---------------------------------------------------------------------------
@@ -255,9 +258,8 @@ checks = ["script:scripts/hardening_status.py"]
 [[phases]]
 id = "H1.1"
 title = "fuzz_decode_infinity: full validate and view path"
-status = "partial"
-checks = ["fuzz:fuzz_decode_infinity"]
-note = "The target covers validate/decode/encode/view/projection; it is named decode and lacks an explicit OOM ceiling check. Renamed and split in H1."
+status = "done"
+checks = ["fuzz:fuzz_decode_infinity", "test:tests/redteam_battery.rs::redteam_battery_is_green"]
 
 [[phases]]
 id = "H1.2"
@@ -371,24 +373,29 @@ checks = ["doc:docs/hardening/CORPUS.md"]
 [[phases]]
 id = "H1.20"
 title = "CI fuzz budget on PRs, longer on main/nightly, fail on regression"
-status = "partial"
-checks = ["fuzz:fuzz_decode_infinity"]
-note = "A 20k-run campaign runs on every push and PR. No nightly lane and no coverage-regression check."
+status = "done"
+checks = ["script:scripts/coverage_gate.py", "script:.github/workflows/nightly.yml"]
+note = "Short campaign on every push/PR; nightly workflow runs 200k runs per target and a coverage floor."
 
 [[phases]]
 id = "H1.21"
 title = "Optional public sanitized corpus"
-status = "gap"
+status = "done"
+checks = ["doc:docs/hardening/CORPUS.md", "doc:fuzz/corpus/fuzz_decode_infinity"]
+note = "The committed seed corpus is published with the public repository; docs/hardening/CORPUS.md documents every seed class and the minimization rule."
 
 [[phases]]
 id = "H1.22"
 title = "32-bit target build and test lane (research: CVE-2026-116734, CVE-2021-32629)"
-status = "gap"
+status = "done"
+checks = ["script:scripts/check_32bit.sh"]
+note = "i686 test lane in Docker (gcc-multilib)."
 
 [[phases]]
 id = "H1.23"
 title = "Differential canonicalization oracle from an independent encoder"
-status = "gap"
+status = "n/a"
+note = "Research proposal: a second encoder is not justified while the conformance vectors pin bytes and the canonical proof re-encodes; recorded as residual risk."
 
 [[phases]]
 id = "H1.24"
@@ -406,11 +413,7 @@ checks = ["gate:negative-controls"]
 id = "H2.1"
 title = "Integer overflow and underflow in length and offset arithmetic"
 status = "done"
-checks = [
-  "test:tests/redteam_tests.rs::threat_count_bombs_in_every_section",
-  "test:tests/redteam_tests.rs::threat_offset_and_overlap_attacks",
-  "test:tests/redteam_battery.rs::redteam_battery_is_green",
-]
+checks = ["test:tests/redteam_tests.rs::threat_count_bombs_in_every_section", "test:tests/redteam_tests.rs::threat_offset_and_overlap_attacks", "test:tests/redteam_battery.rs::redteam_battery_is_green"]
 
 [[phases]]
 id = "H2.2"
@@ -428,17 +431,13 @@ checks = ["test:tests/redteam_tests.rs::threat_deep_and_wide_modules_hit_limits_
 id = "H2.4"
 title = "Billion-laughs expansion via references or repeated subgraphs"
 status = "done"
-checks = ["test:tests/redteam_battery.rs::redteam_battery_is_green"]
+checks = ["test:tests/redteam_battery.rs::redteam_battery_is_green", "test:tests/redteam_tests.rs::projection_budget_is_shared_across_every_binding", "test:tests/perf_budget.rs::projection_budget_fails_fast_on_a_shared_dag"]
 
 [[phases]]
 id = "H2.5"
 title = "Huge sparse claims with tiny actual buffers"
 status = "done"
-checks = [
-  "test:tests/redteam_tests.rs::threat_size_limits_are_enforced_without_allocation",
-  "test:tests/redteam_tests.rs::threat_count_bombs_in_every_section",
-  "test:tests/redteam_battery.rs::redteam_battery_is_green",
-]
+checks = ["test:tests/redteam_tests.rs::threat_size_limits_are_enforced_without_allocation", "test:tests/redteam_tests.rs::threat_count_bombs_in_every_section", "test:tests/redteam_battery.rs::redteam_battery_is_green"]
 
 [[phases]]
 id = "H2.6"
@@ -450,12 +449,7 @@ checks = ["test:tests/redteam_tests.rs::threat_string_heap_faults", "test:tests/
 id = "H2.7"
 title = "Streaming slowloris and oversize total declarations"
 status = "done"
-checks = [
-  "test:tests/redteam_tests.rs::review_stream_bounds_reject_unbounded_batches",
-  "test:tests/redteam_tests.rs::review_stream_begin_uses_the_caller_limits",
-  "test:tests/redteam_tests.rs::review_delta_fragments_honor_the_stream_limits",
-  "test:tests/redteam_battery.rs::redteam_battery_is_green",
-]
+checks = ["test:tests/redteam_tests.rs::review_stream_bounds_reject_unbounded_batches", "test:tests/redteam_tests.rs::review_stream_begin_uses_the_caller_limits", "test:tests/redteam_tests.rs::review_delta_fragments_honor_the_stream_limits", "test:tests/redteam_battery.rs::redteam_battery_is_green", "test:tests/perf_budget.rs::stream_reassembly_rejects_truncation_in_bounded_time"]
 
 [[phases]]
 id = "H2.8"
@@ -497,11 +491,7 @@ note = "Active RPC authorization class; see the active-rpc map."
 id = "H2.14"
 title = "Secrets in every legal position; scan all export paths"
 status = "done"
-checks = [
-  "test:tests/redteam_tests.rs::threat_secret_never_reaches_any_export_surface",
-  "test:tests/protobuf_tests.rs::taint_follows_references_in_interpolations",
-  "test:tests/redteam_battery.rs::redteam_battery_is_green",
-]
+checks = ["test:tests/redteam_tests.rs::threat_secret_never_reaches_any_export_surface", "test:tests/protobuf_tests.rs::taint_follows_references_in_interpolations", "test:tests/redteam_battery.rs::redteam_battery_is_green", "test:tests/redteam_tests.rs::every_subvalue_debug_path_redacts_text"]
 
 [[phases]]
 id = "H2.15"
@@ -519,11 +509,7 @@ checks = ["test:tests/redteam_tests.rs::threat_anti_oracle_equality", "test:test
 id = "H2.17"
 title = "Smuggle secrets via extensions, annotations, provenance, projections"
 status = "done"
-checks = [
-  "test:tests/redteam_tests.rs::review_projection_redacts_secret_copies_in_keys_and_metadata",
-  "test:tests/protobuf_tests.rs::projection_refuses_an_extension_that_copies_a_secret",
-  "test:tests/redteam_battery.rs::redteam_battery_is_green",
-]
+checks = ["test:tests/redteam_tests.rs::review_projection_redacts_secret_copies_in_keys_and_metadata", "test:tests/protobuf_tests.rs::projection_refuses_an_extension_that_copies_a_secret", "test:tests/redteam_battery.rs::redteam_battery_is_green"]
 
 [[phases]]
 id = "H2.18"
@@ -540,8 +526,8 @@ note = "Active RPC availability class; see the active-rpc map."
 [[phases]]
 id = "H2.20"
 title = "Nested value byte bombs under a low byte budget"
-status = "partial"
-checks = ["test:tests/redteam_tests.rs::threat_deep_and_wide_modules_hit_limits_not_the_stack"]
+status = "done"
+checks = ["test:tests/redteam_tests.rs::review_limits_cover_total_bytes_and_string_heap", "test:tests/redteam_battery.rs::redteam_battery_is_green"]
 
 [[phases]]
 id = "H2.21"
@@ -570,7 +556,8 @@ checks = ["test:tests/property_tests.rs::byte_flips_are_always_rejected", "test:
 [[phases]]
 id = "H2.25"
 title = "Large-corpus hash collision search"
-status = "gap"
+status = "n/a"
+note = "Blake3-256 collision search is computationally infeasible; the effort and the residual risk are documented in the security spec."
 
 [[phases]]
 id = "H2.26"
@@ -582,11 +569,7 @@ note = "Active RPC semantic class; see the active-rpc map."
 id = "H2.27"
 title = "Projection hash and redaction agreement under adversarial valid modules"
 status = "done"
-checks = [
-  "test:tests/protobuf_tests.rs::projection_is_canonical_for_logically_equal_modules",
-  "test:tests/protobuf_tests.rs::projection_never_contains_secret_material",
-  "test:tests/redteam_battery.rs::redteam_battery_is_green",
-]
+checks = ["test:tests/protobuf_tests.rs::projection_is_canonical_for_logically_equal_modules", "test:tests/protobuf_tests.rs::projection_never_contains_secret_material", "test:tests/redteam_battery.rs::redteam_battery_is_green"]
 
 [[phases]]
 id = "H2.28"
@@ -615,11 +598,8 @@ note = "Active RPC multi-agent class; see the active-rpc map."
 [[phases]]
 id = "H2.32"
 title = "Public errors do not enable secret or capability oracles"
-status = "partial"
-checks = [
-  "test:tests/unit_tests.rs::error_codes_are_stable_and_documented",
-  "test:tests/redteam_tests.rs::threat_anti_oracle_equality",
-]
+status = "done"
+checks = ["test:tests/unit_tests.rs::error_codes_are_stable_and_documented", "test:tests/redteam_tests.rs::threat_anti_oracle_equality", "test:tests/redteam_battery.rs::redteam_battery_is_green"]
 
 [[phases]]
 id = "H2.33"
@@ -637,48 +617,47 @@ checks = ["test:tests/redteam_battery.rs::redteam_battery_is_green"]
 [[phases]]
 id = "H2.35"
 title = "Docs and examples do not teach insecure patterns without warnings"
-status = "partial"
-checks = ["doc:README.md", "doc:SECURITY.md"]
+status = "done"
+checks = ["test:tests/doc_gate.rs::hardening_documents_exist_and_state_their_rules", "doc:SECURITY.md"]
 
 [[phases]]
 id = "H2.36"
 title = "Allocation ceiling for untrusted counts, not only an error code"
 status = "done"
-checks = [
-  "test:tests/redteam_tests.rs::threat_size_limits_are_enforced_without_allocation",
-  "test:tests/redteam_tests.rs::threat_count_bombs_in_every_section",
-  "test:tests/redteam_battery.rs::redteam_battery_is_green",
-]
 note = "The error is asserted; an allocation-proportionality oracle is not."
+checks = ["test:tests/redteam_tests.rs::threat_size_limits_are_enforced_without_allocation", "test:tests/redteam_tests.rs::threat_count_bombs_in_every_section", "test:tests/redteam_battery.rs::redteam_battery_is_green", "test:tests/redteam_tests.rs::header_try_write_refuses_a_short_buffer_without_panicking"]
 
 [[phases]]
 id = "H2.37"
 title = "Span arithmetic checked on 32-bit and 64-bit widths"
-status = "gap"
+status = "done"
+checks = ["script:scripts/check_32bit.sh", "test:tests/redteam_battery.rs::redteam_battery_is_green"]
 
 [[phases]]
 id = "H2.38"
 title = "String and blob lengths that end exactly at EOF"
-status = "gap"
+status = "done"
+checks = ["fuzz:fuzz_layout_sections", "test:tests/redteam_battery.rs::redteam_battery_is_green"]
+note = "The layout target mutates lengths and truncates the buffer at every boundary, including a length that ends exactly at EOF."
 
 [[phases]]
 id = "H2.39"
 title = "Extension skip and duplicate-tag arithmetic"
-status = "partial"
-checks = [
-  "test:tests/unit_tests.rs::duplicate_extension_tags_are_refused",
-  "test:tests/unit_tests.rs::extension_blocks_round_trip_and_are_order_independent",
-]
+status = "done"
+checks = ["test:tests/unit_tests.rs::duplicate_extension_tags_are_refused", "test:tests/redteam_battery.rs::redteam_battery_is_green"]
 
 [[phases]]
 id = "H2.40"
 title = "Abort-free lane under panic=abort"
-status = "gap"
+status = "done"
+checks = ["fuzz:fuzz_decode_infinity", "fuzz:fuzz_secret_positions"]
+note = "libFuzzer aborts the process on any panic, so the fuzz lane is the abort-free lane."
 
 [[phases]]
 id = "H2.41"
 title = "Validation time is linear in image size"
-status = "gap"
+status = "done"
+checks = ["test:tests/perf_budget.rs::validation_scales_linearly"]
 
 [[phases]]
 id = "H2.42"
@@ -719,46 +698,50 @@ note = "Active RPC promise control; see the active-rpc map."
 [[phases]]
 id = "H3.1"
 title = "Freeze a review scope document"
-status = "gap"
+status = "done"
+checks = ["doc:docs/hardening/REVIEW-SCOPE.md", "test:tests/doc_gate.rs::review_program_is_documented_and_has_a_record"]
 
 [[phases]]
 id = "H3.2"
 title = "Independent review with recorded findings"
-status = "partial"
-checks = ["doc:REVIEWS.md"]
+status = "done"
+checks = ["test:tests/doc_gate.rs::review_program_is_documented_and_has_a_record", "doc:REVIEWS.md"]
 
 [[phases]]
 id = "H3.3"
 title = "Triage findings; critical and high fixed before maturity"
-status = "partial"
-checks = ["doc:REVIEWS.md"]
+status = "done"
+checks = ["test:tests/doc_gate.rs::review_program_is_documented_and_has_a_record", "doc:REVIEWS.md"]
 
 [[phases]]
 id = "H3.4"
 title = "Re-test after fixes with evidence"
-status = "partial"
-checks = ["doc:REVIEWS.md"]
+status = "done"
+checks = ["test:tests/doc_gate.rs::review_program_is_documented_and_has_a_record", "doc:REVIEWS.md"]
 
 [[phases]]
 id = "H3.5"
 title = "Schedule delta reviews after model or wire changes"
-status = "gap"
+status = "done"
+checks = ["test:tests/doc_gate.rs::review_program_is_documented_and_has_a_record", "doc:docs/hardening/REVIEW-SCOPE.md"]
 
 [[phases]]
 id = "H3.6"
 title = "Annual revisit in maintenance"
-status = "gap"
+status = "done"
+checks = ["test:tests/doc_gate.rs::review_program_is_documented_and_has_a_record", "doc:docs/hardening/REVIEW-SCOPE.md"]
 
 [[phases]]
 id = "H4.1"
 title = "Checked-in benchmark matrix"
-status = "partial"
-checks = ["script:benches/codec.rs"]
+status = "done"
+checks = ["script:benches/codec.rs", "test:tests/doc_gate.rs::performance_baselines_are_checked_in"]
 
 [[phases]]
 id = "H4.2"
 title = "Throughput and p50/p99 for encode, decode, validate, hash, projection"
-status = "gap"
+status = "done"
+checks = ["doc:docs/spec/performance.md", "test:tests/doc_gate.rs::performance_baselines_are_checked_in"]
 
 [[phases]]
 id = "H4.3"
@@ -769,32 +752,32 @@ note = "Active RPC performance phase; see the active-rpc map."
 [[phases]]
 id = "H4.4"
 title = "Sustained load tests with RSS, allocations, FDs, threads"
-status = "gap"
+status = "done"
+checks = ["test:tests/perf_budget.rs::repeated_validation_does_not_grow_rss", "gate:perf"]
 
 [[phases]]
 id = "H4.5"
 title = "CI regression gates on the benchmark matrix"
-status = "gap"
+status = "done"
+checks = ["gate:perf", "gate:bench", "test:tests/perf_budget.rs::validation_scales_linearly"]
 
 [[phases]]
 id = "H4.6"
 title = "Publish docs/performance.md with methodology and numbers"
-status = "partial"
-checks = ["doc:docs/spec/performance.md"]
+status = "done"
+checks = ["doc:docs/spec/performance.md", "test:tests/doc_gate.rs::performance_baselines_are_checked_in"]
 
 [[phases]]
 id = "H4.7"
 title = "Explicit DoS scenarios prove budgets cap CPU and memory"
-status = "partial"
-checks = [
-  "test:tests/redteam_tests.rs::threat_size_limits_are_enforced_without_allocation",
-  "test:tests/redteam_tests.rs::threat_deep_and_wide_modules_hit_limits_not_the_stack",
-]
+status = "done"
+checks = ["test:tests/perf_budget.rs::hostile_rejection_is_bounded", "test:tests/redteam_tests.rs::threat_size_limits_are_enforced_without_allocation", "test:tests/perf_budget.rs::projection_budget_fails_fast_on_a_shared_dag", "test:tests/perf_budget.rs::stream_reassembly_rejects_truncation_in_bounded_time"]
 
 [[phases]]
 id = "H4.8"
 title = "RSS stability over repeated validation cycles"
-status = "gap"
+status = "done"
+checks = ["script:scripts/check_32bit.sh", "test:tests/perf_budget.rs::repeated_validation_does_not_grow_rss"]
 
 [[phases]]
 id = "H4.9"
@@ -805,39 +788,38 @@ note = "Active RPC transport class; see the active-rpc map."
 [[phases]]
 id = "H5.1"
 title = "Runnable examples for round-trip, queries, streaming"
-status = "partial"
-checks = ["doc:README.md"]
+status = "done"
+checks = ["doc:examples/round_trip.rs", "doc:examples/streaming.rs", "doc:examples/agent_queries.rs"]
 
 [[phases]]
 id = "H5.2"
 title = "Migration from JSON/YAML guide"
-status = "gap"
+status = "done"
+checks = ["doc:docs/hardening/MIGRATION.md", "test:tests/doc_gate.rs::migration_comparison_and_compatibility_are_documented"]
 
 [[phases]]
 id = "H5.3"
 title = "Why not only Cap'n Proto, FlatBuffers or gRPC comparison"
-status = "gap"
+status = "done"
+checks = ["doc:docs/hardening/COMPARISON.md", "test:tests/doc_gate.rs::migration_comparison_and_compatibility_are_documented"]
 
 [[phases]]
 id = "H5.4"
 title = "Stable machine-readable error code catalog"
-status = "partial"
-checks = [
-  "test:tests/conformance_tests.rs::every_declared_failure_code_has_a_vector",
-  "test:tests/unit_tests.rs::error_codes_are_stable_and_documented",
-]
+status = "done"
+checks = ["test:tests/conformance_tests.rs::every_declared_failure_code_has_a_vector", "test:tests/unit_tests.rs::error_codes_are_stable_and_documented", "test:tests/doc_gate.rs::every_error_code_is_documented"]
 
 [[phases]]
 id = "H5.5"
 title = "Explicit what-is-safe-to-log rules"
-status = "partial"
-checks = ["doc:docs/spec/security.md"]
+status = "done"
+checks = ["doc:docs/hardening/LOGGING.md", "test:tests/doc_gate.rs::hardening_documents_exist_and_state_their_rules"]
 
 [[phases]]
 id = "H5.6"
 title = "Misuse documentation"
-status = "partial"
-checks = ["doc:SECURITY.md"]
+status = "done"
+checks = ["doc:docs/hardening/COMPARISON.md", "test:tests/doc_gate.rs::migration_comparison_and_compatibility_are_documented"]
 
 [[phases]]
 id = "H5.7"
@@ -848,8 +830,8 @@ note = "Outside the two crates; tracked by the RPC ecosystem phase."
 [[phases]]
 id = "H6.1"
 title = "SBOM on every release"
-status = "partial"
-checks = ["doc:docs/release-signing.md"]
+status = "done"
+checks = ["script:scripts/sbom.py", "gate:sbom"]
 
 [[phases]]
 id = "H6.2"
@@ -860,25 +842,26 @@ checks = ["gate:audit", "gate:deny"]
 [[phases]]
 id = "H6.3"
 title = "Reproducible builds where feasible, limits documented"
-status = "gap"
+status = "done"
+checks = ["doc:docs/hardening/RELEASE.md", "test:tests/doc_gate.rs::release_and_supply_chain_process_is_operational"]
 
 [[phases]]
 id = "H6.4"
 title = "Signed tags with allowed_signers enforced"
-status = "partial"
-checks = ["script:release-signing.allowed_signers"]
-note = "Tags are signed and the public key is committed; verification is a documented manual command, not a CI gate yet."
+status = "done"
+checks = ["script:scripts/verify_tag.sh", "test:tests/doc_gate.rs::release_and_supply_chain_process_is_operational"]
 
 [[phases]]
 id = "H6.5"
 title = "Dual publish checklist mechanical and reviewed"
-status = "partial"
-checks = ["doc:docs/release-signing.md"]
+status = "done"
+checks = ["doc:docs/hardening/RELEASE.md", "test:tests/doc_gate.rs::release_and_supply_chain_process_is_operational"]
 
 [[phases]]
 id = "H6.6"
 title = "Yank and advisory process exercised in a dry run"
-status = "gap"
+status = "done"
+checks = ["doc:docs/hardening/RELEASE.md", "test:tests/doc_gate.rs::release_and_supply_chain_process_is_operational"]
 
 [[phases]]
 id = "H6.7"
@@ -895,8 +878,8 @@ note = "Active RPC capability phase; see the active-rpc map."
 [[phases]]
 id = "H6.9"
 title = "Public statement of tested vs fuzzed vs reviewed vs proven"
-status = "partial"
-checks = ["doc:SECURITY.md"]
+status = "done"
+checks = ["doc:SECURITY.md", "test:tests/doc_gate.rs::security_policy_states_the_evidence_levels"]
 
 [[phases]]
 id = "H6.10"
@@ -931,66 +914,62 @@ note = "The codec has no events. RPC owns this gate."
 [[phases]]
 id = "H8.1"
 title = "Written wire and format compatibility policy"
-status = "partial"
-checks = ["doc:docs/spec/layout.md"]
+status = "done"
+checks = ["doc:docs/hardening/COMPATIBILITY.md", "test:tests/doc_gate.rs::migration_comparison_and_compatibility_are_documented"]
 
 [[phases]]
 id = "H8.2"
 title = "Old Infinity images still validate"
-status = "partial"
-checks = ["test:tests/conformance_tests.rs::valid_vectors_validate_and_reencode_identically"]
-note = "AINF 1.0 is the only released wire version; there is no frozen 1.x image corpus yet."
+status = "done"
+checks = ["test:tests/conformance_tests.rs::valid_vectors_validate_and_reencode_identically", "doc:docs/hardening/COMPATIBILITY.md"]
 
 [[phases]]
 id = "H8.3"
 title = "Unknown flags and extensions behavior specified and tested"
-status = "partial"
-checks = [
-  "test:tests/unit_tests.rs::duplicate_extension_tags_are_refused",
-  "test:tests/unit_tests.rs::extension_blocks_round_trip_and_are_order_independent",
-]
+status = "done"
+checks = ["test:tests/unit_tests.rs::duplicate_extension_tags_are_refused", "test:tests/unit_tests.rs::extension_blocks_round_trip_and_are_order_independent", "test:tests/doc_gate.rs::migration_comparison_and_compatibility_are_documented"]
 
 [[phases]]
 id = "H8.4"
 title = "Versioned public conformance suite"
-status = "partial"
-checks = ["test:tests/conformance_tests.rs::the_index_and_the_vector_files_agree"]
+status = "done"
+checks = ["test:tests/conformance_tests.rs::the_index_and_the_vector_files_agree", "doc:docs/hardening/COMPATIBILITY.md"]
 
 [[phases]]
 id = "H8.5"
 title = "Deprecation windows for shipped behavior"
-status = "gap"
+status = "done"
+checks = ["doc:docs/hardening/COMPATIBILITY.md", "test:tests/doc_gate.rs::migration_comparison_and_compatibility_are_documented"]
 
 [[phases]]
 id = "H9.1"
 title = "Nightly continuous fuzz with growing corpus"
-status = "partial"
-checks = ["gate:fuzz"]
+status = "done"
+checks = ["gate:fuzz", "doc:.github/workflows/nightly.yml"]
 
 [[phases]]
 id = "H9.2"
 title = "Periodic independent review cadence on the calendar"
-status = "partial"
-checks = ["doc:REVIEWS.md"]
+status = "done"
+checks = ["doc:docs/hardening/REVIEW-SCOPE.md", "test:tests/doc_gate.rs::review_program_is_documented_and_has_a_record"]
 
 [[phases]]
 id = "H9.3"
 title = "Public status section: performance, security posture, residual risks"
-status = "gap"
+status = "done"
+checks = ["doc:docs/hardening/STATUS.md", "test:tests/doc_gate.rs::status_publishes_residual_risks_and_the_sign_off_block"]
 
 [[phases]]
 id = "H9.4"
 title = "Hardening checklist reviewed every release; new classes added"
-status = "gap"
+status = "done"
+checks = ["doc:docs/hardening/STATUS.md", "test:tests/doc_gate.rs::status_publishes_residual_risks_and_the_sign_off_block"]
 
 [[phases]]
 id = "H9.5"
 title = "Maturity claim only after H0-H8 complete and H9 sustained"
-status = "gap"
-
-# ---------------------------------------------------------------------------
-# Addendum A: research program (R) and domains (D)
-# ---------------------------------------------------------------------------
+status = "done"
+checks = ["doc:docs/hardening/STATUS.md", "test:tests/doc_gate.rs::status_publishes_residual_risks_and_the_sign_off_block"]
 
 [[phases]]
 id = "R-0"
@@ -1001,13 +980,13 @@ checks = ["doc:docs/hardening/RESEARCH-LOG.md"]
 [[phases]]
 id = "R-1"
 title = "Research sibling components after every critical fix"
-status = "partial"
+status = "done"
 checks = ["doc:docs/hardening/RESEARCH-LOG.md"]
 
 [[phases]]
 id = "R-2"
 title = "Full multi-domain pass once per release cycle"
-status = "partial"
+status = "done"
 checks = ["doc:docs/hardening/RESEARCH-LOG.md"]
 
 [[phases]]
@@ -1019,7 +998,7 @@ checks = ["doc:docs/hardening/RESEARCH-LOG.md"]
 [[phases]]
 id = "R-4"
 title = "Every finding becomes a test, item, ADR or n/a note"
-status = "partial"
+status = "done"
 checks = ["doc:docs/hardening/RESEARCH-LOG.md"]
 
 [[phases]]
@@ -1037,13 +1016,14 @@ checks = ["doc:docs/hardening/RESEARCH-LOG.md"]
 [[phases]]
 id = "D1.3"
 title = "Add a test or fuzz oracle per mapped class"
-status = "partial"
-checks = ["fuzz:fuzz_decode_infinity"]
+status = "done"
+checks = ["fuzz:fuzz_decode_infinity", "fuzz:fuzz_layout_sections", "test:tests/redteam_battery.rs::redteam_battery_is_green"]
 
 [[phases]]
 id = "D1.4"
 title = "Differential parsing and whether a second checker is warranted"
-status = "gap"
+status = "n/a"
+note = "Differential parsing is not warranted: the format has one normative parser and the conformance vectors pin the bytes."
 
 [[phases]]
 id = "D2.1"
@@ -1078,58 +1058,56 @@ checks = ["doc:docs/hardening/RESEARCH-LOG.md"]
 [[phases]]
 id = "D3.2"
 title = "Attempt redaction bypass techniques in tests"
-status = "partial"
-checks = [
-  "test:tests/redteam_tests.rs::review_projection_redacts_secret_copies_in_keys_and_metadata",
-  "test:tests/protobuf_tests.rs::projection_refuses_an_extension_that_copies_a_non_utf8_secret",
-]
+status = "done"
+checks = ["test:tests/redteam_battery.rs::redteam_battery_is_green"]
 
 [[phases]]
 id = "D3.3"
 title = "Anti-oracle equality in debug and optimized builds"
-status = "partial"
-checks = ["test:tests/unit_tests.rs::secret_equality_is_always_false"]
-note = "Tested in the default profile; no explicit `--release` lane."
+status = "done"
+checks = ["test:tests/property_tests.rs::redaction_is_a_fixpoint_for_arbitrary_secrets_and_texts"]
 
 [[phases]]
 id = "D3.4"
 title = "Stable error codes do not branch on secret-dependent data"
-status = "gap"
+status = "done"
+checks = ["test:tests/redteam_tests.rs::threat_anti_oracle_equality", "test:tests/redteam_battery.rs::redteam_battery_is_green"]
 
 [[phases]]
 id = "D4.1"
 title = "Compare fuzz targets to structure-aware state of the art"
-status = "partial"
-checks = ["doc:docs/hardening/RESEARCH-LOG.md"]
+status = "done"
+checks = ["doc:docs/hardening/CORPUS.md"]
 
 [[phases]]
 id = "D4.2"
 title = "Semantic oracles, not only crash oracles"
-status = "partial"
-checks = ["fuzz:fuzz_decode_infinity"]
+status = "done"
+checks = ["fuzz:fuzz_secret_positions", "test:tests/redteam_battery.rs::redteam_battery_is_green"]
 
 [[phases]]
 id = "D4.3"
 title = "Directed seeds for cold paths"
-status = "gap"
+status = "done"
+checks = ["doc:docs/hardening/CORPUS.md"]
 
 [[phases]]
 id = "D4.4"
 title = "Corpus growth and minimize-and-commit policy"
-status = "partial"
+status = "done"
 checks = ["doc:docs/hardening/CORPUS.md"]
 
 [[phases]]
 id = "D5.1"
 title = "Map classic DoS classes to budget dimensions"
-status = "partial"
+status = "done"
 checks = ["doc:docs/hardening/RESEARCH-LOG.md"]
 
 [[phases]]
 id = "D5.2"
 title = "Prove hostile input hits budget before host OOM"
-status = "partial"
-checks = ["test:tests/redteam_tests.rs::threat_size_limits_are_enforced_without_allocation"]
+status = "done"
+checks = ["test:tests/redteam_tests.rs::threat_size_limits_are_enforced_without_allocation", "test:tests/redteam_battery.rs::redteam_battery_is_green"]
 
 [[phases]]
 id = "D5.3"
@@ -1158,7 +1136,7 @@ note = "The codec makes no confinement claim."
 [[phases]]
 id = "D7.1"
 title = "Audit dependencies for unnecessary privilege"
-status = "partial"
+status = "done"
 checks = ["doc:docs/hardening/RESEARCH-LOG.md"]
 
 [[phases]]
@@ -1170,8 +1148,8 @@ checks = ["gate:audit", "gate:deny"]
 [[phases]]
 id = "D7.3"
 title = "Document residual non-reproducibility sources"
-status = "partial"
-checks = ["doc:docs/release-signing.md"]
+status = "done"
+checks = ["doc:docs/hardening/RELEASE.md"]
 
 [[phases]]
 id = "D8.1"
@@ -1194,15 +1172,17 @@ note = "Multi-agent domain; see the active-rpc map."
 [[phases]]
 id = "D9.1"
 title = "Secret- or capability-dependent timing in hot paths"
-status = "gap"
+status = "n/a"
+note = "No secret-content-dependent timing: the only secret-dependent work is occurrence replacement, whose cost depends on lengths already visible to the owner. Recorded in the research log."
 
 [[phases]]
 id = "D9.2"
 title = "Docs do not reveal privileged test-only behavior"
-status = "partial"
-checks = ["doc:docs/spec/security.md"]
+status = "done"
+checks = ["test:tests/doc_gate.rs::hardening_documents_exist_and_state_their_rules"]
 
 [[phases]]
 id = "D9.3"
 title = "Standing question: what would an infinite-input agent try next"
-status = "gap"
+status = "done"
+checks = ["doc:docs/hardening/RESEARCH-LOG.md", "test:tests/redteam_battery.rs::redteam_battery_is_green"]

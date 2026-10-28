@@ -778,3 +778,127 @@ fn projection_budget_refuses_an_exponential_dag() {
     assert!(active_infinity::to_protobuf(&normal).is_ok());
 }
 
+#[test]
+fn every_subvalue_debug_path_redacts_text() {
+    use active_infinity::{
+        AnnotationKind, InfinityModule, Inode, ProvEntry, ProvValue, Provenance, SecretBytes,
+    };
+
+    let canary = "subvalue-debug-canary";
+    let mut module = InfinityModule::new();
+    let secret = module.push(Inode::Secret(SecretBytes::from(canary)));
+    let copy = module.push(Inode::Str(canary.to_string()));
+    let root = module.push(Inode::Table {
+        fields: vec![(canary.to_string(), secret), ("safe".into(), copy)],
+    });
+    module.set_root(Some(root));
+    module.bind(canary, secret);
+    module.annotate(secret, AnnotationKind::Intent(canary.to_string()));
+    module.set_provenance(Some(Provenance {
+        producer: Some(canary.to_string()),
+        timestamp_ms: 1,
+        model: Some(canary.to_string()),
+        tool: Some(canary.to_string()),
+        parent: None,
+        entries: vec![ProvEntry {
+            key: canary.to_string(),
+            value: ProvValue::Text(canary.to_string()),
+        }],
+    }));
+
+    use active_infinity::stream::DeltaOp;
+    use active_infinity::{Constraint, InterpPart, PatchOp, SchemaFieldSpec, TypeSpec, UnitTag};
+
+    let unit_display = UnitTag::Named(canary.to_string()).to_string();
+    let rendered = format!(
+        "{:?} {:?} {:?} {:?} {:?} {:?} {:?} {:?} {:?} {:?} {:?} {:?} {:?} {:?} {:?} {:?} {:?} {}",
+        module,
+        module.nodes(),
+        module.annotations(),
+        module.provenance(),
+        Inode::Str(canary.to_string()),
+        Inode::Table {
+            fields: vec![(canary.to_string(), secret)]
+        },
+        InterpPart::Literal(canary.to_string()),
+        Constraint::Enum(vec![canary.to_string()]),
+        Constraint::Pattern(canary.to_string()),
+        Constraint::Custom(canary.to_string()),
+        TypeSpec::Enum(vec![canary.to_string()]),
+        PatchOp::Set {
+            path: canary.to_string(),
+            value: secret
+        },
+        PatchOp::Rename {
+            from: canary.to_string(),
+            to: canary.to_string()
+        },
+        SchemaFieldSpec {
+            typ: TypeSpec::String,
+            min: None,
+            max: None,
+            min_len: None,
+            max_len: None,
+            pattern: None,
+            default: None,
+            deprecated: Some(canary.to_string())
+        },
+        UnitTag::Named(canary.to_string()),
+        DeltaOp::SetBinding {
+            name: canary.to_string(),
+            node: secret
+        },
+        DeltaOp::RemoveBinding {
+            name: canary.to_string()
+        },
+        unit_display
+    );
+    assert!(
+        !rendered.contains(canary),
+        "a Debug sub-value exported text: {rendered}"
+    );
+}
+
+#[test]
+fn projection_budget_is_shared_across_every_binding() {
+    fn diamond(levels: usize, bindings: usize) -> InfinityModule {
+        let mut module = InfinityModule::new();
+        let mut current = module.push(Inode::Int(1));
+        for _ in 0..levels {
+            let left = module.push(Inode::Ref(current));
+            let right = module.push(Inode::Ref(current));
+            current = module.push(Inode::Table {
+                fields: vec![("l".into(), left), ("r".into(), right)],
+            });
+        }
+        module.set_root(Some(current));
+        for index in 0..bindings {
+            module.bind(format!("view_{index:04}"), current);
+        }
+        module
+    }
+
+    // One binding is a legal projection: 2^10 nodes stay under the budget.
+    assert!(active_infinity::to_protobuf(&diamond(10, 1)).is_ok());
+
+    // Two hundred aliases of the same DAG would materialise ~200k nodes if the
+    // budget reset per binding. It must be one budget for the whole projection.
+    let error = active_infinity::to_protobuf(&diamond(10, 200)).expect_err("per-binding bypass");
+    assert_eq!(error.code(), "infinity/encode");
+    assert!(
+        error.to_string().contains("node budget"),
+        "the diagnostic must name the budget: {error}"
+    );
+}
+
+#[test]
+fn header_try_write_refuses_a_short_buffer_without_panicking() {
+    let image = encode(&fixture()).expect("encode");
+    let header = active_infinity::layout::Header::parse(&image).expect("header");
+    let mut short = [0u8; 8];
+    let error = header.try_write(&mut short).expect_err("short buffer");
+    assert_eq!(error.code(), "infinity/encode");
+    let mut full = vec![0u8; active_infinity::HEADER_SIZE];
+    header.try_write(&mut full).expect("full buffer");
+    assert_eq!(&full[0..4], b"AINF");
+}

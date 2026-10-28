@@ -279,15 +279,18 @@ pub fn to_protobuf(module: &InfinityModule) -> Result<Vec<u8>> {
     bytes(&mut out, 1, &hash);
     uint(&mut out, 2, image.len() as u64);
 
+    // One budget for the whole projection: a binding that aliases the root's
+    // DAG must not get a fresh 100k allowance per binding.
+    let mut budget = 0usize;
     if let Some(root) = module.root() {
-        let value = project_node_with(module, root, &secrets)?;
+        let value = project_node_with(module, root, &secrets, &mut budget)?;
         let mut body = Vec::new();
         encode_value(&value, &mut body);
         message(&mut out, 3, &body);
     }
 
     for (name, id) in module.bindings() {
-        let value = project_node_with(module, *id, &secrets)?;
+        let value = project_node_with(module, *id, &secrets, &mut budget)?;
         let mut binding = Vec::new();
         string(&mut binding, 1, &redacted_key(name, &secrets));
         let mut encoded = Vec::new();

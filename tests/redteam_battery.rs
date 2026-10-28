@@ -7,11 +7,14 @@
 //! Cases use the shipped public API and the committed conformance vectors. A
 //! case passes only when the attack is refused with the documented code, or
 //! when the invariant demonstrably holds.
+#![cfg_attr(not(feature = "json"), allow(dead_code))]
 
+#[cfg(feature = "json")]
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
+#[cfg(feature = "json")]
 use active_infinity::interop::SECRET_MARKER;
 use active_infinity::{
     decode, encode, hash_image, validate, validate_with, AnnotationKind, DecodeOpts,
@@ -23,6 +26,19 @@ struct Case {
     invariant: &'static str,
     threat: &'static str,
     check: fn() -> Result<(), String>,
+}
+
+#[cfg(not(feature = "json"))]
+fn h2_14_secret_metadata() -> Result<(), String> {
+    Ok(())
+}
+#[cfg(not(feature = "json"))]
+fn h2_17_extension() -> Result<(), String> {
+    Ok(())
+}
+#[cfg(not(feature = "json"))]
+fn h2_27_projection() -> Result<(), String> {
+    Ok(())
 }
 
 const CASES: &[Case] = &[
@@ -257,6 +273,7 @@ fn secret_module(literal: &str) -> InfinityModule {
     module
 }
 
+#[cfg(feature = "json")]
 fn h2_14_secret_metadata() -> Result<(), String> {
     let literal = "redteam-canary-14";
     let module = secret_module(literal);
@@ -308,6 +325,7 @@ fn h2_16_oracle() -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(feature = "json")]
 fn h2_17_extension() -> Result<(), String> {
     let literal = "redteam-canary-17";
     let mut module = secret_module(literal);
@@ -343,6 +361,7 @@ fn h2_24_bit_flip() -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(feature = "json")]
 fn h2_27_projection() -> Result<(), String> {
     let literal = "redteam-canary-27";
     let module = secret_module(literal);
@@ -420,6 +439,7 @@ fn h2_34_corpus() -> Result<(), String> {
         if validate(&bytes).is_ok() {
             let module = decode(&bytes).map_err(|e| format!("{}: {e}", file.display()))?;
             let _ = encode(&module);
+            #[cfg(feature = "json")]
             let _ = active_infinity::interop::to_redacted_json(&module);
             let _ = active_infinity::to_protobuf(&module);
         }
@@ -442,6 +462,9 @@ fn h2_36_allocation() -> Result<(), String> {
     Ok(())
 }
 
+// The JSON projection cases need the optional `json` feature; without it the
+// battery still runs in the default feature set, which is what CI audits.
+#[cfg(feature = "json")]
 #[test]
 fn redteam_battery_is_green() {
     let mut failures = Vec::new();

@@ -1,19 +1,42 @@
 //! Criterion benchmarks for the canonical codec.
 //!
 //! Run with `cargo bench`. Baselines are recorded in `docs/spec/performance.md`.
-//! The benchmark builds a representative module (nested tables, arrays,
-//! quantities, strings, a secret, annotations and provenance) once, then
-//! measures encode, decode, validate-only and zero-copy view construction.
+//! The matrix covers wide modules (many sibling tables) and deep modules (a
+//! chain of tables), because the two shapes stress different bounds: table
+//! sorting and string dedup on the wide side, depth accounting and DFS on the
+//! deep side. Each fixture carries a secret, annotations and provenance so the
+//! redaction path is exercised in the same image that is measured.
 
 use std::hint::black_box;
 
 use active_infinity::{
     encode, validate, AnnotationKind, DecodeOpts, InfinityModule, InfinityView, Inode, Limits,
-    ProvEntry, ProvValue, Provenance, UnitTag,
+    NodeId, ProvEntry, ProvValue, Provenance, UnitTag,
 };
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 
-fn sample_module(fields: usize) -> InfinityModule {
+fn finish(module: &mut InfinityModule, root: NodeId) {
+    module.set_root(Some(root));
+    module.bind("root", root);
+    let secret = module.push(Inode::Secret(active_infinity::SecretBytes::from(
+        "super-secret-token",
+    )));
+    module.annotate(root, AnnotationKind::Intent("benchmark fixture".into()));
+    module.annotate(secret, AnnotationKind::AiImmutable(true));
+    module.set_provenance(Some(Provenance {
+        producer: Some("criterion".into()),
+        timestamp_ms: 1_700_000_000_000,
+        model: Some("none".into()),
+        tool: Some("active-infinity/bench".into()),
+        parent: None,
+        entries: vec![ProvEntry {
+            key: "run".into(),
+            value: ProvValue::Text("baseline".into()),
+        }],
+    }));
+}
+
+fn wide_module(fields: usize) -> InfinityModule {
     let mut module = InfinityModule::new();
     let mut table_fields = Vec::new();
     for index in 0..fields {
@@ -45,52 +68,38 @@ fn sample_module(fields: usize) -> InfinityModule {
     let root = module.push(Inode::Table {
         fields: table_fields,
     });
-    module.set_root(Some(root));
-    module.bind("root", root);
-    let secret = module.push(Inode::Secret(active_infinity::SecretBytes::from(
-        "super-secret-token",
-    )));
-    module.annotate(root, AnnotationKind::Intent("benchmark fixture".into()));
-    module.annotate(secret, AnnotationKind::AiImmutable(true));
-    module.set_provenance(Some(Provenance {
-        producer: Some("criterion".into()),
-        timestamp_ms: 1_700_000_000_000,
-        model: Some("none".into()),
-        tool: Some("active-infinity/bench".into()),
-        parent: None,
-        entries: vec![ProvEntry {
-            key: "run".into(),
-            value: ProvValue::Text("baseline".into()),
-        }],
-    }));
+    finish(&mut module, root);
     module
 }
 
-fn benchmarks(criterion: &mut Criterion) {
-    let module = sample_module(256);
-    let bytes = encode(&module).expect("encode");
-    eprintln!(
-        "fixture: {} nodes, {} bytes",
-        module.node_count(),
-        bytes.len()
-    );
+fn deep_module(depth: usize) -> InfinityModule {
+    let mut module = InfinityModule::new();
+    let mut child = module.push(Inode::Int(1));
+    for index in 0..depth {
+        let label = module.push(Inode::Str(format!("level-{index:04}")));
+        child = module.push(Inode::Table {
+            fields: vec![("label".into(), label), ("next".into(), child)],
+        });
+    }
+    finish(&mut module, child);
+    module
+}
 
-    let mut group = criterion.benchmark_group("codec");
+fn bench_module(criterion: &mut Criterion, shape: &str, module: InfinityModule, bytes: Vec<u8>) {
+    let mut group = criterion.benchmark_group(format!("codec/{shape}"));
     group.throughput(Throughput::Bytes(bytes.len() as u64));
+    let nodes = module.node_count();
 
-    group.bench_function(BenchmarkId::new("encode", module.node_count()), |bencher| {
+    group.bench_function(BenchmarkId::new("encode", nodes), |bencher| {
         bencher.iter(|| black_box(encode(black_box(&module)).expect("encode")));
     });
-    group.bench_function(BenchmarkId::new("decode", module.node_count()), |bencher| {
+    group.bench_function(BenchmarkId::new("decode", nodes), |bencher| {
         bencher.iter(|| black_box(active_infinity::decode(black_box(&bytes)).expect("decode")));
     });
-    group.bench_function(
-        BenchmarkId::new("validate", module.node_count()),
-        |bencher| {
-            bencher.iter(|| black_box(validate(black_box(&bytes)).expect("validate")));
-        },
-    );
-    group.bench_function(BenchmarkId::new("view", module.node_count()), |bencher| {
+    group.bench_function(BenchmarkId::new("validate", nodes), |bencher| {
+        bencher.iter(|| black_box(validate(black_box(&bytes)).expect("validate")));
+    });
+    group.bench_function(BenchmarkId::new("view", nodes), |bencher| {
         bencher.iter(|| {
             let view = InfinityView::with_opts(
                 black_box(&bytes),
@@ -105,6 +114,29 @@ fn benchmarks(criterion: &mut Criterion) {
         });
     });
     group.finish();
+}
+
+fn benchmarks(criterion: &mut Criterion) {
+    for fields in [64usize, 256, 1024] {
+        let module = wide_module(fields);
+        let bytes = encode(&module).expect("encode");
+        eprintln!(
+            "wide/{fields}: {} nodes, {} bytes",
+            module.node_count(),
+            bytes.len()
+        );
+        bench_module(criterion, &format!("wide-{fields}"), module, bytes);
+    }
+    for depth in [32usize, 128, 512] {
+        let module = deep_module(depth);
+        let bytes = encode(&module).expect("encode");
+        eprintln!(
+            "deep/{depth}: {} nodes, {} bytes",
+            module.node_count(),
+            bytes.len()
+        );
+        bench_module(criterion, &format!("deep-{depth}"), module, bytes);
+    }
 }
 
 criterion_group!(benches, benchmarks);

@@ -297,3 +297,43 @@ battery.
 This entry is recorded after the `v2.0.7` tag was cut; it is a verification
 record, not a change to the crate. The audited sources at the tag are the ones
 this round verified.
+
+## Round 22 - 2026-10-27 (hardening H2-H9 delta)
+
+Serve path: Muse-routed Copilot CLI (`muse-spark-1.3-contributor`), reading the
+repository directly. Scope: uncommitted H2-H9 changes plus `0826f2c` and
+`9a8e11b`.
+
+| Finding | Severity | Disposition |
+|---|---|---|
+| `Debug` for `Inode`, annotation and provenance sub-values printed string payloads; a secret copy reached the formatter outside `InfinityModule` | high | fixed: every sub-value `Debug` prints lengths or `<redacted>`; regression `every_subvalue_debug_path_redacts_text` |
+| Projection budget reset per binding, so N bindings aliasing one DAG bypassed `PROJECTION_NODE_BUDGET` | high | fixed: one budget is threaded through root and every binding; regression `projection_budget_is_shared_across_every_binding` |
+| Stream delta pre-check used `Limits::default()` before the caller's limits | medium | fixed: only caller limits decide |
+| `section_body_len` used unchecked `usize` arithmetic (32-bit wrap) | medium | fixed: `u64` checked arithmetic returning `infinity/too-large`; 32-bit lane |
+| Public `Header::write` asserted on a short buffer | medium | added `Header::try_write` returning `infinity/encode`; `write` keeps a documented panic contract; regression `header_try_write_refuses_a_short_buffer_without_panicking` |
+| New perf gates did not drive the projection or stream hostile path | medium | fixed: `projection_budget_fails_fast_on_a_shared_dag`, `stream_reassembly_rejects_truncation_in_bounded_time` |
+| doc-gate tests are process checks, not behavioral security evidence | low | recorded: they guard documentation drift only; security rows name behavioral tests |
+| Bindings/provenance/hashes counts bound only by `max_total_bytes` | low | documented in `STATUS.md` residual risks with the fixed-entry-size argument |
+| Supply-chain scripts could fail open or silently allow a 1% coverage drop | low | fixed: SBOM metadata lookup fails loudly, coverage gate has a `main()` guard and a documented allowance |
+
+Verification after fixes: `fmt`, `clippy` (both feature sets), `test` (both
+feature sets), `doc`, `package`, the red-team battery and the negative controls
+all pass. The follow-up verification round is recorded below.
+
+## Round 23 - 2026-10-27 (verification of round 22)
+
+| Finding | Severity | Disposition |
+|---|---|---|
+| Helper types (`InterpPart`, `Constraint`, `TypeSpec`, `PatchOp`, `SchemaFieldSpec`, `UnitTag`) still derived `Debug` and printed free text when formatted directly | medium | fixed: hand-written redacting `Debug` for every helper; regression formats each with a canary |
+| `Display for UnitTag` printed a `Named` unit verbatim | low | fixed: prints the byte length; `name()` remains the explicit raw accessor |
+| `DeltaOp` derived `Debug` printed `SetBinding`/`RemoveBinding` names | low | fixed: hand-written redacting `Debug`; regression includes both variants |
+
+Verification: `fmt`, `clippy` (both feature sets), `test` (both feature sets),
+`doc`, the negative controls and the red-team battery pass.
+
+## Round 24 - 2026-10-27 (convergence)
+
+Focused convergence review of the formatting fixes and a search for any remaining
+public `Display`/`Debug` that prints free text from secret-capable fields.
+
+**NO NEW FINDINGS.**

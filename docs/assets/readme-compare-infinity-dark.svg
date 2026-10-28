@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="2400" height="840" viewBox="0 0 2400 840">
+<rect width="2400" height="840" fill="#101016"/>
+
+<rect x="90" y="150" width="1040" height="600" rx="26" fill="#18181f" stroke="#2a2b33" stroke-width="2"/>
+<text x="130" y="212" font-family="Segoe UI, Inter, 'Helvetica Neue', Arial, sans-serif" font-size="28" font-weight="700" fill="#e5484d" text-anchor="start" letter-spacing="4">TEXT / JSON</text>
+<text x="130" y="258" font-family="Segoe UI, Inter, 'Helvetica Neue', Arial, sans-serif" font-size="34" font-weight="600" fill="#f5f6f7" text-anchor="start" letter-spacing="0">Ambiguity is the default</text>
+<g font-family="'Cascadia Code', 'SFMono-Regular', Consolas, monospace" font-size="25" fill="#a0a7b0">
+<text x="130" y="330" font-family="'Cascadia Code', 'SFMono-Regular', Consolas, monospace" font-size="25" font-weight="400" fill="#a0a7b0" text-anchor="start" letter-spacing="0">{ "timeout": "1500",</text>
+<text x="130" y="372" font-family="'Cascadia Code', 'SFMono-Regular', Consolas, monospace" font-size="25" font-weight="400" fill="#a0a7b0" text-anchor="start" letter-spacing="0">  "port": "8080",</text>
+<text x="130" y="414" font-family="'Cascadia Code', 'SFMono-Regular', Consolas, monospace" font-size="25" font-weight="400" fill="#a0a7b0" text-anchor="start" letter-spacing="0">  "token": "vault/db",</text>
+<text x="130" y="456" font-family="'Cascadia Code', 'SFMono-Regular', Consolas, monospace" font-size="25" font-weight="400" fill="#a0a7b0" text-anchor="start" letter-spacing="0">  "retries": 3 }</text>
+</g>
+<text x="130" y="540" font-family="Segoe UI, Inter, 'Helvetica Neue', Arial, sans-serif" font-size="25" font-weight="500" fill="#e5484d" text-anchor="start" letter-spacing="0">string or number?  unit?  duplicate key?  secret?</text>
+<text x="130" y="594" font-family="Segoe UI, Inter, 'Helvetica Neue', Arial, sans-serif" font-size="24" font-weight="400" fill="#737a84" text-anchor="start" letter-spacing="0">one logical value → many byte images → no stable identity</text>
+<rect x="130" y="632" width="880" height="1" fill="#2a2b33"/>
+<text x="130" y="682" font-family="Segoe UI, Inter, 'Helvetica Neue', Arial, sans-serif" font-size="24" font-weight="400" fill="#737a84" text-anchor="start" letter-spacing="0">The receiver must guess. Security becomes a filter pass.</text>
+
+<rect x="1180" y="150" width="1130" height="600" rx="26" fill="#18181f" stroke="#f2571f" stroke-opacity="0.55" stroke-width="2"/>
+<text x="1220" y="212" font-family="Segoe UI, Inter, 'Helvetica Neue', Arial, sans-serif" font-size="28" font-weight="700" fill="#f2571f" text-anchor="start" letter-spacing="4">ACTIVE ∞ / AINF</text>
+<text x="1220" y="258" font-family="Segoe UI, Inter, 'Helvetica Neue', Arial, sans-serif" font-size="34" font-weight="600" fill="#f5f6f7" text-anchor="start" letter-spacing="0">One module. One image. One hash.</text>
+<g>
+  <rect x="1220" y="300" width="230" height="88" rx="14" fill="#14141a" stroke="#2a2b33"/>
+  <text x="1335" y="338" font-family="Segoe UI, Inter, 'Helvetica Neue', Arial, sans-serif" font-size="20" font-weight="700" fill="#737a84" text-anchor="middle" letter-spacing="2">HEADER</text>
+  <text x="1335" y="370" font-family="'Cascadia Code', 'SFMono-Regular', Consolas, monospace" font-size="24" font-weight="600" fill="#f5f6f7" text-anchor="middle" letter-spacing="0">AINF 1.0</text>
+  <rect x="1480" y="300" width="230" height="88" rx="14" fill="#14141a" stroke="#2a2b33"/>
+  <text x="1595" y="338" font-family="Segoe UI, Inter, 'Helvetica Neue', Arial, sans-serif" font-size="20" font-weight="700" fill="#737a84" text-anchor="middle" letter-spacing="2">ARENA</text>
+  <text x="1595" y="370" font-family="'Cascadia Code', 'SFMono-Regular', Consolas, monospace" font-size="24" font-weight="600" fill="#f5f6f7" text-anchor="middle" letter-spacing="0">typed nodes</text>
+  <rect x="1740" y="300" width="230" height="88" rx="14" fill="#14141a" stroke="#2a2b33"/>
+  <text x="1855" y="338" font-family="Segoe UI, Inter, 'Helvetica Neue', Arial, sans-serif" font-size="20" font-weight="700" fill="#737a84" text-anchor="middle" letter-spacing="2">EDGES</text>
+  <text x="1855" y="370" font-family="'Cascadia Code', 'SFMono-Regular', Consolas, monospace" font-size="24" font-weight="600" fill="#f5f6f7" text-anchor="middle" letter-spacing="0">real graph</text>
+  <path d="M1455 344h20M1715 344h20" stroke="#f2571f" stroke-width="3"/>
+</g>
+<g>
+  <rect x="1220" y="430" width="520" height="112" rx="16" fill="#14141a" stroke="#2a2b33"/>
+  <text x="1246" y="468" font-family="Segoe UI, Inter, 'Helvetica Neue', Arial, sans-serif" font-size="20" font-weight="700" fill="#737a84" text-anchor="start" letter-spacing="2">UNITS + SECRETS</text>
+  <text x="1246" y="508" font-family="Segoe UI, Inter, 'Helvetica Neue', Arial, sans-serif" font-size="22" font-weight="500" fill="#f5f6f7" text-anchor="start" letter-spacing="0">Quantity(ms) · Secret(***) · no equality oracle</text>
+  <rect x="1770" y="430" width="500" height="112" rx="16" fill="#14141a" stroke="#2a2b33"/>
+  <text x="1796" y="468" font-family="Segoe UI, Inter, 'Helvetica Neue', Arial, sans-serif" font-size="20" font-weight="700" fill="#737a84" text-anchor="start" letter-spacing="2">CONTENT ADDRESS</text>
+  <text x="1796" y="508" font-family="'Cascadia Code', 'SFMono-Regular', Consolas, monospace" font-size="22" font-weight="600" fill="#f2571f" text-anchor="start" letter-spacing="0">blake3: 8f3c…9d21</text>
+</g>
+<text x="1220" y="606" font-family="Segoe UI, Inter, 'Helvetica Neue', Arial, sans-serif" font-size="25" font-weight="500" fill="#a0a7b0" text-anchor="start" letter-spacing="0">Peers verify the hash. Validators fail closed. Secrets stay a kind.</text>
+<text x="1220" y="656" font-family="Segoe UI, Inter, 'Helvetica Neue', Arial, sans-serif" font-size="25" font-weight="500" fill="#a0a7b0" text-anchor="start" letter-spacing="0">Streaming reassembles to the same canonical bytes.</text>
+<text x="1220" y="706" font-family="Segoe UI, Inter, 'Helvetica Neue', Arial, sans-serif" font-size="24" font-weight="400" fill="#737a84" text-anchor="start" letter-spacing="0">AINF is the source of truth; JSON / Protobuf are projections.</text>
+
+</svg>

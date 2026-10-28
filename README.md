@@ -1,42 +1,63 @@
 # Active Infinity (Active ∞)
 
-**The canonical binary form of Active modules.** Graph-native, unit-aware,
-secret-safe, content-addressed, zero-copy to read and streaming to ship — built
-for configuration, for data exchange, and for agents that exchange modules with
-each other.
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/readme-banner-infinity-dark.png">
+  <source media="(prefers-color-scheme: light)" srcset="docs/assets/readme-banner-infinity-light.png">
+  <img src="docs/assets/readme-banner-infinity-light.png" alt="Active Infinity: canonical binary for modules and agents">
+</picture>
 
-```text
-AINF ──► validate (bounded, fail-closed) ──► view (zero copy) ──► evaluate
-  ▲                                            │
-  └──────────── canonical encode ◄─────────────┘   same bytes, same Blake3 hash
-```
+**Canonical · Zero-copy · Content-addressed · Graph-native · Unit-aware · Secret-safe · Streaming**
 
-## Why it exists
+[![crates.io](https://img.shields.io/crates/v/active-infinity)](https://crates.io/crates/active-infinity)
+[![docs.rs](https://img.shields.io/docsrs/active-infinity)](https://docs.rs/active-infinity)
+[![license](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](LICENSE-MIT)
 
-JSON is a text format with no integers-versus-floats rule, no units, no graph, no
-identity and no way to tell a secret from a string. YAML adds ambiguity. Cap'n
-Proto and FlatBuffers give you bytes but not semantics: no units, no taint, no
-canonical content address, no graph queries.
+Thank you for opening this page. Whether you build configuration systems, data planes, or multi-agent software, Active Infinity is the binary form designed so that **what you meant is what moves**—for humans, for services, and for AI agents that exchange modules at machine speed.
 
-Active Infinity is the serialization of the *Active* language model, which already
-has those things:
+If Infinity saves you from one silent corruption, one leaked secret in a log, or one “which version of this blob is authoritative?” debate, give the repo a star so the next engineer or agent finds it first.
 
-- **Canonical**: one logical module has exactly one byte image and one Blake3
-  content address. Two modules that describe the same values hash identically.
-- **Graph-native**: dependency edges are derived from nodes and validated, so
-  `why`, `impact` and subgraph queries run on the binary form.
-- **Unit-aware**: quantities carry a permanent unit discriminant, including
-  Active's AI-age units (tokens, tokens/second, FLOPS).
-- **Secret-safe**: a secret is a *kind*, not a flag. It never equals anything,
-  never appears in `Debug`/`Display`/JSON/diagnostics, and literal locators are
-  moved out of the public string heap at canonicalization.
-- **Zero-copy**: a validated buffer hands out borrowed strings and blobs with no
-  copy, no alignment requirement and no `unsafe`.
-- **Streaming**: frames carry the canonical sections plus semantic deltas, so a
-  reassembled stream is byte-identical to the whole-module encoding.
-- **Fail-closed**: a bounded, iterative validator rejects truncation, count
-  bombs, bad offsets, invalid UTF-8, unknown units, cycles, unreachable nodes and
-  hash mismatches with permanent machine-readable codes.
+---
+
+## The thirty-second version
+
+JSON is wonderful for humans typing braces. It is a weak contract for systems that need integers to stay integers, units to stay honest, graphs to stay graphs, secrets to stay secret, and identity to be a hash—not a hope.
+
+Active Infinity is the **canonical binary language of Active modules**. One logical module becomes one byte image and one Blake3 content address. The same module always hashes the same way. Validators fail closed. Secrets are a kind, not a sticky note. Quantities carry units. Dependency edges are real. Streams reassemble to the same canonical bytes as a whole-module encode.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/readme-compare-infinity-dark.png">
+  <source media="(prefers-color-scheme: light)" srcset="docs/assets/readme-compare-infinity-light.png">
+  <img src="docs/assets/readme-compare-infinity-light.png" alt="Ambiguous text versus a canonical AINF module with a Blake3 address">
+</picture>
+
+**Active ∞ is the binary form that refuses to shrug.**
+
+---
+
+## What you get when you adopt it
+
+### Clarity with teeth
+
+- **Canonical encoding** — deterministic layout, stable Blake3 content hash. Two peers can agree “we have the same module” without debating serialization quirks.  
+- **Graph-native** — nodes and dependency edges live in the format, so *why* and *impact* style reasoning can run on the binary itself.  
+- **Unit-aware** — durations, bytes, rates, tokens, and more travel with discriminants; dimensional honesty is not an afterthought.  
+- **Secret-safe by construction** — a secret is a kind. Equality does not oracle it. Export paths redact. Projections share one redacted tree so JSON and Protobuf cannot disagree about what is safe to show.  
+- **Zero-copy reads** — validate once, borrow strings and blobs without copying the world.  
+- **Streaming** — frames that reassemble to the same canonical image, built for live updates and large modules.  
+- **Fail-closed validation** — truncation, bombs, bad offsets, cycles, unknown units, hash mismatches: stable machine-readable codes, no partial unsafe views.
+
+### Outcomes in the real world
+
+| Scene | What changes with Active ∞ |
+|-------|----------------------------|
+| Config & policy distribution | Peers verify content hash; drift becomes visible. |
+| Agent-to-agent module exchange | Agents pass modules with identity and redaction built in.  
+| Multi-service data planes | One canonical form across languages via projections when needed. |
+| Audit & compliance | Secrets do not “accidentally” appear in diagnostics or exports. |
+| Live systems | Streaming updates without losing canonical identity. |
+| Interop | Redacted JSON / Protobuf for the rest of the world; AINF remains authoritative. |
+
+---
 
 ## Quick start
 
@@ -47,119 +68,130 @@ let mut module = InfinityModule::new();
 let greeting = module.push(Inode::Str("hello".into()));
 let answer = module.push(Inode::Int(42));
 let root = module.push(Inode::Table {
-    fields: vec![("greeting".into(), greeting), ("answer".into(), answer)],
+    fields: vec![
+        ("greeting".into(), greeting),
+        ("answer".into(), answer),
+    ],
 });
 module.set_root(Some(root));
 
-let bytes = encode(&module)?;          // canonical image
-let meta = validate(&bytes)?;          // bounded, fail-closed
-let decoded = decode(&bytes)?;         // equal values
-let hash = content_hash(&bytes)?;      // content address
-assert_eq!(encode(&decoded)?, bytes);  // re-encoding is byte-identical
-# Ok::<(), active_infinity::Error>(())
+let bytes = encode(&module)?;
+let _meta = validate(&bytes)?;
+let decoded = decode(&bytes)?;
+let hash = content_hash(&bytes)?;
+assert_eq!(encode(&decoded)?, bytes);
 ```
 
-From the Active text language (feature `active-core`, on by default):
+From Active text (features `active-core` + `json`):
 
 ```rust
 use active_infinity::interop::{from_active_source, to_redacted_json};
+use active_infinity::{decode, encode};
 
-let source = "port = 8080\npassword = secret(\"hunter2\")\n";
+let source = "[app]\nport = 8080\npassword = secret(\"vault/db\")\n";
 let module = from_active_source(source, "app.active")?;
-let bytes = active_infinity::encode(&module)?;
-let json = to_redacted_json(&module)?;
-assert!(!json.contains("hunter2"));
-# Ok::<(), active_infinity::Error>(())
+let bytes = encode(&module)?;
+// Encoding promotes a locator into a secret copy; project the decoded module.
+let decoded = decode(&bytes)?;
+let json = to_redacted_json(&decoded)?;
+assert!(!json.contains("vault/db"));
 ```
-
-Run the shipped examples:
 
 ```bash
-cargo run --example roundtrip        # encode/decode/hash/stream demo
-cargo run --example agent_queries    # why / impact / taint over a binary module
-cargo run --example generate_vectors # regenerate the conformance vectors
+cargo run --example roundtrip
+cargo run --example agent_queries
 ```
+
+---
+
+## How it compares (benefit-led)
+
+| Concern | Typical JSON | Typical generic binary | Active Infinity |
+|---------|--------------|------------------------|-----------------|
+| Stable content identity | Manual | Sometimes | Blake3 canonical hash |
+| Graphs / sharing | Encode yourself | Encode yourself | Native edges |
+| Units | Convention | Convention | Discriminants |
+| Secrets | Hope + filters | Hope + filters | Structural kind + redaction |
+| Zero-copy | Rare | Possible | Designed in |
+| Streaming to same identity | DIY | DIY | Spec’d frames |
+| Agent-ready queries | DIY | DIY | why / impact on binary |
+
+You are not asked to abandon the ecosystem—you gain a **canonical core** and optional projections outward.
+
+---
 
 ## Format at a glance
 
 | Property | Value |
-|---|---|
+|----------|--------|
 | Magic | `AINF` |
-| Format | 1.0 (major 1, minor 0) |
-| Header | 224 bytes, 17 section descriptors |
-| Node record | 32 bytes, 25 kinds |
-| Hash | Blake3-256 over the canonical payload with the hash field zeroed |
-| Canonical | sorted tables, pre-order numbering, zero slack |
-| Endianness | little, alignment 8 |
+| Hash | Blake3 over canonical payload |
+| Nodes | Fixed-stride records, rich kind set |
+| Endianness | Little, structured layout |
+| Spec | `docs/spec/layout.md`, `docs/spec/streaming.md`, `docs/spec/security.md`, `docs/spec/projection.md` |
 
-The normative specification is [`docs/spec/layout.md`](docs/spec/layout.md);
-streaming is [`docs/spec/streaming.md`](docs/spec/streaming.md); the threat model
-is [`docs/spec/security.md`](docs/spec/security.md); projections for consumers
-outside Active are [`docs/spec/projection.md`](docs/spec/projection.md).
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/readme-layout-infinity-dark.png">
+  <source media="(prefers-color-scheme: light)" srcset="docs/assets/readme-layout-infinity-light.png">
+  <img src="docs/assets/readme-layout-infinity-light.png" alt="AINF layout: header, node arena, edges, heaps and Blake3 hash">
+</picture>
 
-## Projections
+---
 
-A consumer that does not speak AINF can still read a module, and it can never
-read a secret through the projection.
+## Hardened for production
 
-```rust
-use active_infinity::{to_protobuf, InfinityModule};
+Active Infinity ships with an explicit hardening trail: multi-round review dispositions, fail-closed limits, fuzz targets, red-team cases, invariant maps, and release hygiene (advisories, signing affordances). Security is treated as part of the product, not a brochure paragraph.
 
-let module = InfinityModule::new();
-let protobuf = to_protobuf(&module)?;                 // typed, for other languages
-let json = active_infinity::interop::to_redacted_json(&module)?;
-```
+See `SECURITY.md`, `REVIEWS.md`, and `docs/hardening/` for the living record.
 
-Both projections render the same redacted tree, so they cannot disagree about
-what is safe to expose. The protobuf message carries the canonical content hash,
-which a consumer can use to fetch and verify the authoritative bytes.
+## See it live
 
-## Feature flags
+The **Active Control Plane** is a real local service that embeds Active RPC and
+Active Infinity: it drives actual kernels, codecs, budgets and scenarios, then
+shows the measured counters, events and timings in a live dashboard. Live
+activity is event-driven; 20 gauges name their exact source; the L0–L6 ladder
+runs real codec, promise, tool, budget and benchmark steps. No mock random
+walk, no invented throughput.
 
-| Feature | Default | Meaning |
-|---|---|---|
-| `active-core` | on | bridge to the Active text language IR (`from_active_core`, `to_active_core`, `evaluate`) |
-| `json` | on | redacted JSON projection (`to_redacted_json`) |
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/control-plane-dark.png">
+  <source media="(prefers-color-scheme: light)" srcset="docs/assets/control-plane-light.png">
+  <img src="docs/assets/control-plane-light.png" alt="Active Control Plane dashboard with live activity, real gauges, engines and event log">
+</picture>
 
-`--no-default-features` builds a dependency-free wire codec (Blake3 and
-`thiserror` only).
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/control-plane-gauges-dark.png">
+  <source media="(prefers-color-scheme: light)" srcset="docs/assets/control-plane-gauges-light.png">
+  <img src="docs/assets/control-plane-gauges-light.png" alt="The 20 live gauges, each captioned with its exact kernel or codec source">
+</picture>
 
-## Testing
+Run it from the Active RPC repository:
 
 ```bash
-cargo test                     # unit, integration, property, conformance, red team
-cargo test --no-default-features
-cargo bench                    # codec baselines
-cargo +nightly fuzz run decode -- -runs=200000
+git clone https://github.com/Active-Official/active-rpc
+cd active-rpc/control-plane
+cargo run
+# open http://127.0.0.1:8787
 ```
 
-The conformance set under `tests/vectors/` is checked in: valid images with
-their expected hashes and invalid images with the exact error code each must
-produce. Regenerate with `cargo run --example generate_vectors`; the diff is the
-review.
+Agents read the same truth over MCP (`cp_metrics`, `cp_activity_state`,
+`cp_events_tail`, `cp_events_since`, `cp_scenario_results`, `cp_engines`,
+`cp_run_scenario`, `cp_run_level`, `cp_status_module`).
 
-## Design invariants (never weakened)
+---
 
-1. Structural secret taint, anti-oracle equality, redaction on every export path.
-2. Hard budgets: nodes, depth, array length, keys, value size, wall clock.
-3. Deterministic evaluation and content hashing.
-4. Dimensional unit safety, including non-arithmetic temperatures and decibels.
-5. Cycle rejection before any value exists.
-6. Capability security and no ambient authority (see `active-rpc`).
-7. A validated buffer is the only way to obtain a view.
+## Perfect partners
 
-## Repository
+- **Active** (text language) — author with humans and agents; canonicalize to ∞.  
+- **Active RPC** — move Infinity under capabilities, promises, lanes, and tools.  
+- Your existing stack — project to redacted JSON or Protobuf when a peer is not ready for AINF yet.
 
-- `src/layout.rs` — header, sections, limits, dialect
-- `src/ir.rs` — canonical module model
-- `src/canonical.rs` — normalization and ordering
-- `src/encode.rs` / `src/decode.rs` / `src/validate.rs` — codec and validator
-- `src/view.rs` — zero-copy views
-- `src/stream.rs` — frames, reassembly, deltas
-- `src/interop.rs` — `active-core` bridge, redacted JSON, graph queries
-- `docs/spec/` — normative specifications
-- `docs/adr/` — architecture decisions
+---
 
 ## License
 
-MIT OR Apache-2.0.
+MIT OR Apache-2.0
+
+---
+
+**Active ∞ — one module, one image, one hash, secrets held honestly, ready for agents.**

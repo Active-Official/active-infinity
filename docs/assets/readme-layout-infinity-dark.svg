@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="2400" height="840" viewBox="0 0 2400 840">
+<rect width="2400" height="840" fill="#101016"/>
+
+<text x="120" y="150" font-family="Segoe UI, Inter, 'Helvetica Neue', Arial, sans-serif" font-size="64" font-weight="700" fill="#f5f6f7" text-anchor="start" letter-spacing="0">AINF at a glance</text>
+<text x="122" y="206" font-family="Segoe UI, Inter, 'Helvetica Neue', Arial, sans-serif" font-size="30" font-weight="400" fill="#a0a7b0" text-anchor="start" letter-spacing="0">A validated arena, a derived graph, bounded heaps, one content hash.</text>
+
+<rect x="120" y="300" width="340" height="220" rx="22" fill="#18181f" stroke="#2a2b33" stroke-width="2"/>
+<text x="150" y="356" font-family="Segoe UI, Inter, 'Helvetica Neue', Arial, sans-serif" font-size="24" font-weight="700" fill="#f2571f" text-anchor="start" letter-spacing="2">HEADER</text>
+<text x="150" y="404" font-family="'Cascadia Code', 'SFMono-Regular', Consolas, monospace" font-size="23" font-weight="400" fill="#a0a7b0" text-anchor="start" letter-spacing="0">magic · version</text><text x="150" y="438" font-family="'Cascadia Code', 'SFMono-Regular', Consolas, monospace" font-size="23" font-weight="400" fill="#a0a7b0" text-anchor="start" letter-spacing="0">hash · spans</text><path d="M466 410h46" stroke="#f2571f" stroke-width="4" marker-end="url(#flow)"/>
+<rect x="520" y="300" width="340" height="220" rx="22" fill="#18181f" stroke="#2a2b33" stroke-width="2"/>
+<text x="550" y="356" font-family="Segoe UI, Inter, 'Helvetica Neue', Arial, sans-serif" font-size="24" font-weight="700" fill="#f5f6f7" text-anchor="start" letter-spacing="2">NODE ARENA</text>
+<text x="550" y="404" font-family="'Cascadia Code', 'SFMono-Regular', Consolas, monospace" font-size="23" font-weight="400" fill="#a0a7b0" text-anchor="start" letter-spacing="0">fixed-stride</text><text x="550" y="438" font-family="'Cascadia Code', 'SFMono-Regular', Consolas, monospace" font-size="23" font-weight="400" fill="#a0a7b0" text-anchor="start" letter-spacing="0">25 kinds</text><path d="M866 410h46" stroke="#f2571f" stroke-width="4" marker-end="url(#flow)"/>
+<rect x="920" y="300" width="340" height="220" rx="22" fill="#18181f" stroke="#2a2b33" stroke-width="2"/>
+<text x="950" y="356" font-family="Segoe UI, Inter, 'Helvetica Neue', Arial, sans-serif" font-size="24" font-weight="700" fill="#f5f6f7" text-anchor="start" letter-spacing="2">EDGES</text>
+<text x="950" y="404" font-family="'Cascadia Code', 'SFMono-Regular', Consolas, monospace" font-size="23" font-weight="400" fill="#a0a7b0" text-anchor="start" letter-spacing="0">children · fields</text><text x="950" y="438" font-family="'Cascadia Code', 'SFMono-Regular', Consolas, monospace" font-size="23" font-weight="400" fill="#a0a7b0" text-anchor="start" letter-spacing="0">reachability</text><path d="M1266 410h46" stroke="#f2571f" stroke-width="4" marker-end="url(#flow)"/>
+<rect x="1320" y="300" width="340" height="220" rx="22" fill="#18181f" stroke="#2a2b33" stroke-width="2"/>
+<text x="1350" y="356" font-family="Segoe UI, Inter, 'Helvetica Neue', Arial, sans-serif" font-size="24" font-weight="700" fill="#f5f6f7" text-anchor="start" letter-spacing="2">HEAPS</text>
+<text x="1350" y="404" font-family="'Cascadia Code', 'SFMono-Regular', Consolas, monospace" font-size="23" font-weight="400" fill="#a0a7b0" text-anchor="start" letter-spacing="0">strings · blobs</text><text x="1350" y="438" font-family="'Cascadia Code', 'SFMono-Regular', Consolas, monospace" font-size="23" font-weight="400" fill="#a0a7b0" text-anchor="start" letter-spacing="0">secrets · aux</text><path d="M1666 410h46" stroke="#f2571f" stroke-width="4" marker-end="url(#flow)"/>
+<rect x="1720" y="300" width="340" height="220" rx="22" fill="#18181f" stroke="#2a2b33" stroke-width="2"/>
+<text x="1750" y="356" font-family="Segoe UI, Inter, 'Helvetica Neue', Arial, sans-serif" font-size="24" font-weight="700" fill="#f2571f" text-anchor="start" letter-spacing="2">BLAKE3</text>
+<text x="1750" y="404" font-family="'Cascadia Code', 'SFMono-Regular', Consolas, monospace" font-size="23" font-weight="400" fill="#a0a7b0" text-anchor="start" letter-spacing="0">canonical payload</text><text x="1750" y="438" font-family="'Cascadia Code', 'SFMono-Regular', Consolas, monospace" font-size="23" font-weight="400" fill="#a0a7b0" text-anchor="start" letter-spacing="0">content address</text>
+<rect x="120" y="620" width="290" height="62" rx="31" fill="#14141a" stroke="#2a2b33"/>
+<text x="265" y="660" font-family="Segoe UI, Inter, 'Helvetica Neue', Arial, sans-serif" font-size="24" font-weight="600" fill="#a0a7b0" text-anchor="middle" letter-spacing="0">canonical</text>
+
+<rect x="450" y="620" width="290" height="62" rx="31" fill="#14141a" stroke="#2a2b33"/>
+<text x="595" y="660" font-family="Segoe UI, Inter, 'Helvetica Neue', Arial, sans-serif" font-size="24" font-weight="600" fill="#a0a7b0" text-anchor="middle" letter-spacing="0">zero-copy</text>
+
+<rect x="780" y="620" width="290" height="62" rx="31" fill="#14141a" stroke="#2a2b33"/>
+<text x="925" y="660" font-family="Segoe UI, Inter, 'Helvetica Neue', Arial, sans-serif" font-size="24" font-weight="600" fill="#a0a7b0" text-anchor="middle" letter-spacing="0">fail-closed</text>
+
+<rect x="1110" y="620" width="290" height="62" rx="31" fill="#14141a" stroke="#2a2b33"/>
+<text x="1255" y="660" font-family="Segoe UI, Inter, 'Helvetica Neue', Arial, sans-serif" font-size="24" font-weight="600" fill="#a0a7b0" text-anchor="middle" letter-spacing="0">streamable</text>
+
+<rect x="1440" y="620" width="290" height="62" rx="31" fill="#14141a" stroke="#2a2b33"/>
+<text x="1585" y="660" font-family="Segoe UI, Inter, 'Helvetica Neue', Arial, sans-serif" font-size="24" font-weight="600" fill="#a0a7b0" text-anchor="middle" letter-spacing="0">unit-aware</text>
+
+<defs><marker id="flow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0 0l8 3-8 3z" fill="#f2571f"/></marker></defs>
+
+</svg>

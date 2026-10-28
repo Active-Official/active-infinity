@@ -153,7 +153,14 @@ def main(argv: list[str]) -> int:
             findings += check_function(item, visibility == "public", location(item))
 
         if "trait" in inner and visibility == "public":
-            for member_id in inner["trait"].get("items", []):
+            items = inner["trait"].get("items")
+            if not isinstance(items, list):
+                findings.append(
+                    f"{location(item)}: public trait has no `items` array; "
+                    "the rustdoc schema changed"
+                )
+                items = []
+            for member_id in items:
                 member = index.get(str(member_id))
                 if member and "function" in member.get("inner", {}):
                     functions_seen += 1
@@ -162,9 +169,17 @@ def main(argv: list[str]) -> int:
         if "impl" in inner:
             # Inherent impls only: trait impls cannot add a new public name.
             if inner["impl"].get("trait") is None:
-                for member_id in inner["impl"].get("items", []):
+                items = inner["impl"].get("items")
+                if not isinstance(items, list):
+                    findings.append(
+                        f"{location(item)}: inherent impl has no `items` array; "
+                        "the rustdoc schema changed"
+                    )
+                    items = []
+                for member_id in items:
                     member = index.get(str(member_id))
                     if member and "function" in member.get("inner", {}):
+                        functions_seen += 1
                         findings += check_function(
                             member,
                             member.get("visibility") == "public",

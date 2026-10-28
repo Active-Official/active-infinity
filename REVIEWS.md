@@ -337,3 +337,11 @@ Focused convergence review of the formatting fixes and a search for any remainin
 public `Display`/`Debug` that prints free text from secret-capable fields.
 
 **NO NEW FINDINGS.**
+
+## Round 25 - 2026-10-27 (API gate schema drift)
+
+| Finding | Severity | Disposition |
+|---|---|---|
+| `api_surface.py` treated a renamed `impl.items` key as an empty list, so the gate stayed green while blind to inherent methods | high | fixed: a missing or non-list `items` array is a finding, and inherent methods count toward the function-count tripwire |
+
+Mutation evidence: renaming `impl.items` exits 1. The clean surface still reports 1,980 items / 550 functions.

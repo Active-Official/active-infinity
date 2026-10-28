@@ -924,7 +924,7 @@ pub struct Provenance {
 /// The struct is an arena of [`Inode`] plus roots, bindings, annotations and
 /// provenance. Edges are *derived* from node children, so a module can never
 /// hold an edge table inconsistent with its nodes.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct InfinityModule {
     nodes: Vec<Inode>,
     root: Option<NodeId>,
@@ -932,6 +932,132 @@ pub struct InfinityModule {
     annotations: Vec<Annotation>,
     provenance: Option<Provenance>,
     extensions: Vec<(u64, Vec<u8>)>,
+}
+
+/// Debug is an export path (I-3). Binding names, table keys, annotations,
+/// provenance text and every other string field can contain a copy of a secret
+/// literal, so the module is cloned and redacted before it is formatted.
+/// Extension payloads print as a length: a payload can contain secret-shaped
+/// bytes and has no safe renderer.
+impl fmt::Debug for InfinityModule {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let secrets = crate::interop::secret_texts(self);
+        let redact = |text: &str| crate::canonical::redact_text(text, &secrets);
+        let mut redacted = self.clone();
+        redact_for_debug(&mut redacted, &redact);
+        let extensions: Vec<(u64, usize)> = redacted
+            .extensions
+            .iter()
+            .map(|(tag, payload)| (*tag, payload.len()))
+            .collect();
+        f.debug_struct("InfinityModule")
+            .field("nodes", &redacted.nodes)
+            .field("root", &redacted.root)
+            .field("bindings", &redacted.bindings)
+            .field("annotations", &redacted.annotations)
+            .field("provenance", &redacted.provenance)
+            .field("extensions", &extensions)
+            .finish()
+    }
+}
+
+fn redact_for_debug(module: &mut InfinityModule, redact: &impl Fn(&str) -> String) {
+    for node in &mut module.nodes {
+        redact_inode(node, redact);
+    }
+    for (name, _) in &mut module.bindings {
+        *name = redact(name);
+    }
+    for annotation in &mut module.annotations {
+        match &mut annotation.kind {
+            AnnotationKind::Intent(text) => *text = redact(text),
+            AnnotationKind::Constraint { source, .. } => *source = redact(source),
+            AnnotationKind::AiImmutable(_) => {}
+        }
+    }
+    if let Some(prov) = &mut module.provenance {
+        if let Some(text) = &mut prov.producer {
+            *text = redact(text);
+        }
+        if let Some(text) = &mut prov.model {
+            *text = redact(text);
+        }
+        if let Some(text) = &mut prov.tool {
+            *text = redact(text);
+        }
+        for entry in &mut prov.entries {
+            entry.key = redact(&entry.key);
+            if let ProvValue::Text(text) = &mut entry.value {
+                *text = redact(text);
+            }
+        }
+    }
+}
+
+fn redact_inode(node: &mut Inode, redact: &impl Fn(&str) -> String) {
+    match node {
+        Inode::Str(text) => *text = redact(text),
+        Inode::Quantity { unit, .. } => {
+            if let super::UnitTag::Named(name) = unit {
+                *name = redact(name);
+            }
+        }
+        Inode::Table { fields } | Inode::SchemaTable { fields, .. } => {
+            for (name, _) in fields {
+                *name = redact(name);
+            }
+        }
+        Inode::Env { name, .. } => *name = redact(name),
+        Inode::Ident(text) => *text = redact(text),
+        Inode::Interpolate { parts } => {
+            for part in parts {
+                if let InterpPart::Literal(text) = part {
+                    *text = redact(text);
+                }
+            }
+        }
+        Inode::Constrained { constraint, .. } => match constraint {
+            Constraint::Enum(values) => {
+                for value in values {
+                    *value = redact(value);
+                }
+            }
+            Constraint::Pattern(text) | Constraint::Custom(text) => *text = redact(text),
+            Constraint::MinMax { .. } | Constraint::Odd => {}
+        },
+        Inode::Patch(op) => match op {
+            PatchOp::Set { path, .. } | PatchOp::Remove { path } => *path = redact(path),
+            PatchOp::Rename { from, to } => {
+                *from = redact(from);
+                *to = redact(to);
+            }
+        },
+        Inode::SchemaField(spec) => {
+            if let TypeSpec::Enum(values) = &mut spec.typ {
+                for value in values {
+                    *value = redact(value);
+                }
+            }
+            if let Some(text) = &mut spec.deprecated {
+                *text = redact(text);
+            }
+        }
+        Inode::Blob { media_type, .. } => *media_type = redact(media_type),
+        Inode::Null
+        | Inode::Bool(_)
+        | Inode::Int(_)
+        | Inode::Float(_)
+        | Inode::DurationMs(_)
+        | Inode::Array { .. }
+        | Inode::Secret(_)
+        | Inode::SecretRef { .. }
+        | Inode::Ref(_)
+        | Inode::Binary { .. }
+        | Inode::Unary { .. }
+        | Inode::SchemaArray { .. }
+        | Inode::Semantic { .. }
+        | Inode::ContentAddressed { .. } => {}
+    }
 }
 
 impl PartialEq for InfinityModule {

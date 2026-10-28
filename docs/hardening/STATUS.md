@@ -22,11 +22,11 @@ the bottom is generated from `docs/hardening/invariant-map.toml` by
 
 ### H0.1 Test inventory
 
-93 test functions across 8 integration-test binaries, plus the doctest suite:
+94 test functions across 8 integration-test binaries, plus the doctest suite:
 
 | Suite | Tests | What it proves |
 |---|---|---|
-| `tests/unit_tests.rs` | 27 | round-trip, every node kind, canonical identity, stream reassembly, redaction, validator classes, extension rules |
+| `tests/unit_tests.rs` | 28 | round-trip, every node kind, canonical identity, stream reassembly, redaction (including Debug metadata), validator classes, extension rules |
 | `tests/integration_tests.rs` | 8 | real modules through `active-core`, hash stability, evaluation/why/impact, fail-closed malformed input |
 | `tests/property_tests.rs` | 8 | arbitrary bytes, byte flips, canonical fixpoint, redaction fixpoint, generator sanity |
 | `tests/conformance_tests.rs` | 6 | 49 committed vectors, declared codes, index agreement, spec agreement |
@@ -58,10 +58,12 @@ checked-in numbers exist yet (H4.2, H4.5).
 
 ### H0.2 Fuzz, corpus and coverage
 
-- One fuzz target (`decode`, 90 lines) covers validate, decode, encode,
-  canonical proof, view traversal and both projections.
-- Conformance corpus: 49 `.ainf` images, 46,673 bytes. Fuzz corpus is **not**
-  committed; CI copies the vectors into `fuzz/corpus/decode/` at run time.
+- Eight targets cover validate/decode/encode/view, stream reassembly, canonical
+  round-trips, section layout, graph cycles, secret positions, unit
+  discriminants and projection agreement. Each asserts a semantic invariant.
+- Conformance corpus: 49 `.ainf` images, 46,673 bytes. Fuzz corpora are
+  **committed** under `fuzz/corpus/<target>/` (all targets, 94 seeds total) and
+  are documented in `docs/hardening/CORPUS.md`.
 - Coverage (all features, Windows x86_64): 73.44% regions, 71.66% lines,
   75.00% functions. Full table in `docs/hardening/CORPUS.md`.
 - Weakest surfaces: `view.rs` 12.37% regions, `unit.rs` 50.51% lines,
@@ -115,6 +117,7 @@ removed afterwards; the working tree is never modified.
 | Control | Invariant | Mutation | Check that must fail |
 |---|---|---|---|
 | `I-3-redaction` | I-3 | canonical redactor returns its input | `the_allowlisted_label_helper_never_returns_secret_material` |
+| `I-3-debug` | I-3 | canonical redactor returns its input | `debug_redacts_secret_copies_in_metadata` |
 | `I-8-depth` | I-8 | depth ceiling never fires | `threat_deep_and_wide_modules_hit_limits_not_the_stack` |
 | `I-9-canonical` | I-9 | canonical proof stops comparing the re-encode | `canonical_proof_is_unconditional` |
 | `I-10-trailing` | I-10 | both trailing-byte guards removed | `invalid_vectors_are_rejected_with_their_declared_code` |
@@ -135,16 +138,15 @@ Run: `python scripts/negative_controls.py --check`. CI job `negative-controls`.
 | `cargo audit` | pass (1 allowed warning) | local run 2026-10-27 |
 | `cargo deny check` | pass | local run 2026-10-27 |
 | API-surface gate | pass | CI run 40573778580 |
-| Fuzz smoke (20k runs) | pass | CI run 40573778580 |
-| Negative controls (4) | pass | local run 2026-10-27; CI job `negative-controls` |
+| Fuzz campaigns (8 targets, 20k runs) | pass | Docker run 2026-10-27; CI job `fuzz` runs 2k per target |
+| Negative controls (5) | pass | local run 2026-10-27; CI job `negative-controls` |
 | GitHub Actions on `9b44242` | success | run 40573778580 |
 
 ## Ordered next steps
 
-1. **H1** Split the single fuzz target into the eight required targets, commit
-   seed corpora, add a Docker Linux lane (cargo-fuzz does not launch on Windows
-   MSVC), and add the research-derived targets (32-bit lane, differential
-   canonicalization).
+1. **H1** The eight targets, committed corpora and the Docker lane are in
+   place. Remaining: a 32-bit build/test lane, a differential encoder, and a
+   longer nightly campaign.
 2. **H2** Turn the red-team suite into table-driven cases over the real entry
    points, one row per attack class. The scripted negative controls are in
    place; the remaining work is breadth and the research-derived cases.
@@ -164,7 +166,10 @@ Run: `python scripts/negative_controls.py --check`. CI job `negative-controls`.
   with an innocent name that returns secret bytes through a new type would not
   be caught by name alone. The tripwire and ADR-0010 record the limit.
 - **No 32-bit lane.** All current evidence is 64-bit.
-- **No committed fuzz corpus.** A crash seed found locally is not preserved.
+- **Corpus is a seed set, not a long campaign.** The committed corpora start
+  each target from real structure; sustained fuzzing is still a nightly duty.
+- **No independent encoder.** The canonical fixpoint is checked against the
+  same implementation, not a second one written from the spec (H1.23).
 - **`unsafe-libyaml` advisory.** Accepted, unreachable from the parsing path.
 - **Dependency resolution at publish time.** The library allows semver-compatible
   patch updates of `blake3` and `thiserror`, so a consumer may resolve a build
@@ -174,20 +179,21 @@ Run: `python scripts/negative_controls.py --check`. CI job `negative-controls`.
 
 ## Maturity sign-off
 
-Not signed. H0 is complete; H1–H9 remain. The sign-off block from Appendix C
+Not signed. H0 and the main H1 surface are complete; the 32-bit and differential
+extensions, H2–H9 remain. The sign-off block from Appendix C
 will be filled only when every row below is `done` or an ADR accepts the risk.
 
 <!-- BEGIN GENERATED: hardening matrix (scripts/hardening_status.py) -->
 
 **Repository:** `active-infinity` **version:** `2.0.7` **baseline commit:** `9b44242496568e2338c5e98b90e558d4b0999f4e` **baseline tag:** `hardening-baseline` **measured:** 2026-10-27
 
-Invariants: 6 covered, 1 partial, 0 gap, 5 not applicable. Checklist items: 14 done, 53 partial, 40 gap, 53 not applicable. Criticals with an implemented negative control: 4/4. Distinct automated checks resolved: 81.
+Invariants: 6 covered, 1 partial, 0 gap, 5 not applicable. Checklist items: 23 done, 53 partial, 31 gap, 53 not applicable. Criticals with an implemented negative control: 4/4. Distinct automated checks resolved: 90.
 
 | Invariant | Meaning | Status | Checks | Negative control |
 |---|---|---|---|---|
-| **I-1** | Structural secret taint | `covered` | 8 | - |
+| **I-1** | Structural secret taint | `covered` | 10 | - |
 | **I-2** | Anti-oracle equality | `covered` | 2 | - |
-| **I-3** | Secret non-leakage | `covered` | 16 | implemented |
+| **I-3** | Secret non-leakage | `covered` | 18 | implemented |
 | **I-4** | Capability unforgeability | `n/a` | 0 | - |
 | **I-5** | Attenuation only narrows | `n/a` | 0 | - |
 | **I-6** | Revocation at dispatch | `n/a` | 0 | - |
@@ -201,19 +207,19 @@ Invariants: 6 covered, 1 partial, 0 gap, 5 not applicable. Checklist items: 14 d
 | Item | Checklist item | Status | Evidence |
 |---|---|---|---|
 | **H0.1** | Inventory all existing tests as an invariant-to-test matrix | `done` | `script:scripts/hardening_status.py` |
-| **H0.2** | Inventory fuzz targets, corpus sizes and coverage snapshots | `done` | `doc:docs/hardening/CORPUS.md`, `fuzz:decode` |
+| **H0.2** | Inventory fuzz targets, corpus sizes and coverage snapshots | `done` | `doc:docs/hardening/CORPUS.md`, `fuzz:fuzz_decode_infinity` |
 | **H0.3** | Inventory ADRs, SECURITY, REVIEWS, security and performance specs | `done` | `doc:docs/hardening/STATUS.md` |
 | **H0.4** | Confirm license, MSRV, advisories, signing and publish status | `done` | `gate:audit`, `gate:deny` |
 | **H0.5** | Tag a hardening baseline | `done` | `gate:baseline-tag` |
 | **H0.6** | Create docs/hardening/STATUS.md | `done` | `script:scripts/hardening_status.py` |
-| **H1.1** | fuzz_decode_infinity: full validate and view path | `partial` | `fuzz:decode` |
-| **H1.2** | fuzz_stream_reassembly: hostile frame sequences | `gap` | - |
-| **H1.3** | fuzz_canonical_roundtrip: mutate/encode/decode hash stability | `gap` | - |
-| **H1.4** | fuzz_layout_sections: overlap, offsets, sizes, duplicate tags | `gap` | - |
-| **H1.5** | fuzz_graph_cycles: every cycle shape surfaces as a cycle error | `gap` | - |
-| **H1.6** | fuzz_secret_positions: no leak from any export path | `gap` | - |
-| **H1.7** | fuzz_unit_discriminants: unknown and boundary units | `gap` | - |
-| **H1.8** | fuzz_projection_agreement: JSON vs Protobuf redaction and hash | `gap` | - |
+| **H1.1** | fuzz_decode_infinity: full validate and view path | `partial` | `fuzz:fuzz_decode_infinity` |
+| **H1.2** | fuzz_stream_reassembly: hostile frame sequences | `done` | `fuzz:fuzz_stream_reassembly` |
+| **H1.3** | fuzz_canonical_roundtrip: mutate/encode/decode hash stability | `done` | `fuzz:fuzz_canonical_roundtrip` |
+| **H1.4** | fuzz_layout_sections: overlap, offsets, sizes, duplicate tags | `done` | `fuzz:fuzz_layout_sections` |
+| **H1.5** | fuzz_graph_cycles: every cycle shape surfaces as a cycle error | `done` | `fuzz:fuzz_graph_cycles` |
+| **H1.6** | fuzz_secret_positions: no leak from any export path | `done` | `fuzz:fuzz_secret_positions` |
+| **H1.7** | fuzz_unit_discriminants: unknown and boundary units | `done` | `fuzz:fuzz_unit_discriminants` |
+| **H1.8** | fuzz_projection_agreement: JSON vs Protobuf redaction and hash | `done` | `fuzz:fuzz_projection_agreement` |
 | **H1.9** | fuzz_arp1_frame | `n/a` | - |
 | **H1.10** | fuzz_capability_lifecycle | `n/a` | - |
 | **H1.11** | fuzz_promise_graph | `n/a` | - |
@@ -223,9 +229,9 @@ Invariants: 6 covered, 1 partial, 0 gap, 5 not applicable. Checklist items: 14 d
 | **H1.15** | fuzz_tool_process | `n/a` | - |
 | **H1.16** | fuzz_channel_cap_transfer | `n/a` | - |
 | **H1.17** | fuzz_transport_framing | `n/a` | - |
-| **H1.18** | Seed corpus = vectors, examples, almost-valid images; document classes | `gap` | - |
-| **H1.19** | Every fixed bug adds a minimized seed | `gap` | - |
-| **H1.20** | CI fuzz budget on PRs, longer on main/nightly, fail on regression | `partial` | `fuzz:decode` |
+| **H1.18** | Seed corpus = vectors, examples, almost-valid images; document classes | `done` | `doc:docs/hardening/CORPUS.md` |
+| **H1.19** | Every fixed bug adds a minimized seed | `done` | `doc:docs/hardening/CORPUS.md` |
+| **H1.20** | CI fuzz budget on PRs, longer on main/nightly, fail on regression | `partial` | `fuzz:fuzz_decode_infinity` |
 | **H1.21** | Optional public sanitized corpus | `gap` | - |
 | **H1.22** | 32-bit target build and test lane (research: CVE-2026-116734, CVE-2021-32629) | `gap` | - |
 | **H1.23** | Differential canonicalization oracle from an independent encoder | `gap` | - |
@@ -331,7 +337,7 @@ Invariants: 6 covered, 1 partial, 0 gap, 5 not applicable. Checklist items: 14 d
 | **R-4** | Every finding becomes a test, item, ADR or n/a note | `partial` | `doc:docs/hardening/RESEARCH-LOG.md` |
 | **D1.1** | At least 15 historical parser bugs with identifiers | `done` | `doc:docs/hardening/RESEARCH-LOG.md` |
 | **D1.2** | Map each historical bug to layout, validate, stream or wire decode | `done` | `doc:docs/hardening/RESEARCH-LOG.md` |
-| **D1.3** | Add a test or fuzz oracle per mapped class | `partial` | `fuzz:decode` |
+| **D1.3** | Add a test or fuzz oracle per mapped class | `partial` | `fuzz:fuzz_decode_infinity` |
 | **D1.4** | Differential parsing and whether a second checker is warranted | `gap` | - |
 | **D2.1** | At least 10 capability or RPC authz failure patterns | `n/a` | - |
 | **D2.2** | Map authz patterns to kernel, cap, channel, tool, transport | `n/a` | - |
@@ -342,7 +348,7 @@ Invariants: 6 covered, 1 partial, 0 gap, 5 not applicable. Checklist items: 14 d
 | **D3.3** | Anti-oracle equality in debug and optimized builds | `partial` | `test:tests/unit_tests.rs::secret_equality_is_always_false` |
 | **D3.4** | Stable error codes do not branch on secret-dependent data | `gap` | - |
 | **D4.1** | Compare fuzz targets to structure-aware state of the art | `partial` | `doc:docs/hardening/RESEARCH-LOG.md` |
-| **D4.2** | Semantic oracles, not only crash oracles | `partial` | `fuzz:decode` |
+| **D4.2** | Semantic oracles, not only crash oracles | `partial` | `fuzz:fuzz_decode_infinity` |
 | **D4.3** | Directed seeds for cold paths | `gap` | - |
 | **D4.4** | Corpus growth and minimize-and-commit policy | `partial` | `doc:docs/hardening/CORPUS.md` |
 | **D5.1** | Map classic DoS classes to budget dimensions | `partial` | `doc:docs/hardening/RESEARCH-LOG.md` |
@@ -363,16 +369,18 @@ Invariants: 6 covered, 1 partial, 0 gap, 5 not applicable. Checklist items: 14 d
 
 ### Check index
 
-<details><summary><strong>I-1</strong> (8 checks)</summary>
+<details><summary><strong>I-1</strong> (10 checks)</summary>
 
 - `test:tests/unit_tests.rs::every_node_kind_round_trips`
 - `test:tests/unit_tests.rs::secrets_never_leak_through_debug_or_exports`
+- `test:tests/unit_tests.rs::debug_redacts_secret_copies_in_metadata`
+- `script:scripts/negative_controls.py#I-3-debug`
 - `test:tests/protobuf_tests.rs::taint_follows_references_in_interpolations`
 - `test:tests/property_tests.rs::redaction_is_a_fixpoint_for_arbitrary_secrets_and_texts`
 - `test:tests/redteam_tests.rs::threat_secret_never_reaches_any_export_surface`
 - `test:tests/redteam_tests.rs::review_projection_redacts_secret_copies_in_keys_and_metadata`
 - `test:tests/redteam_tests.rs::review_text_projections_redact_secret_copies`
-- `fuzz:decode` — fuzz/fuzz_targets/decode.rs
+- `fuzz:fuzz_decode_infinity` — fuzz/fuzz_targets/fuzz_decode_infinity.rs
 
 </details>
 
@@ -383,7 +391,7 @@ Invariants: 6 covered, 1 partial, 0 gap, 5 not applicable. Checklist items: 14 d
 
 </details>
 
-<details><summary><strong>I-3</strong> (16 checks)</summary>
+<details><summary><strong>I-3</strong> (18 checks)</summary>
 
 - `test:tests/api_surface.rs::the_crate_exposes_no_plaintext_secret_accessor`
 - `test:tests/api_surface.rs::the_redaction_marker_is_the_only_public_secret_constant`
@@ -391,6 +399,8 @@ Invariants: 6 covered, 1 partial, 0 gap, 5 not applicable. Checklist items: 14 d
 - `test:tests/api_surface.rs::the_allowlisted_label_helper_never_returns_secret_material`
 - `gate:api-surface` — cargo +nightly rustdoc --locked --lib --all-features -- -Zunstable-options --output-format json && python scripts/api_surface.py target/doc/active_infinity.json
 - `test:tests/unit_tests.rs::secrets_never_leak_through_debug_or_exports`
+- `test:tests/unit_tests.rs::debug_redacts_secret_copies_in_metadata`
+- `script:scripts/negative_controls.py#I-3-debug`
 - `test:tests/unit_tests.rs::provenance_keys_do_not_carry_secret_copies`
 - `test:tests/unit_tests.rs::value_paths_do_not_carry_secret_copies`
 - `test:tests/protobuf_tests.rs::projection_never_contains_secret_material`
@@ -400,9 +410,9 @@ Invariants: 6 covered, 1 partial, 0 gap, 5 not applicable. Checklist items: 14 d
 - `test:tests/redteam_tests.rs::threat_secret_never_reaches_any_export_surface`
 - `test:tests/redteam_tests.rs::review_projection_redacts_secret_copies_in_keys_and_metadata`
 - `test:tests/redteam_tests.rs::review_text_projections_redact_secret_copies`
-- `fuzz:decode` — fuzz/fuzz_targets/decode.rs
+- `fuzz:fuzz_decode_infinity` — fuzz/fuzz_targets/fuzz_decode_infinity.rs
 
-Negative control (implemented): Make Canonicalizer::redacted_key return its input unchanged (identity) and run the allowlist and projection tests → expected: the_allowlisted_label_helper_never_returns_secret_material and projection_never_contains_secret_material must fail with the leaked literal named in the assertion
+Negative control (implemented): Make canonical::redact_text return its input unchanged (identity) and run the allowlist, projection and Debug tests → expected: the_allowlisted_label_helper_never_returns_secret_material and projection_never_contains_secret_material must fail with the leaked literal named in the assertion
 
 </details>
 
@@ -435,7 +445,7 @@ Negative control (implemented): Raise Limits::default().max_nodes by 1 and run t
 - `test:tests/property_tests.rs::hash_changes_when_a_value_changes`
 - `test:tests/conformance_tests.rs::valid_vectors_validate_and_reencode_identically`
 - `test:tests/redteam_tests.rs::threat_non_canonical_images_are_detected`
-- `fuzz:decode` — fuzz/fuzz_targets/decode.rs
+- `fuzz:fuzz_decode_infinity` — fuzz/fuzz_targets/fuzz_decode_infinity.rs
 
 Negative control (implemented): Replace the canonical node ordering with insertion order in encode and run the canonical identity tests and the non_canonical vector → expected: canonical_identity_is_independent_of_construction_order and valid_vectors_validate_and_reencode_identically must fail, and tests/vectors/valid/non_canonical.ainf must be reported as non-canonical
 
@@ -457,7 +467,7 @@ Negative control (implemented): Replace the canonical node ordering with inserti
 - `test:tests/redteam_tests.rs::threat_offset_and_overlap_attacks`
 - `test:tests/redteam_tests.rs::threat_string_heap_faults`
 - `test:tests/redteam_tests.rs::threat_empty_and_random_inputs_never_panic`
-- `fuzz:decode` — fuzz/fuzz_targets/decode.rs
+- `fuzz:fuzz_decode_infinity` — fuzz/fuzz_targets/fuzz_decode_infinity.rs
 
 Negative control (implemented): Delete one bounds check in validate (for example the section-span check) and run the conformance suite → expected: the matching invalid vector must be accepted or panic, so invalid_vectors_are_rejected_with_their_declared_code fails and names the vector and code
 
@@ -482,7 +492,7 @@ Negative control (implemented): Delete one bounds check in validate (for example
 | `deny` | `cargo deny check` |
 | `doc` | `RUSTDOCFLAGS=-D warnings cargo doc --locked --no-deps --all-features` |
 | `fmt` | `cargo fmt --all -- --check` |
-| `fuzz` | `cargo +nightly fuzz run decode -- -runs=20000` |
+| `fuzz` | `cargo +nightly fuzz run fuzz_decode_infinity -- -runs=20000` |
 | `msrv` | `cargo +1.85.0 check --locked --all-targets --all-features` |
 | `negative-controls` | `python scripts/negative_controls.py --check` |
 | `package` | `cargo package --locked` |

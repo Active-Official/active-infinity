@@ -419,6 +419,40 @@ fn secrets_never_leak_through_debug_or_exports() {
 }
 
 #[test]
+fn debug_redacts_secret_copies_in_metadata() {
+    // Debug is an export path. A binding name, table key, annotation and
+    // provenance text can each contain a copy of a secret literal; none may
+    // survive the formatter.
+    let mut module = InfinityModule::new();
+    let secret = module.push(Inode::Secret(SecretBytes::from("debug-canary")));
+    let number = module.push(Inode::Int(1));
+    let root = module.push(Inode::Table {
+        fields: vec![("key-debug-canary".into(), secret), ("n".into(), number)],
+    });
+    module.set_root(Some(root));
+    module.bind("binding debug-canary", secret);
+    module.annotate(secret, AnnotationKind::Intent("note debug-canary".into()));
+    module.set_provenance(Some(Provenance {
+        producer: Some("producer debug-canary".into()),
+        timestamp_ms: 1,
+        model: None,
+        tool: None,
+        parent: None,
+        entries: vec![ProvEntry {
+            key: "entry-debug-canary".into(),
+            value: ProvValue::Text("value debug-canary".into()),
+        }],
+    }));
+
+    let debug = format!("{module:?}");
+    assert!(
+        !debug.contains("debug-canary"),
+        "Debug leaked a metadata copy: {debug}"
+    );
+    assert!(debug.contains("***"), "the marker must appear: {debug}");
+}
+
+#[test]
 fn secret_equality_is_always_false() {
     let one = SecretBytes::from("same");
     let two = SecretBytes::from("same");

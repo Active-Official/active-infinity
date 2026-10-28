@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Prove that each security-critical check fails when its guard is removed.
 
-A test that passes on a broken build proves nothing. This runner creates a
-throwaway git worktree at HEAD, confirms every mapped check passes there, then
-applies one precise source mutation per control, runs the mapped check, and
-requires a real test failure (not a compile error). The worktree is removed
-afterwards, so the working tree is never touched.
+A test that passes on a broken build proves nothing. This runner copies the
+working tree (including uncommitted changes), confirms every mapped check
+passes there, then applies one precise source mutation per control, runs the
+mapped check, and requires a real test failure (not a compile error). The copy
+is removed afterwards, so the working tree is never touched.
 
 Usage:
     python scripts/negative_controls.py --check
@@ -33,6 +33,16 @@ CONTROLS = [
         "suite": "api_surface",
         "test": "the_allowlisted_label_helper_never_returns_secret_material",
         "why": "The canonical redactor returns its input, so the tainted binding label carries the literal.",
+    },
+    {
+        "id": "I-3-debug",
+        "invariant": "I-3",
+        "file": "src/canonical.rs",
+        "find": "pub(crate) fn redact_text(text: &str, secrets: &[String]) -> String {\n    let marker_tainted = secrets\n",
+        "replace": "pub(crate) fn redact_text(text: &str, secrets: &[String]) -> String {\n    return text.to_string();\n    #[allow(unreachable_code)]\n    let marker_tainted = secrets\n",
+        "suite": "unit_tests",
+        "test": "debug_redacts_secret_copies_in_metadata",
+        "why": "Debug redaction uses the same canonical redactor; identity leaks metadata copies.",
     },
     {
         "id": "I-8-depth",
@@ -142,12 +152,17 @@ def main() -> int:
 
     failures: list[str] = []
     try:
-        added = run(
-            ["git", "worktree", "add", "--detach", str(tree), "HEAD"], root, env
+        # Copy the working tree, including uncommitted changes. A control must
+        # test the code under review, not the last commit; a git worktree would
+        # silently run the old tree and turn a new test into a vacuous pass.
+        shutil.copytree(
+            root,
+            tree,
+            ignore=shutil.ignore_patterns(
+                ".git", "target", "fuzz", ".scratch", "__pycache__"
+            ),
+            symlinks=True,
         )
-        if added.returncode != 0:
-            print(added.stdout + added.stderr, file=sys.stderr)
-            return 2
 
         print("== baseline: the unmutated checks must pass ==")
         for control in selected:
@@ -238,9 +253,8 @@ def main() -> int:
         return 0
     finally:
         if args.keep:
-            print(f"worktree kept at {tree}")
+            print(f"tree kept at {tree}")
         else:
-            run(["git", "worktree", "remove", "--force", str(tree)], root, env)
             shutil.rmtree(base, ignore_errors=True)
 
 

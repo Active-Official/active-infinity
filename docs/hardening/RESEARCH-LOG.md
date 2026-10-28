@@ -144,3 +144,32 @@ the crate's own graph except transitive derive macros from `thiserror`. No
 published crate resolves `blake3 = "1.5"` and `thiserror = "1.0"` by semver, so a
 consumer may resolve a newer patch release; this is normal for libraries and is
 recorded as a residual risk in STATUS.md.
+
+## 2026-10-27 — D3.2 Debug metadata redaction bypass (found by fuzz_secret_positions)
+
+Source: H1.6 fuzz target; minimized input is the empty byte string.
+Attack class: a secret literal copied into a binding name, table key, annotation
+text, provenance producer/model/tool/key/text, or any other metadata string
+survived the derived Debug formatter. The canonical encoder redacts those
+copies, but an in-memory Debug, panic message or log line did not.
+Mapped invariant: I-3.
+Fix: hand-written Debug for InfinityModule clones the module and redacts every
+string field through the canonical redactor; extension payloads print as
+(tag, length) because a payload has no safe renderer.
+New test: tests/unit_tests.rs::debug_redacts_secret_copies_in_metadata.
+New control: I-3-debug (redact_text identity must fail the test).
+Status: fixed.
+
+## 2026-10-27 — fuzz harness lessons (not library defects)
+
+- Canonical encoding renumbers the arena in pre-order, so a mutation that
+  assumes a node index is meaningless. The cycle target now follows the root
+  and the Ref chain, and builds a ring with a directly reachable leaf so that
+  reachability passes and acyclicity is the check under test.
+- A short lowercase canary can collide with formatter field names
+  (sta inside 	imestamp_ms). Canaries now have a canary- prefix and hex
+  digits.
+- A call is queued before the provider runs: an adapter policy refusal is
+  observed when the promise settles, not at Agent::call.
+Status: all three were harness fixes; no library change.
+

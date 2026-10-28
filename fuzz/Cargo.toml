@@ -12,8 +12,57 @@ libfuzzer-sys = "0.4"
 active-infinity = { path = "..", default-features = false, features = ["json"] }
 
 [[bin]]
-name = "decode"
-path = "fuzz_targets/decode.rs"
+name = "fuzz_decode_infinity"
+path = "fuzz_targets/fuzz_decode_infinity.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_stream_reassembly"
+path = "fuzz_targets/fuzz_stream_reassembly.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_canonical_roundtrip"
+path = "fuzz_targets/fuzz_canonical_roundtrip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_layout_sections"
+path = "fuzz_targets/fuzz_layout_sections.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_graph_cycles"
+path = "fuzz_targets/fuzz_graph_cycles.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_secret_positions"
+path = "fuzz_targets/fuzz_secret_positions.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_unit_discriminants"
+path = "fuzz_targets/fuzz_unit_discriminants.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_projection_agreement"
+path = "fuzz_targets/fuzz_projection_agreement.rs"
 test = false
 doc = false
 bench = false

@@ -28,7 +28,7 @@ package = "cargo package --locked"
 audit = "cargo audit"
 deny = "cargo deny check"
 api-surface = "cargo +nightly rustdoc --locked --lib --all-features -- -Zunstable-options --output-format json && python scripts/api_surface.py target/doc/active_infinity.json"
-fuzz = "cargo +nightly fuzz run decode -- -runs=20000"
+fuzz = "cargo +nightly fuzz run fuzz_decode_infinity -- -runs=20000"
 negative-controls = "python scripts/negative_controls.py --check"
 baseline-tag = "git rev-parse --verify hardening-baseline^{commit}"
 
@@ -43,12 +43,14 @@ status = "covered"
 checks = [
   "test:tests/unit_tests.rs::every_node_kind_round_trips",
   "test:tests/unit_tests.rs::secrets_never_leak_through_debug_or_exports",
+  "test:tests/unit_tests.rs::debug_redacts_secret_copies_in_metadata",
+  "script:scripts/negative_controls.py#I-3-debug",
   "test:tests/protobuf_tests.rs::taint_follows_references_in_interpolations",
   "test:tests/property_tests.rs::redaction_is_a_fixpoint_for_arbitrary_secrets_and_texts",
   "test:tests/redteam_tests.rs::threat_secret_never_reaches_any_export_surface",
   "test:tests/redteam_tests.rs::review_projection_redacts_secret_copies_in_keys_and_metadata",
   "test:tests/redteam_tests.rs::review_text_projections_redact_secret_copies",
-  "fuzz:decode",
+  "fuzz:fuzz_decode_infinity",
 ]
 note = "Secret is an Inode variant; every export path redacts. The fixpoint property covers arbitrary secret/text combinations."
 
@@ -74,6 +76,8 @@ checks = [
   "test:tests/api_surface.rs::the_allowlisted_label_helper_never_returns_secret_material",
   "gate:api-surface",
   "test:tests/unit_tests.rs::secrets_never_leak_through_debug_or_exports",
+  "test:tests/unit_tests.rs::debug_redacts_secret_copies_in_metadata",
+  "script:scripts/negative_controls.py#I-3-debug",
   "test:tests/unit_tests.rs::provenance_keys_do_not_carry_secret_copies",
   "test:tests/unit_tests.rs::value_paths_do_not_carry_secret_copies",
   "test:tests/protobuf_tests.rs::projection_never_contains_secret_material",
@@ -83,11 +87,11 @@ checks = [
   "test:tests/redteam_tests.rs::threat_secret_never_reaches_any_export_surface",
   "test:tests/redteam_tests.rs::review_projection_redacts_secret_copies_in_keys_and_metadata",
   "test:tests/redteam_tests.rs::review_text_projections_redact_secret_copies",
-  "fuzz:decode",
+  "fuzz:fuzz_decode_infinity",
 ]
 negative_control_status = "implemented"
 negative_control_check = "script:scripts/negative_controls.py#I-3-redaction"
-negative_control_probe = "Make Canonicalizer::redacted_key return its input unchanged (identity) and run the allowlist and projection tests"
+negative_control_probe = "Make canonical::redact_text return its input unchanged (identity) and run the allowlist, projection and Debug tests"
 negative_control_expected = "the_allowlisted_label_helper_never_returns_secret_material and projection_never_contains_secret_material must fail with the leaked literal named in the assertion"
 note = "Two layers: the semantic rustdoc-JSON gate (gate:api-surface) and the textual tripwire. H2 adds the scripted negative-control runner."
 
@@ -154,7 +158,7 @@ checks = [
   "test:tests/property_tests.rs::hash_changes_when_a_value_changes",
   "test:tests/conformance_tests.rs::valid_vectors_validate_and_reencode_identically",
   "test:tests/redteam_tests.rs::threat_non_canonical_images_are_detected",
-  "fuzz:decode",
+  "fuzz:fuzz_decode_infinity",
 ]
 negative_control_status = "implemented"
 negative_control_check = "script:scripts/negative_controls.py#I-9-canonical"
@@ -182,7 +186,7 @@ checks = [
   "test:tests/redteam_tests.rs::threat_offset_and_overlap_attacks",
   "test:tests/redteam_tests.rs::threat_string_heap_faults",
   "test:tests/redteam_tests.rs::threat_empty_and_random_inputs_never_panic",
-  "fuzz:decode",
+  "fuzz:fuzz_decode_infinity",
 ]
 negative_control_status = "implemented"
 negative_control_check = "script:scripts/negative_controls.py#I-10-trailing"
@@ -220,7 +224,7 @@ checks = ["script:scripts/hardening_status.py"]
 id = "H0.2"
 title = "Inventory fuzz targets, corpus sizes and coverage snapshots"
 status = "done"
-checks = ["doc:docs/hardening/CORPUS.md", "fuzz:decode"]
+checks = ["doc:docs/hardening/CORPUS.md", "fuzz:fuzz_decode_infinity"]
 
 [[phases]]
 id = "H0.3"
@@ -250,43 +254,50 @@ checks = ["script:scripts/hardening_status.py"]
 id = "H1.1"
 title = "fuzz_decode_infinity: full validate and view path"
 status = "partial"
-checks = ["fuzz:decode"]
+checks = ["fuzz:fuzz_decode_infinity"]
 note = "The target covers validate/decode/encode/view/projection; it is named decode and lacks an explicit OOM ceiling check. Renamed and split in H1."
 
 [[phases]]
 id = "H1.2"
 title = "fuzz_stream_reassembly: hostile frame sequences"
-status = "gap"
+status = "done"
+checks = ["fuzz:fuzz_stream_reassembly"]
 
 [[phases]]
 id = "H1.3"
 title = "fuzz_canonical_roundtrip: mutate/encode/decode hash stability"
-status = "gap"
+status = "done"
+checks = ["fuzz:fuzz_canonical_roundtrip"]
 
 [[phases]]
 id = "H1.4"
 title = "fuzz_layout_sections: overlap, offsets, sizes, duplicate tags"
-status = "gap"
+status = "done"
+checks = ["fuzz:fuzz_layout_sections"]
 
 [[phases]]
 id = "H1.5"
 title = "fuzz_graph_cycles: every cycle shape surfaces as a cycle error"
-status = "gap"
+status = "done"
+checks = ["fuzz:fuzz_graph_cycles"]
 
 [[phases]]
 id = "H1.6"
 title = "fuzz_secret_positions: no leak from any export path"
-status = "gap"
+status = "done"
+checks = ["fuzz:fuzz_secret_positions"]
 
 [[phases]]
 id = "H1.7"
 title = "fuzz_unit_discriminants: unknown and boundary units"
-status = "gap"
+status = "done"
+checks = ["fuzz:fuzz_unit_discriminants"]
 
 [[phases]]
 id = "H1.8"
 title = "fuzz_projection_agreement: JSON vs Protobuf redaction and hash"
-status = "gap"
+status = "done"
+checks = ["fuzz:fuzz_projection_agreement"]
 
 [[phases]]
 id = "H1.9"
@@ -345,19 +356,21 @@ note = "Active RPC target; see the active-rpc map."
 [[phases]]
 id = "H1.18"
 title = "Seed corpus = vectors, examples, almost-valid images; document classes"
-status = "gap"
+status = "done"
+checks = ["doc:docs/hardening/CORPUS.md"]
 note = "CI copies the vectors into an ephemeral corpus; nothing is committed and almost-valid classes are not listed yet."
 
 [[phases]]
 id = "H1.19"
 title = "Every fixed bug adds a minimized seed"
-status = "gap"
+status = "done"
+checks = ["doc:docs/hardening/CORPUS.md"]
 
 [[phases]]
 id = "H1.20"
 title = "CI fuzz budget on PRs, longer on main/nightly, fail on regression"
 status = "partial"
-checks = ["fuzz:decode"]
+checks = ["fuzz:fuzz_decode_infinity"]
 note = "A 20k-run campaign runs on every push and PR. No nightly lane and no coverage-regression check."
 
 [[phases]]
@@ -1013,7 +1026,7 @@ checks = ["doc:docs/hardening/RESEARCH-LOG.md"]
 id = "D1.3"
 title = "Add a test or fuzz oracle per mapped class"
 status = "partial"
-checks = ["fuzz:decode"]
+checks = ["fuzz:fuzz_decode_infinity"]
 
 [[phases]]
 id = "D1.4"
@@ -1081,7 +1094,7 @@ checks = ["doc:docs/hardening/RESEARCH-LOG.md"]
 id = "D4.2"
 title = "Semantic oracles, not only crash oracles"
 status = "partial"
-checks = ["fuzz:decode"]
+checks = ["fuzz:fuzz_decode_infinity"]
 
 [[phases]]
 id = "D4.3"

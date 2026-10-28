@@ -88,9 +88,19 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y clang
       - name: Install cargo-fuzz
         run: cargo install cargo-fuzz --locked
-      - name: Seed the corpus with the conformance vectors
+      # The corpus is committed under fuzz/corpus/<target>/. A short campaign
+      # per target on every push and pull request; main and nightly run longer.
+      - name: Bounded fuzz campaign (every target)
         run: |
-          mkdir -p fuzz/corpus/decode
-          cp tests/vectors/valid/*.ainf tests/vectors/invalid/*.ainf fuzz/corpus/decode/
-      - name: Bounded fuzz campaign
-        run: cargo fuzz run decode -- -runs=20000
+          for target in \
+            fuzz_decode_infinity \
+            fuzz_stream_reassembly \
+            fuzz_canonical_roundtrip \
+            fuzz_layout_sections \
+            fuzz_graph_cycles \
+            fuzz_secret_positions \
+            fuzz_unit_discriminants \
+            fuzz_projection_agreement; do
+            echo "== $target =="
+            cargo fuzz run "$target" -- -runs=2000
+          done

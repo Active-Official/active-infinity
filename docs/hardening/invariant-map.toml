@@ -208,11 +208,7 @@ note = "The codec performs no I/O and reads no process state; there is no ambien
 [[invariants]]
 id = "I-12"
 title = "Domain operations under capability and budget"
-status = "partial"
-checks = [
-  "test:tests/integration_tests.rs::evaluation_still_works_after_the_binary_round_trip",
-  "test:tests/integration_tests.rs::agents_can_ask_why_and_impact",
-]
+status = "n/a"
 note = "The active-core bridge proves the domain operations run; capability and budget enforcement lives in active-rpc (its I-12 row owns the control)."
 
 # ---------------------------------------------------------------------------

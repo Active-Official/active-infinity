@@ -242,7 +242,7 @@ Sign-off: 2026-10-27, Grok (AI coding and security agent)
 
 **Repository:** `active-infinity` **version:** `2.0.7` **baseline commit:** `9b44242496568e2338c5e98b90e558d4b0999f4e` **baseline tag:** `hardening-baseline` **measured:** 2026-10-27
 
-Invariants: 6 covered, 1 partial, 0 gap, 5 not applicable. Checklist items: 103 done, 0 partial, 0 gap, 57 not applicable. Criticals with an implemented negative control: 4/4. Distinct automated checks resolved: 123.
+Invariants: 6 covered, 0 partial, 0 gap, 6 not applicable. Checklist items: 103 done, 0 partial, 0 gap, 57 not applicable. Criticals with an implemented negative control: 4/4. Distinct automated checks resolved: 121.
 
 | Invariant | Meaning | Status | Checks | Negative control |
 |---|---|---|---|---|
@@ -257,7 +257,7 @@ Invariants: 6 covered, 1 partial, 0 gap, 5 not applicable. Checklist items: 103 
 | **I-9** | Deterministic canonicalization | `covered` | 11 | implemented |
 | **I-10** | Fail-closed validation | `covered` | 15 | implemented |
 | **I-11** | No ambient authority | `n/a` | 0 | - |
-| **I-12** | Domain operations under capability and budget | `partial` | 2 | - |
+| **I-12** | Domain operations under capability and budget | `n/a` | 0 | - |
 
 | Item | Checklist item | Status | Evidence |
 |---|---|---|---|
@@ -527,13 +527,6 @@ Negative control (implemented): Replace the canonical node ordering with inserti
 - `fuzz:fuzz_decode_infinity` — fuzz/fuzz_targets/fuzz_decode_infinity.rs
 
 Negative control (implemented): Delete one bounds check in validate (for example the section-span check) and run the conformance suite → expected: the matching invalid vector must be accepted or panic, so invalid_vectors_are_rejected_with_their_declared_code fails and names the vector and code
-
-</details>
-
-<details><summary><strong>I-12</strong> (2 checks)</summary>
-
-- `test:tests/integration_tests.rs::evaluation_still_works_after_the_binary_round_trip`
-- `test:tests/integration_tests.rs::agents_can_ask_why_and_impact`
 
 </details>
 

@@ -39,6 +39,23 @@ The machine-readable invariant-to-test mapping is
 `docs/hardening/invariant-map.toml`. Every row resolves to a `#[test]` that the
 validator parses out of the named file.
 
+Invariants discovered in code comments and tests during the audit (now mapped):
+
+- `ir.rs::validate_structure`: every referenced node exists, table fields and
+  bindings are unique, the graph is acyclic, and depth stays within budget
+  (mapped to I-10 and I-8).
+- `ir.rs::SecretBytes`: no `Display`, `Debug`, `Serialize`, equality or ordering
+  path (mapped to I-2 and I-3).
+- `decode.rs`: a buffer is never trusted before validation; views borrow only
+  validated bytes (I-10).
+- `canonical.rs`: a tainted blob carries no payload, and free-text metadata must
+  not carry secret copies (I-1, I-3).
+- `interop.rs`: a cyclic hand-built module must not hang a query (I-10).
+
+Benchmarks: `benches/codec.rs` (111 lines, criterion) measures encode, decode,
+validate and view across module sizes. It is a benchmark, not a gate; no
+checked-in numbers exist yet (H4.2, H4.5).
+
 ### H0.2 Fuzz, corpus and coverage
 
 - One fuzz target (`decode`, 90 lines) covers validate, decode, encode,

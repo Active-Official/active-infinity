@@ -104,6 +104,23 @@ The matrix below is validated in CI by `scripts/hardening_status.py --check`.
 A missing test, a stale row, or a critical invariant without a negative-control
 plan fails the check.
 
+## Negative controls
+
+`scripts/negative_controls.py` creates a throwaway git worktree at HEAD, proves
+the mapped check passes unmutated, applies one precise source mutation, and
+requires the check to fail with that test in the failure list. A compile error
+or a different test failing is rejected as a false positive. The worktree is
+removed afterwards; the working tree is never modified.
+
+| Control | Invariant | Mutation | Check that must fail |
+|---|---|---|---|
+| `I-3-redaction` | I-3 | canonical redactor returns its input | `the_allowlisted_label_helper_never_returns_secret_material` |
+| `I-8-depth` | I-8 | depth ceiling never fires | `threat_deep_and_wide_modules_hit_limits_not_the_stack` |
+| `I-9-canonical` | I-9 | canonical proof stops comparing the re-encode | `canonical_proof_is_unconditional` |
+| `I-10-trailing` | I-10 | both trailing-byte guards removed | `invalid_vectors_are_rejected_with_their_declared_code` |
+
+Run: `python scripts/negative_controls.py --check`. CI job `negative-controls`.
+
 ## Gate results (baseline)
 
 | Gate | Result | Evidence |
@@ -119,6 +136,7 @@ plan fails the check.
 | `cargo deny check` | pass | local run 2026-10-27 |
 | API-surface gate | pass | CI run 40573778580 |
 | Fuzz smoke (20k runs) | pass | CI run 40573778580 |
+| Negative controls (4) | pass | local run 2026-10-27; CI job `negative-controls` |
 | GitHub Actions on `9b44242` | success | run 40573778580 |
 
 ## Ordered next steps
@@ -128,8 +146,8 @@ plan fails the check.
    MSVC), and add the research-derived targets (32-bit lane, differential
    canonicalization).
 2. **H2** Turn the red-team suite into table-driven cases over the real entry
-   points, one row per attack class, and add the scripted negative-control
-   runner that proves each security-critical check fails on a broken build.
+   points, one row per attack class. The scripted negative controls are in
+   place; the remaining work is breadth and the research-derived cases.
 3. **H4** Record the benchmark matrix and add hostile-input DoS measurements.
 4. **H5–H8** Ecosystem docs, supply-chain automation, observability rules,
    compatibility policy.
@@ -163,20 +181,20 @@ will be filled only when every row below is `done` or an ADR accepts the risk.
 
 **Repository:** `active-infinity` **version:** `2.0.7` **baseline commit:** `9b44242496568e2338c5e98b90e558d4b0999f4e` **baseline tag:** `hardening-baseline` **measured:** 2026-10-27
 
-Invariants: 6 covered, 1 partial, 0 gap, 5 not applicable. Checklist items: 13 done, 53 partial, 40 gap, 53 not applicable. Criticals with an implemented negative control: 0/4. Distinct automated checks resolved: 76.
+Invariants: 6 covered, 1 partial, 0 gap, 5 not applicable. Checklist items: 14 done, 53 partial, 40 gap, 53 not applicable. Criticals with an implemented negative control: 4/4. Distinct automated checks resolved: 81.
 
 | Invariant | Meaning | Status | Checks | Negative control |
 |---|---|---|---|---|
 | **I-1** | Structural secret taint | `covered` | 8 | - |
 | **I-2** | Anti-oracle equality | `covered` | 2 | - |
-| **I-3** | Secret non-leakage | `covered` | 16 | documented |
+| **I-3** | Secret non-leakage | `covered` | 16 | implemented |
 | **I-4** | Capability unforgeability | `n/a` | 0 | - |
 | **I-5** | Attenuation only narrows | `n/a` | 0 | - |
 | **I-6** | Revocation at dispatch | `n/a` | 0 | - |
 | **I-7** | Drop notification | `n/a` | 0 | - |
-| **I-8** | Hard budgets | `covered` | 10 | gap |
-| **I-9** | Deterministic canonicalization | `covered` | 11 | documented |
-| **I-10** | Fail-closed validation | `covered` | 15 | documented |
+| **I-8** | Hard budgets | `covered` | 10 | implemented |
+| **I-9** | Deterministic canonicalization | `covered` | 11 | implemented |
+| **I-10** | Fail-closed validation | `covered` | 15 | implemented |
 | **I-11** | No ambient authority | `n/a` | 0 | - |
 | **I-12** | Domain operations under capability and budget | `partial` | 2 | - |
 
@@ -212,6 +230,7 @@ Invariants: 6 covered, 1 partial, 0 gap, 5 not applicable. Checklist items: 13 d
 | **H1.22** | 32-bit target build and test lane (research: CVE-2026-116734, CVE-2021-32629) | `gap` | - |
 | **H1.23** | Differential canonicalization oracle from an independent encoder | `gap` | - |
 | **H1.24** | fuzz_tool_policy | `n/a` | - |
+| **H2.0** | Scripted negative controls prove each security-critical check fails on a broken build | `done` | `gate:negative-controls` |
 | **H2.1** | Integer overflow and underflow in length and offset arithmetic | `partial` | `test:tests/redteam_tests.rs::threat_count_bombs_in_every_section`, `test:tests/redteam_tests.rs::threat_offset_and_overlap_attacks` |
 | **H2.2** | Overlapping and out-of-bounds sections | `partial` | `test:tests/redteam_tests.rs::threat_offset_and_overlap_attacks` |
 | **H2.3** | Deep nesting aimed at stack overflow | `partial` | `test:tests/redteam_tests.rs::threat_deep_and_wide_modules_hit_limits_not_the_stack` |
@@ -383,7 +402,7 @@ Invariants: 6 covered, 1 partial, 0 gap, 5 not applicable. Checklist items: 13 d
 - `test:tests/redteam_tests.rs::review_text_projections_redact_secret_copies`
 - `fuzz:decode` — fuzz/fuzz_targets/decode.rs
 
-Negative control (documented): Make Canonicalizer::redacted_key return its input unchanged (identity) and run the allowlist and projection tests → expected: the_allowlisted_label_helper_never_returns_secret_material and projection_never_contains_secret_material must fail with the leaked literal named in the assertion
+Negative control (implemented): Make Canonicalizer::redacted_key return its input unchanged (identity) and run the allowlist and projection tests → expected: the_allowlisted_label_helper_never_returns_secret_material and projection_never_contains_secret_material must fail with the leaked literal named in the assertion
 
 </details>
 
@@ -400,7 +419,7 @@ Negative control (documented): Make Canonicalizer::redacted_key return its input
 - `vector:tests/vectors/invalid/count_bomb.ainf`
 - `vector:tests/vectors/invalid/too_deep.ainf`
 
-Negative control (gap): Raise Limits::default().max_nodes by 1 and run threat_deep_and_wide_modules_hit_limits_not_the_stack; then set max_total_bytes to usize::MAX and run review_limits_cover_total_bytes_and_string_heap → expected: each test must fail because the budget no longer fires before the allocation or traversal
+Negative control (implemented): Raise Limits::default().max_nodes by 1 and run threat_deep_and_wide_modules_hit_limits_not_the_stack; then set max_total_bytes to usize::MAX and run review_limits_cover_total_bytes_and_string_heap → expected: each test must fail because the budget no longer fires before the allocation or traversal
 
 </details>
 
@@ -418,7 +437,7 @@ Negative control (gap): Raise Limits::default().max_nodes by 1 and run threat_de
 - `test:tests/redteam_tests.rs::threat_non_canonical_images_are_detected`
 - `fuzz:decode` — fuzz/fuzz_targets/decode.rs
 
-Negative control (documented): Replace the canonical node ordering with insertion order in encode and run the canonical identity tests and the non_canonical vector → expected: canonical_identity_is_independent_of_construction_order and valid_vectors_validate_and_reencode_identically must fail, and tests/vectors/valid/non_canonical.ainf must be reported as non-canonical
+Negative control (implemented): Replace the canonical node ordering with insertion order in encode and run the canonical identity tests and the non_canonical vector → expected: canonical_identity_is_independent_of_construction_order and valid_vectors_validate_and_reencode_identically must fail, and tests/vectors/valid/non_canonical.ainf must be reported as non-canonical
 
 </details>
 
@@ -440,7 +459,7 @@ Negative control (documented): Replace the canonical node ordering with insertio
 - `test:tests/redteam_tests.rs::threat_empty_and_random_inputs_never_panic`
 - `fuzz:decode` — fuzz/fuzz_targets/decode.rs
 
-Negative control (documented): Delete one bounds check in validate (for example the section-span check) and run the conformance suite → expected: the matching invalid vector must be accepted or panic, so invalid_vectors_are_rejected_with_their_declared_code fails and names the vector and code
+Negative control (implemented): Delete one bounds check in validate (for example the section-span check) and run the conformance suite → expected: the matching invalid vector must be accepted or panic, so invalid_vectors_are_rejected_with_their_declared_code fails and names the vector and code
 
 </details>
 
@@ -465,6 +484,7 @@ Negative control (documented): Delete one bounds check in validate (for example 
 | `fmt` | `cargo fmt --all -- --check` |
 | `fuzz` | `cargo +nightly fuzz run decode -- -runs=20000` |
 | `msrv` | `cargo +1.85.0 check --locked --all-targets --all-features` |
+| `negative-controls` | `python scripts/negative_controls.py --check` |
 | `package` | `cargo package --locked` |
 | `test` | `cargo test --locked --all-features` |
 | `test-nodefault` | `cargo test --locked --no-default-features` |

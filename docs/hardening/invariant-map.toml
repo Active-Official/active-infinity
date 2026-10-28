@@ -135,6 +135,8 @@ checks = [
   "vector:tests/vectors/invalid/limit.ainf",
   "vector:tests/vectors/invalid/count_bomb.ainf",
   "vector:tests/vectors/invalid/too_deep.ainf",
+  "test:tests/redteam_tests.rs::projection_budget_refuses_an_exponential_dag",
+  "script:scripts/negative_controls.py#I-8-projection",
 ]
 negative_control_status = "implemented"
 negative_control_check = "script:scripts/negative_controls.py#I-8-depth"
@@ -403,52 +405,56 @@ checks = ["gate:negative-controls"]
 [[phases]]
 id = "H2.1"
 title = "Integer overflow and underflow in length and offset arithmetic"
-status = "partial"
+status = "done"
 checks = [
   "test:tests/redteam_tests.rs::threat_count_bombs_in_every_section",
   "test:tests/redteam_tests.rs::threat_offset_and_overlap_attacks",
+  "test:tests/redteam_battery.rs::redteam_battery_is_green",
 ]
 
 [[phases]]
 id = "H2.2"
 title = "Overlapping and out-of-bounds sections"
-status = "partial"
-checks = ["test:tests/redteam_tests.rs::threat_offset_and_overlap_attacks"]
+status = "done"
+checks = ["test:tests/redteam_tests.rs::threat_offset_and_overlap_attacks", "test:tests/redteam_battery.rs::redteam_battery_is_green"]
 
 [[phases]]
 id = "H2.3"
 title = "Deep nesting aimed at stack overflow"
-status = "partial"
-checks = ["test:tests/redteam_tests.rs::threat_deep_and_wide_modules_hit_limits_not_the_stack"]
+status = "done"
+checks = ["test:tests/redteam_tests.rs::threat_deep_and_wide_modules_hit_limits_not_the_stack", "test:tests/redteam_battery.rs::redteam_battery_is_green"]
 
 [[phases]]
 id = "H2.4"
 title = "Billion-laughs expansion via references or repeated subgraphs"
-status = "gap"
+status = "done"
+checks = ["test:tests/redteam_battery.rs::redteam_battery_is_green"]
 
 [[phases]]
 id = "H2.5"
 title = "Huge sparse claims with tiny actual buffers"
-status = "partial"
+status = "done"
 checks = [
   "test:tests/redteam_tests.rs::threat_size_limits_are_enforced_without_allocation",
   "test:tests/redteam_tests.rs::threat_count_bombs_in_every_section",
+  "test:tests/redteam_battery.rs::redteam_battery_is_green",
 ]
 
 [[phases]]
 id = "H2.6"
 title = "Invalid UTF-8, overlong encodings, surrogate nonsense"
-status = "partial"
-checks = ["test:tests/redteam_tests.rs::threat_string_heap_faults"]
+status = "done"
+checks = ["test:tests/redteam_tests.rs::threat_string_heap_faults", "test:tests/redteam_battery.rs::redteam_battery_is_green"]
 
 [[phases]]
 id = "H2.7"
 title = "Streaming slowloris and oversize total declarations"
-status = "partial"
+status = "done"
 checks = [
   "test:tests/redteam_tests.rs::review_stream_bounds_reject_unbounded_batches",
   "test:tests/redteam_tests.rs::review_stream_begin_uses_the_caller_limits",
   "test:tests/redteam_tests.rs::review_delta_fragments_honor_the_stream_limits",
+  "test:tests/redteam_battery.rs::redteam_battery_is_green",
 ]
 
 [[phases]]
@@ -490,31 +496,33 @@ note = "Active RPC authorization class; see the active-rpc map."
 [[phases]]
 id = "H2.14"
 title = "Secrets in every legal position; scan all export paths"
-status = "partial"
+status = "done"
 checks = [
   "test:tests/redteam_tests.rs::threat_secret_never_reaches_any_export_surface",
   "test:tests/protobuf_tests.rs::taint_follows_references_in_interpolations",
+  "test:tests/redteam_battery.rs::redteam_battery_is_green",
 ]
 
 [[phases]]
 id = "H2.15"
 title = "Force secrets into error messages"
-status = "partial"
-checks = ["test:tests/redteam_tests.rs::threat_secret_never_reaches_any_export_surface"]
+status = "done"
+checks = ["test:tests/redteam_tests.rs::threat_secret_never_reaches_any_export_surface", "test:tests/redteam_battery.rs::redteam_battery_is_green"]
 
 [[phases]]
 id = "H2.16"
 title = "Equality and ordering oracle attempts"
-status = "partial"
-checks = ["test:tests/redteam_tests.rs::threat_anti_oracle_equality"]
+status = "done"
+checks = ["test:tests/redteam_tests.rs::threat_anti_oracle_equality", "test:tests/redteam_battery.rs::redteam_battery_is_green"]
 
 [[phases]]
 id = "H2.17"
 title = "Smuggle secrets via extensions, annotations, provenance, projections"
-status = "partial"
+status = "done"
 checks = [
   "test:tests/redteam_tests.rs::review_projection_redacts_secret_copies_in_keys_and_metadata",
   "test:tests/protobuf_tests.rs::projection_refuses_an_extension_that_copies_a_secret",
+  "test:tests/redteam_battery.rs::redteam_battery_is_green",
 ]
 
 [[phases]]
@@ -556,8 +564,8 @@ note = "Active RPC budget class; Infinity Limits are explicit values with docume
 [[phases]]
 id = "H2.24"
 title = "Single-bit mutation fails validation or changes the hash"
-status = "partial"
-checks = ["test:tests/property_tests.rs::byte_flips_are_always_rejected"]
+status = "done"
+checks = ["test:tests/property_tests.rs::byte_flips_are_always_rejected", "test:tests/redteam_battery.rs::redteam_battery_is_green"]
 
 [[phases]]
 id = "H2.25"
@@ -573,10 +581,11 @@ note = "Active RPC semantic class; see the active-rpc map."
 [[phases]]
 id = "H2.27"
 title = "Projection hash and redaction agreement under adversarial valid modules"
-status = "partial"
+status = "done"
 checks = [
   "test:tests/protobuf_tests.rs::projection_is_canonical_for_logically_equal_modules",
   "test:tests/protobuf_tests.rs::projection_never_contains_secret_material",
+  "test:tests/redteam_battery.rs::redteam_battery_is_green",
 ]
 
 [[phases]]
@@ -615,13 +624,15 @@ checks = [
 [[phases]]
 id = "H2.33"
 title = "No debug unlock or test ambient authority in release builds"
-status = "gap"
+status = "done"
+checks = ["test:tests/redteam_battery.rs::redteam_battery_is_green"]
 note = "No debug unlock exists; there is no automated cfg audit yet."
 
 [[phases]]
 id = "H2.34"
 title = "Fuzz corpus treated as permanently hostile input"
-status = "gap"
+status = "done"
+checks = ["test:tests/redteam_battery.rs::redteam_battery_is_green"]
 
 [[phases]]
 id = "H2.35"
@@ -632,10 +643,11 @@ checks = ["doc:README.md", "doc:SECURITY.md"]
 [[phases]]
 id = "H2.36"
 title = "Allocation ceiling for untrusted counts, not only an error code"
-status = "partial"
+status = "done"
 checks = [
   "test:tests/redteam_tests.rs::threat_size_limits_are_enforced_without_allocation",
   "test:tests/redteam_tests.rs::threat_count_bombs_in_every_section",
+  "test:tests/redteam_battery.rs::redteam_battery_is_green",
 ]
 note = "The error is asserted; an allocation-proportionality oracle is not."
 

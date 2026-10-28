@@ -22,7 +22,7 @@ the bottom is generated from `docs/hardening/invariant-map.toml` by
 
 ### H0.1 Test inventory
 
-94 test functions across 8 integration-test binaries, plus the doctest suite:
+100 test functions across 9 integration-test binaries, 8 library unit tests and a doctest:
 
 | Suite | Tests | What it proves |
 |---|---|---|
@@ -30,7 +30,8 @@ the bottom is generated from `docs/hardening/invariant-map.toml` by
 | `tests/integration_tests.rs` | 8 | real modules through `active-core`, hash stability, evaluation/why/impact, fail-closed malformed input |
 | `tests/property_tests.rs` | 8 | arbitrary bytes, byte flips, canonical fixpoint, redaction fixpoint, generator sanity |
 | `tests/conformance_tests.rs` | 6 | 49 committed vectors, declared codes, index agreement, spec agreement |
-| `tests/redteam_tests.rs` | 22 | count bombs, overlap, forged graphs, string faults, deep/wide limits, secret export, anti-oracle, stream splicing, plus nine review regressions |
+| `tests/redteam_tests.rs` | 23 | count bombs, overlap, forged graphs, string faults, deep/wide limits, secret export, anti-oracle, stream splicing, projection expansion, plus nine review regressions |
+| `tests/redteam_battery.rs` | 1 (15 cases) | table-driven H2 cases, each naming its checklist id and invariant |
 | `tests/protobuf_tests.rs` | 13 | independent reader, determinism, secret refusal, extension refusal, scalar extremes, taint through interpolation |
 | `tests/api_surface.rs` | 4 | no public plaintext secret accessor; allowlist is argued and behaviorally tested |
 | `tests/doc_gate.rs` | 5 | spec sections, constants, error-code catalog, README guarantees, ADR index |
@@ -139,7 +140,7 @@ Run: `python scripts/negative_controls.py --check`. CI job `negative-controls`.
 | `cargo deny check` | pass | local run 2026-10-27 |
 | API-surface gate | pass | CI run 40573778580 |
 | Fuzz campaigns (8 targets, 20k runs) | pass | Docker run 2026-10-27; CI job `fuzz` runs 2k per target |
-| Negative controls (5) | pass | local run 2026-10-27; CI job `negative-controls` |
+| Negative controls (6) | pass | local run 2026-10-27; CI job `negative-controls` |
 | GitHub Actions on `9b44242` | success | run 40573778580 |
 
 ## Ordered next steps
@@ -147,9 +148,9 @@ Run: `python scripts/negative_controls.py --check`. CI job `negative-controls`.
 1. **H1** The eight targets, committed corpora and the Docker lane are in
    place. Remaining: a 32-bit build/test lane, a differential encoder, and a
    longer nightly campaign.
-2. **H2** Turn the red-team suite into table-driven cases over the real entry
-   points, one row per attack class. The scripted negative controls are in
-   place; the remaining work is breadth and the research-derived cases.
+2. **H2** The table-driven battery is in place (15 cases). Remaining: the
+   research-derived allocation and 32-bit cases, and a longer linear-time
+   study.
 3. **H4** Record the benchmark matrix and add hostile-input DoS measurements.
 4. **H5–H8** Ecosystem docs, supply-chain automation, observability rules,
    compatibility policy.
@@ -187,7 +188,7 @@ will be filled only when every row below is `done` or an ADR accepts the risk.
 
 **Repository:** `active-infinity` **version:** `2.0.7` **baseline commit:** `9b44242496568e2338c5e98b90e558d4b0999f4e` **baseline tag:** `hardening-baseline` **measured:** 2026-10-27
 
-Invariants: 6 covered, 1 partial, 0 gap, 5 not applicable. Checklist items: 23 done, 53 partial, 31 gap, 53 not applicable. Criticals with an implemented negative control: 4/4. Distinct automated checks resolved: 90.
+Invariants: 6 covered, 1 partial, 0 gap, 5 not applicable. Checklist items: 39 done, 40 partial, 28 gap, 53 not applicable. Criticals with an implemented negative control: 4/4. Distinct automated checks resolved: 93.
 
 | Invariant | Meaning | Status | Checks | Negative control |
 |---|---|---|---|---|
@@ -198,7 +199,7 @@ Invariants: 6 covered, 1 partial, 0 gap, 5 not applicable. Checklist items: 23 d
 | **I-5** | Attenuation only narrows | `n/a` | 0 | - |
 | **I-6** | Revocation at dispatch | `n/a` | 0 | - |
 | **I-7** | Drop notification | `n/a` | 0 | - |
-| **I-8** | Hard budgets | `covered` | 10 | implemented |
+| **I-8** | Hard budgets | `covered` | 12 | implemented |
 | **I-9** | Deterministic canonicalization | `covered` | 11 | implemented |
 | **I-10** | Fail-closed validation | `covered` | 15 | implemented |
 | **I-11** | No ambient authority | `n/a` | 0 | - |
@@ -237,42 +238,42 @@ Invariants: 6 covered, 1 partial, 0 gap, 5 not applicable. Checklist items: 23 d
 | **H1.23** | Differential canonicalization oracle from an independent encoder | `gap` | - |
 | **H1.24** | fuzz_tool_policy | `n/a` | - |
 | **H2.0** | Scripted negative controls prove each security-critical check fails on a broken build | `done` | `gate:negative-controls` |
-| **H2.1** | Integer overflow and underflow in length and offset arithmetic | `partial` | `test:tests/redteam_tests.rs::threat_count_bombs_in_every_section`, `test:tests/redteam_tests.rs::threat_offset_and_overlap_attacks` |
-| **H2.2** | Overlapping and out-of-bounds sections | `partial` | `test:tests/redteam_tests.rs::threat_offset_and_overlap_attacks` |
-| **H2.3** | Deep nesting aimed at stack overflow | `partial` | `test:tests/redteam_tests.rs::threat_deep_and_wide_modules_hit_limits_not_the_stack` |
-| **H2.4** | Billion-laughs expansion via references or repeated subgraphs | `gap` | - |
-| **H2.5** | Huge sparse claims with tiny actual buffers | `partial` | `test:tests/redteam_tests.rs::threat_size_limits_are_enforced_without_allocation`, `test:tests/redteam_tests.rs::threat_count_bombs_in_every_section` |
-| **H2.6** | Invalid UTF-8, overlong encodings, surrogate nonsense | `partial` | `test:tests/redteam_tests.rs::threat_string_heap_faults` |
-| **H2.7** | Streaming slowloris and oversize total declarations | `partial` | `test:tests/redteam_tests.rs::review_stream_bounds_reject_unbounded_batches`, `test:tests/redteam_tests.rs::review_stream_begin_uses_the_caller_limits`, `test:tests/redteam_tests.rs::review_delta_fragments_honor_the_stream_limits` |
+| **H2.1** | Integer overflow and underflow in length and offset arithmetic | `done` | `test:tests/redteam_tests.rs::threat_count_bombs_in_every_section`, `test:tests/redteam_tests.rs::threat_offset_and_overlap_attacks`, `test:tests/redteam_battery.rs::redteam_battery_is_green` |
+| **H2.2** | Overlapping and out-of-bounds sections | `done` | `test:tests/redteam_tests.rs::threat_offset_and_overlap_attacks`, `test:tests/redteam_battery.rs::redteam_battery_is_green` |
+| **H2.3** | Deep nesting aimed at stack overflow | `done` | `test:tests/redteam_tests.rs::threat_deep_and_wide_modules_hit_limits_not_the_stack`, `test:tests/redteam_battery.rs::redteam_battery_is_green` |
+| **H2.4** | Billion-laughs expansion via references or repeated subgraphs | `done` | `test:tests/redteam_battery.rs::redteam_battery_is_green` |
+| **H2.5** | Huge sparse claims with tiny actual buffers | `done` | `test:tests/redteam_tests.rs::threat_size_limits_are_enforced_without_allocation`, `test:tests/redteam_tests.rs::threat_count_bombs_in_every_section`, `test:tests/redteam_battery.rs::redteam_battery_is_green` |
+| **H2.6** | Invalid UTF-8, overlong encodings, surrogate nonsense | `done` | `test:tests/redteam_tests.rs::threat_string_heap_faults`, `test:tests/redteam_battery.rs::redteam_battery_is_green` |
+| **H2.7** | Streaming slowloris and oversize total declarations | `done` | `test:tests/redteam_tests.rs::review_stream_bounds_reject_unbounded_batches`, `test:tests/redteam_tests.rs::review_stream_begin_uses_the_caller_limits`, `test:tests/redteam_tests.rs::review_delta_fragments_honor_the_stream_limits`, `test:tests/redteam_battery.rs::redteam_battery_is_green` |
 | **H2.8** | Forge capability IDs | `n/a` | - |
 | **H2.9** | Attenuate then widen | `n/a` | - |
 | **H2.10** | Use after revoke or drop; borrowed channel lifetime | `n/a` | - |
 | **H2.11** | Confused deputy provider | `n/a` | - |
 | **H2.12** | Tool adapter confused deputy | `n/a` | - |
 | **H2.13** | Revocation racing with dispatch | `n/a` | - |
-| **H2.14** | Secrets in every legal position; scan all export paths | `partial` | `test:tests/redteam_tests.rs::threat_secret_never_reaches_any_export_surface`, `test:tests/protobuf_tests.rs::taint_follows_references_in_interpolations` |
-| **H2.15** | Force secrets into error messages | `partial` | `test:tests/redteam_tests.rs::threat_secret_never_reaches_any_export_surface` |
-| **H2.16** | Equality and ordering oracle attempts | `partial` | `test:tests/redteam_tests.rs::threat_anti_oracle_equality` |
-| **H2.17** | Smuggle secrets via extensions, annotations, provenance, projections | `partial` | `test:tests/redteam_tests.rs::review_projection_redacts_secret_copies_in_keys_and_metadata`, `test:tests/protobuf_tests.rs::projection_refuses_an_extension_that_copies_a_secret` |
+| **H2.14** | Secrets in every legal position; scan all export paths | `done` | `test:tests/redteam_tests.rs::threat_secret_never_reaches_any_export_surface`, `test:tests/protobuf_tests.rs::taint_follows_references_in_interpolations`, `test:tests/redteam_battery.rs::redteam_battery_is_green` |
+| **H2.15** | Force secrets into error messages | `done` | `test:tests/redteam_tests.rs::threat_secret_never_reaches_any_export_surface`, `test:tests/redteam_battery.rs::redteam_battery_is_green` |
+| **H2.16** | Equality and ordering oracle attempts | `done` | `test:tests/redteam_tests.rs::threat_anti_oracle_equality`, `test:tests/redteam_battery.rs::redteam_battery_is_green` |
+| **H2.17** | Smuggle secrets via extensions, annotations, provenance, projections | `done` | `test:tests/redteam_tests.rs::review_projection_redacts_secret_copies_in_keys_and_metadata`, `test:tests/protobuf_tests.rs::projection_refuses_an_extension_that_copies_a_secret`, `test:tests/redteam_battery.rs::redteam_battery_is_green` |
 | **H2.18** | Logging and metrics carry no secrets or raw capability bits | `n/a` | - |
 | **H2.19** | Queue storms under a low call budget | `n/a` | - |
 | **H2.20** | Nested value byte bombs under a low byte budget | `partial` | `test:tests/redteam_tests.rs::threat_deep_and_wide_modules_hit_limits_not_the_stack` |
 | **H2.21** | Many lanes, channels and promises to finite limits | `n/a` | - |
 | **H2.22** | Enormous tool payloads and tools that never return | `n/a` | - |
 | **H2.23** | Zero or near-zero ceilings refused where policy needs finite limits | `n/a` | - |
-| **H2.24** | Single-bit mutation fails validation or changes the hash | `partial` | `test:tests/property_tests.rs::byte_flips_are_always_rejected` |
+| **H2.24** | Single-bit mutation fails validation or changes the hash | `done` | `test:tests/property_tests.rs::byte_flips_are_always_rejected`, `test:tests/redteam_battery.rs::redteam_battery_is_green` |
 | **H2.25** | Large-corpus hash collision search | `gap` | - |
 | **H2.26** | Pipelined vs sequential preserves the authorization side-effect set | `n/a` | - |
-| **H2.27** | Projection hash and redaction agreement under adversarial valid modules | `partial` | `test:tests/protobuf_tests.rs::projection_is_canonical_for_logically_equal_modules`, `test:tests/protobuf_tests.rs::projection_never_contains_secret_material` |
+| **H2.27** | Projection hash and redaction agreement under adversarial valid modules | `done` | `test:tests/protobuf_tests.rs::projection_is_canonical_for_logically_equal_modules`, `test:tests/protobuf_tests.rs::projection_never_contains_secret_material`, `test:tests/redteam_battery.rs::redteam_battery_is_green` |
 | **H2.28** | Overlapping write capabilities detected or prevented | `n/a` | - |
 | **H2.29** | Audit-only capability cannot write | `n/a` | - |
 | **H2.30** | Stale capability after ownership change refused | `n/a` | - |
 | **H2.31** | Another worker's secret-bearing subgraph denied or fully redacted | `n/a` | - |
 | **H2.32** | Public errors do not enable secret or capability oracles | `partial` | `test:tests/unit_tests.rs::error_codes_are_stable_and_documented`, `test:tests/redteam_tests.rs::threat_anti_oracle_equality` |
-| **H2.33** | No debug unlock or test ambient authority in release builds | `gap` | - |
-| **H2.34** | Fuzz corpus treated as permanently hostile input | `gap` | - |
+| **H2.33** | No debug unlock or test ambient authority in release builds | `done` | `test:tests/redteam_battery.rs::redteam_battery_is_green` |
+| **H2.34** | Fuzz corpus treated as permanently hostile input | `done` | `test:tests/redteam_battery.rs::redteam_battery_is_green` |
 | **H2.35** | Docs and examples do not teach insecure patterns without warnings | `partial` | `doc:README.md`, `doc:SECURITY.md` |
-| **H2.36** | Allocation ceiling for untrusted counts, not only an error code | `partial` | `test:tests/redteam_tests.rs::threat_size_limits_are_enforced_without_allocation`, `test:tests/redteam_tests.rs::threat_count_bombs_in_every_section` |
+| **H2.36** | Allocation ceiling for untrusted counts, not only an error code | `done` | `test:tests/redteam_tests.rs::threat_size_limits_are_enforced_without_allocation`, `test:tests/redteam_tests.rs::threat_count_bombs_in_every_section`, `test:tests/redteam_battery.rs::redteam_battery_is_green` |
 | **H2.37** | Span arithmetic checked on 32-bit and 64-bit widths | `gap` | - |
 | **H2.38** | String and blob lengths that end exactly at EOF | `gap` | - |
 | **H2.39** | Extension skip and duplicate-tag arithmetic | `partial` | `test:tests/unit_tests.rs::duplicate_extension_tags_are_refused`, `test:tests/unit_tests.rs::extension_blocks_round_trip_and_are_order_independent` |
@@ -416,7 +417,7 @@ Negative control (implemented): Make canonical::redact_text return its input unc
 
 </details>
 
-<details><summary><strong>I-8</strong> (10 checks)</summary>
+<details><summary><strong>I-8</strong> (12 checks)</summary>
 
 - `test:tests/redteam_tests.rs::threat_count_bombs_in_every_section`
 - `test:tests/redteam_tests.rs::threat_deep_and_wide_modules_hit_limits_not_the_stack`
@@ -428,6 +429,8 @@ Negative control (implemented): Make canonical::redact_text return its input unc
 - `vector:tests/vectors/invalid/limit.ainf`
 - `vector:tests/vectors/invalid/count_bomb.ainf`
 - `vector:tests/vectors/invalid/too_deep.ainf`
+- `test:tests/redteam_tests.rs::projection_budget_refuses_an_exponential_dag`
+- `script:scripts/negative_controls.py#I-8-projection`
 
 Negative control (implemented): Raise Limits::default().max_nodes by 1 and run threat_deep_and_wide_modules_hit_limits_not_the_stack; then set max_total_bytes to usize::MAX and run review_limits_cover_total_bytes_and_string_heap → expected: each test must fail because the budget no longer fires before the allocation or traversal
 

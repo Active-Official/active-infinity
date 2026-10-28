@@ -741,3 +741,40 @@ fn review_text_projections_redact_secret_copies() {
         "intents leaked: {intents:?}"
     );
 }
+
+/// A shared DAG projects to a tree. A diamond chain doubles the materialised
+/// nodes at every level, so a 3 KB module can demand gigabytes of JSON. The
+/// projection node budget must fail closed instead.
+#[test]
+fn projection_budget_refuses_an_exponential_dag() {
+    let mut module = InfinityModule::new();
+    let mut current = module.push(Inode::Int(1));
+    for _ in 0..20 {
+        let left = module.push(Inode::Ref(current));
+        let right = module.push(Inode::Ref(current));
+        current = module.push(Inode::Table {
+            fields: vec![("l".into(), left), ("r".into(), right)],
+        });
+    }
+    module.set_root(Some(current));
+
+    let error = active_infinity::to_protobuf(&module).expect_err("exponential DAG");
+    assert_eq!(error.code(), "infinity/encode");
+    assert!(
+        error.to_string().contains("node budget"),
+        "the diagnostic must name the budget: {error}"
+    );
+
+    #[cfg(feature = "json")]
+    {
+        let error = to_redacted_json(&module).expect_err("exponential DAG");
+        assert_eq!(error.code(), "infinity/encode");
+        assert!(error.to_string().contains("node budget"));
+    }
+
+    // A normal module still projects.
+    let image = encode(&fixture()).unwrap();
+    let normal = decode(&image).unwrap();
+    assert!(active_infinity::to_protobuf(&normal).is_ok());
+}
+

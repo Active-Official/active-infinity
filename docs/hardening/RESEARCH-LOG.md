@@ -173,3 +173,17 @@ Status: fixed.
   observed when the promise settles, not at Agent::call.
 Status: all three were harness fixes; no library change.
 
+## 2026-10-27 — H2.4 billion-laughs expansion in projections
+
+Source: the H2.4 battery case and a direct measurement.
+Attack class: a shared DAG projects to a tree. A 3.4 KB module with a
+20-level diamond chain produced 12.5 MB of JSON in 1.7 s; each extra level
+doubles the materialised nodes, so depth 30 asks for gigabytes. The module
+validates and is tiny, which is exactly the amplification shape.
+Fix: `interop::PROJECTION_NODE_BUDGET` (100,000 projected nodes). Both
+`to_redacted_json` and `to_protobuf` fail closed with `infinity/encode`
+("projection node budget exceeded") once the tree would exceed it.
+Tests: `projection_budget_refuses_an_exponential_dag`; battery case H2.4.
+Control: I-8-projection (disabling the budget must fail the test).
+Status: fixed.
+

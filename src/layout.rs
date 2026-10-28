@@ -352,7 +352,10 @@ impl Header {
 
     /// Serialize this header into the first [`HEADER_SIZE`] bytes of `out`.
     pub fn write(&self, out: &mut [u8]) {
-        debug_assert!(out.len() >= HEADER_SIZE);
+        // Enforced in release too: a short output buffer is a caller bug, not a
+        // debug-only precondition. The audit in `tests/redteam_battery.rs`
+        // refuses any debug-only security branch.
+        assert!(out.len() >= HEADER_SIZE, "header buffer is too short");
         out[0..4].copy_from_slice(&MAGIC);
         out[4..6].copy_from_slice(&self.major.to_le_bytes());
         out[6..8].copy_from_slice(&self.minor.to_le_bytes());

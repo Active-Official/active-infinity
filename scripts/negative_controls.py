@@ -45,6 +45,16 @@ CONTROLS = [
         "why": "Debug redaction uses the same canonical redactor; identity leaks metadata copies.",
     },
     {
+        "id": "I-8-projection",
+        "invariant": "I-8",
+        "file": "src/interop.rs",
+        "find": "    if *budget > PROJECTION_NODE_BUDGET {\n",
+        "replace": "    if false {\n",
+        "suite": "redteam_tests",
+        "test": "projection_budget_refuses_an_exponential_dag",
+        "why": "The projection node budget is disabled, so a shared DAG expands without bound.",
+    },
+    {
         "id": "I-8-depth",
         "invariant": "I-8",
         "file": "src/validate.rs",

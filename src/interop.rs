@@ -667,6 +667,13 @@ pub use bridge::{evaluate, from_active_core, to_active_core};
 /// hand-built module cannot exhaust the stack.
 const PROJECTION_DEPTH: usize = 1024;
 
+/// Maximum number of nodes a single projection may materialise.
+///
+/// A shared DAG expands to a tree when projected: a 3 KB module with a
+/// diamond chain can demand gigabytes of JSON. This bound turns that
+/// expansion into a fail-closed error instead of memory exhaustion.
+pub const PROJECTION_NODE_BUDGET: usize = 100_000;
+
 /// A redacted projection of a module's value tree.
 ///
 /// Both the JSON and the Protobuf projection render this tree. Building it once
@@ -719,7 +726,8 @@ pub enum Projected {
 pub(crate) fn project_root(module: &InfinityModule) -> Result<Projected> {
     module.validate_structure(u32::MAX as u64, 4096)?;
     let secrets = secret_texts(module);
-    build_projected(module, module.root(), &secrets, 0)
+    let mut budget = 0usize;
+    build_projected(module, module.root(), &secrets, 0, &mut budget)
 }
 
 /// The module's secret literals, for a caller that projects many nodes.
@@ -733,7 +741,8 @@ pub(crate) fn project_node_with(
     id: NodeId,
     secrets: &[String],
 ) -> Result<Projected> {
-    build_projected(module, Some(id), secrets, 0)
+    let mut budget = 0usize;
+    build_projected(module, Some(id), secrets, 0, &mut budget)
 }
 
 /// A value-position string: the whole text becomes the marker as soon as it
@@ -793,9 +802,14 @@ fn build_projected(
     id: Option<NodeId>,
     secrets: &[String],
     depth: usize,
+    budget: &mut usize,
 ) -> Result<Projected> {
     if depth > PROJECTION_DEPTH {
         return Err(Error::Encode("projection nesting exceeds the limit"));
+    }
+    *budget += 1;
+    if *budget > PROJECTION_NODE_BUDGET {
+        return Err(Error::Encode("projection node budget exceeded"));
     }
     let value = match id.and_then(|id| module.get(id)) {
         None => Projected::Null,
@@ -808,13 +822,13 @@ fn build_projected(
             Inode::Ident(text) => Projected::Text(redacted_key(text, secrets)),
             Inode::DurationMs(ms) => Projected::DurationMs(*ms),
             Inode::Quantity { value, unit } => Projected::Quantity(
-                Box::new(build_projected(module, Some(*value), secrets, depth + 1)?),
+                Box::new(build_projected(module, Some(*value), secrets, depth + 1, budget)?),
                 redacted_key(unit.name(), secrets),
             ),
             Inode::Array { elements } => Projected::Array(
                 elements
                     .iter()
-                    .map(|id| build_projected(module, Some(*id), secrets, depth + 1))
+                    .map(|id| build_projected(module, Some(*id), secrets, depth + 1, budget))
                     .collect::<Result<Vec<_>>>()?,
             ),
             Inode::Table { fields } => {
@@ -822,7 +836,7 @@ fn build_projected(
                 for (name, id) in fields {
                     projected.push((
                         redacted_key(name, secrets),
-                        build_projected(module, Some(*id), secrets, depth + 1)?,
+                        build_projected(module, Some(*id), secrets, depth + 1, budget)?,
                     ));
                 }
                 Projected::Record(projected)
@@ -830,7 +844,7 @@ fn build_projected(
             Inode::Secret(_) | Inode::SecretRef { .. } => {
                 Projected::Text(SECRET_MARKER.to_string())
             }
-            Inode::Ref(id) => build_projected(module, Some(*id), secrets, depth + 1)?,
+            Inode::Ref(id) => build_projected(module, Some(*id), secrets, depth + 1, budget)?,
             Inode::Env { name, .. } => Projected::Env(redacted_key(name, secrets)),
             Inode::Interpolate { parts } => {
                 let mut text = String::new();
@@ -861,7 +875,7 @@ fn build_projected(
                 Projected::Expr(crate::view::node_kind_name(node.kind_code()))
             }
             Inode::Semantic { inner, .. } => {
-                build_projected(module, Some(*inner), secrets, depth + 1)?
+                build_projected(module, Some(*inner), secrets, depth + 1, budget)?
             }
             Inode::Blob {
                 hash,

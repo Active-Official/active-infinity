@@ -53,6 +53,15 @@ jobs:
       - name: No public secret accessor
         run: python3 scripts/api_surface.py target/doc/active_infinity.json
 
+  hardening-status:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # A stale row, a missing test, or a critical invariant without a
+      # negative-control plan fails the build.
+      - name: Validate the hardening matrix
+        run: python3 scripts/hardening_status.py --check
+
   package:
     runs-on: ubuntu-latest
     steps:

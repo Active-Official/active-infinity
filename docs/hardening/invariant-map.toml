@@ -1,0 +1,1172 @@
+# Hardening map for active-infinity.
+#
+# Every row in docs/hardening/STATUS.md is generated from this file by
+# scripts/hardening_status.py. A check that does not resolve is a hard error:
+# the matrix cannot claim coverage that the tree does not have.
+#
+# Status vocabulary (invariants): covered | partial | gap | n/a
+# Status vocabulary (checklist items): done | partial | gap | n/a
+
+schema = 1
+
+[repo]
+name = "active-infinity"
+version = "2.0.7"
+commit = "9b44242496568e2338c5e98b90e558d4b0999f4e"
+baseline_tag = "hardening-baseline"
+measured_at = "2026-10-27"
+
+[gates]
+fmt = "cargo fmt --all -- --check"
+clippy = "cargo clippy --locked --all-targets --all-features -- -D warnings"
+clippy-nodefault = "cargo clippy --locked --all-targets --no-default-features -- -D warnings"
+test = "cargo test --locked --all-features"
+test-nodefault = "cargo test --locked --no-default-features"
+doc = "RUSTDOCFLAGS=-D warnings cargo doc --locked --no-deps --all-features"
+msrv = "cargo +1.85.0 check --locked --all-targets --all-features"
+package = "cargo package --locked"
+audit = "cargo audit"
+deny = "cargo deny check"
+api-surface = "cargo +nightly rustdoc --locked --lib --all-features -- -Zunstable-options --output-format json && python scripts/api_surface.py target/doc/active_infinity.json"
+fuzz = "cargo +nightly fuzz run decode -- -runs=20000"
+baseline-tag = "git rev-parse --verify hardening-baseline^{commit}"
+
+# ---------------------------------------------------------------------------
+# Invariants (ACTIVE-HARDENING-GUIDE-AND-CHECKLIST.md section 1)
+# ---------------------------------------------------------------------------
+
+[[invariants]]
+id = "I-1"
+title = "Structural secret taint"
+status = "covered"
+checks = [
+  "test:tests/unit_tests.rs::every_node_kind_round_trips",
+  "test:tests/unit_tests.rs::secrets_never_leak_through_debug_or_exports",
+  "test:tests/protobuf_tests.rs::taint_follows_references_in_interpolations",
+  "test:tests/property_tests.rs::redaction_is_a_fixpoint_for_arbitrary_secrets_and_texts",
+  "test:tests/redteam_tests.rs::threat_secret_never_reaches_any_export_surface",
+  "test:tests/redteam_tests.rs::review_projection_redacts_secret_copies_in_keys_and_metadata",
+  "test:tests/redteam_tests.rs::review_text_projections_redact_secret_copies",
+  "fuzz:decode",
+]
+note = "Secret is an Inode variant; every export path redacts. The fixpoint property covers arbitrary secret/text combinations."
+
+[[invariants]]
+id = "I-2"
+title = "Anti-oracle equality"
+status = "covered"
+checks = [
+  "test:tests/unit_tests.rs::secret_equality_is_always_false",
+  "test:tests/redteam_tests.rs::threat_anti_oracle_equality",
+]
+note = "SecretBytes has no PartialEq; the red-team test drives every comparison surface the type exposes."
+
+[[invariants]]
+id = "I-3"
+title = "Secret non-leakage"
+status = "covered"
+critical = true
+checks = [
+  "test:tests/api_surface.rs::the_crate_exposes_no_plaintext_secret_accessor",
+  "test:tests/api_surface.rs::the_redaction_marker_is_the_only_public_secret_constant",
+  "test:tests/api_surface.rs::the_allowlist_entries_still_exist_and_are_argued",
+  "test:tests/api_surface.rs::the_allowlisted_label_helper_never_returns_secret_material",
+  "gate:api-surface",
+  "test:tests/unit_tests.rs::secrets_never_leak_through_debug_or_exports",
+  "test:tests/unit_tests.rs::provenance_keys_do_not_carry_secret_copies",
+  "test:tests/unit_tests.rs::value_paths_do_not_carry_secret_copies",
+  "test:tests/protobuf_tests.rs::projection_never_contains_secret_material",
+  "test:tests/protobuf_tests.rs::short_secrets_are_redacted_in_metadata_text",
+  "test:tests/protobuf_tests.rs::projection_refuses_an_extension_that_copies_a_secret",
+  "test:tests/protobuf_tests.rs::projection_refuses_an_extension_that_copies_a_non_utf8_secret",
+  "test:tests/redteam_tests.rs::threat_secret_never_reaches_any_export_surface",
+  "test:tests/redteam_tests.rs::review_projection_redacts_secret_copies_in_keys_and_metadata",
+  "test:tests/redteam_tests.rs::review_text_projections_redact_secret_copies",
+  "fuzz:decode",
+]
+negative_control_status = "documented"
+negative_control_probe = "Make Canonicalizer::redacted_key return its input unchanged (identity) and run the allowlist and projection tests"
+negative_control_expected = "the_allowlisted_label_helper_never_returns_secret_material and projection_never_contains_secret_material must fail with the leaked literal named in the assertion"
+note = "Two layers: the semantic rustdoc-JSON gate (gate:api-surface) and the textual tripwire. H2 adds the scripted negative-control runner."
+
+[[invariants]]
+id = "I-4"
+title = "Capability unforgeability"
+status = "n/a"
+note = "The codec has no capability system. Enforced in active-rpc; see its map."
+
+[[invariants]]
+id = "I-5"
+title = "Attenuation only narrows"
+status = "n/a"
+note = "The codec has no capability system. Enforced in active-rpc; see its map."
+
+[[invariants]]
+id = "I-6"
+title = "Revocation at dispatch"
+status = "n/a"
+note = "The codec has no dispatch layer. Enforced in active-rpc; see its map."
+
+[[invariants]]
+id = "I-7"
+title = "Drop notification"
+status = "n/a"
+note = "The codec owns no handles. Enforced in active-rpc; see its map."
+
+[[invariants]]
+id = "I-8"
+title = "Hard budgets"
+status = "covered"
+critical = true
+checks = [
+  "test:tests/redteam_tests.rs::threat_count_bombs_in_every_section",
+  "test:tests/redteam_tests.rs::threat_deep_and_wide_modules_hit_limits_not_the_stack",
+  "test:tests/redteam_tests.rs::threat_size_limits_are_enforced_without_allocation",
+  "test:tests/redteam_tests.rs::review_stream_bounds_reject_unbounded_batches",
+  "test:tests/redteam_tests.rs::review_limits_cover_total_bytes_and_string_heap",
+  "test:tests/redteam_tests.rs::review_stream_begin_uses_the_caller_limits",
+  "test:tests/redteam_tests.rs::review_delta_fragments_honor_the_stream_limits",
+  "vector:tests/vectors/invalid/limit.ainf",
+  "vector:tests/vectors/invalid/count_bomb.ainf",
+  "vector:tests/vectors/invalid/too_deep.ainf",
+]
+negative_control_status = "gap"
+negative_control_probe = "Raise Limits::default().max_nodes by 1 and run threat_deep_and_wide_modules_hit_limits_not_the_stack; then set max_total_bytes to usize::MAX and run review_limits_cover_total_bytes_and_string_heap"
+negative_control_expected = "each test must fail because the budget no longer fires before the allocation or traversal"
+note = "H2 turns this into a table-driven budget matrix and scripts the two probes."
+
+[[invariants]]
+id = "I-9"
+title = "Deterministic canonicalization"
+status = "covered"
+critical = true
+checks = [
+  "test:tests/unit_tests.rs::canonical_identity_is_independent_of_construction_order",
+  "test:tests/unit_tests.rs::content_hash_changes_with_any_value_change",
+  "test:tests/unit_tests.rs::canonical_proof_is_unconditional",
+  "test:tests/unit_tests.rs::streaming_delta_produces_the_whole_module_encoding",
+  "test:tests/unit_tests.rs::extension_blocks_round_trip_and_are_order_independent",
+  "test:tests/integration_tests.rs::content_hash_is_stable_across_independent_encodes",
+  "test:tests/property_tests.rs::round_trip_and_canonical_stability",
+  "test:tests/property_tests.rs::hash_changes_when_a_value_changes",
+  "test:tests/conformance_tests.rs::valid_vectors_validate_and_reencode_identically",
+  "test:tests/redteam_tests.rs::threat_non_canonical_images_are_detected",
+  "fuzz:decode",
+]
+negative_control_status = "documented"
+negative_control_probe = "Replace the canonical node ordering with insertion order in encode and run the canonical identity tests and the non_canonical vector"
+negative_control_expected = "canonical_identity_is_independent_of_construction_order and valid_vectors_validate_and_reencode_identically must fail, and tests/vectors/valid/non_canonical.ainf must be reported as non-canonical"
+note = "The header canonical flag is a claim; validate_canonical proves it (layout section 6.1)."
+
+[[invariants]]
+id = "I-10"
+title = "Fail-closed validation"
+status = "covered"
+critical = true
+checks = [
+  "test:tests/conformance_tests.rs::invalid_vectors_are_rejected_with_their_declared_code",
+  "test:tests/conformance_tests.rs::stream_vectors_are_rejected_with_their_declared_code",
+  "test:tests/conformance_tests.rs::every_declared_failure_code_has_a_vector",
+  "test:tests/unit_tests.rs::validator_rejects_every_declared_failure_class",
+  "test:tests/unit_tests.rs::validator_rejects_unknown_unit_discriminant",
+  "test:tests/unit_tests.rs::validator_rejects_cycles_and_unreachable_nodes",
+  "test:tests/unit_tests.rs::error_codes_are_stable_and_documented",
+  "test:tests/integration_tests.rs::malformed_input_never_panics_and_always_fails_closed",
+  "test:tests/property_tests.rs::arbitrary_bytes_are_rejected_without_panicking",
+  "test:tests/property_tests.rs::byte_flips_are_always_rejected",
+  "test:tests/redteam_tests.rs::threat_count_bombs_in_every_section",
+  "test:tests/redteam_tests.rs::threat_offset_and_overlap_attacks",
+  "test:tests/redteam_tests.rs::threat_string_heap_faults",
+  "test:tests/redteam_tests.rs::threat_empty_and_random_inputs_never_panic",
+  "fuzz:decode",
+]
+negative_control_status = "documented"
+negative_control_probe = "Delete one bounds check in validate (for example the section-span check) and run the conformance suite"
+negative_control_expected = "the matching invalid vector must be accepted or panic, so invalid_vectors_are_rejected_with_their_declared_code fails and names the vector and code"
+note = "35 invalid images plus 9 invalid streams, each tied to a declared code; the property test covers arbitrary bytes."
+
+[[invariants]]
+id = "I-11"
+title = "No ambient authority"
+status = "n/a"
+note = "The codec performs no I/O and reads no process state; there is no ambient authority to grant. Enforced in active-rpc."
+
+[[invariants]]
+id = "I-12"
+title = "Domain operations under capability and budget"
+status = "partial"
+checks = [
+  "test:tests/integration_tests.rs::evaluation_still_works_after_the_binary_round_trip",
+  "test:tests/integration_tests.rs::agents_can_ask_why_and_impact",
+]
+note = "The active-core bridge proves the domain operations run; capability and budget enforcement lives in active-rpc (its I-12 row owns the control)."
+
+# ---------------------------------------------------------------------------
+# Checklist items (H0-H9). RPC-only items are n/a here with a pointer.
+# ---------------------------------------------------------------------------
+
+[[phases]]
+id = "H0.1"
+title = "Inventory all existing tests as an invariant-to-test matrix"
+status = "done"
+checks = ["script:scripts/hardening_status.py"]
+
+[[phases]]
+id = "H0.2"
+title = "Inventory fuzz targets, corpus sizes and coverage snapshots"
+status = "done"
+checks = ["doc:docs/hardening/CORPUS.md", "fuzz:decode"]
+
+[[phases]]
+id = "H0.3"
+title = "Inventory ADRs, SECURITY, REVIEWS, security and performance specs"
+status = "done"
+checks = ["doc:docs/hardening/STATUS.md"]
+
+[[phases]]
+id = "H0.4"
+title = "Confirm license, MSRV, advisories, signing and publish status"
+status = "done"
+checks = ["gate:audit", "gate:deny"]
+
+[[phases]]
+id = "H0.5"
+title = "Tag a hardening baseline"
+status = "done"
+checks = ["gate:baseline-tag"]
+
+[[phases]]
+id = "H0.6"
+title = "Create docs/hardening/STATUS.md"
+status = "done"
+checks = ["script:scripts/hardening_status.py"]
+
+[[phases]]
+id = "H1.1"
+title = "fuzz_decode_infinity: full validate and view path"
+status = "partial"
+checks = ["fuzz:decode"]
+note = "The target covers validate/decode/encode/view/projection; it is named decode and lacks an explicit OOM ceiling check. Renamed and split in H1."
+
+[[phases]]
+id = "H1.2"
+title = "fuzz_stream_reassembly: hostile frame sequences"
+status = "gap"
+
+[[phases]]
+id = "H1.3"
+title = "fuzz_canonical_roundtrip: mutate/encode/decode hash stability"
+status = "gap"
+
+[[phases]]
+id = "H1.4"
+title = "fuzz_layout_sections: overlap, offsets, sizes, duplicate tags"
+status = "gap"
+
+[[phases]]
+id = "H1.5"
+title = "fuzz_graph_cycles: every cycle shape surfaces as a cycle error"
+status = "gap"
+
+[[phases]]
+id = "H1.6"
+title = "fuzz_secret_positions: no leak from any export path"
+status = "gap"
+
+[[phases]]
+id = "H1.7"
+title = "fuzz_unit_discriminants: unknown and boundary units"
+status = "gap"
+
+[[phases]]
+id = "H1.8"
+title = "fuzz_projection_agreement: JSON vs Protobuf redaction and hash"
+status = "gap"
+
+[[phases]]
+id = "H1.9"
+title = "fuzz_arp1_frame"
+status = "n/a"
+note = "Active RPC target; see the active-rpc map."
+
+[[phases]]
+id = "H1.10"
+title = "fuzz_capability_lifecycle"
+status = "n/a"
+note = "Active RPC target; see the active-rpc map."
+
+[[phases]]
+id = "H1.11"
+title = "fuzz_promise_graph"
+status = "n/a"
+note = "Active RPC target; see the active-rpc map."
+
+[[phases]]
+id = "H1.12"
+title = "fuzz_budget_matrix"
+status = "n/a"
+note = "Active RPC target; see the active-rpc map."
+
+[[phases]]
+id = "H1.13"
+title = "fuzz_tool_mcp"
+status = "n/a"
+note = "Active RPC target; see the active-rpc map."
+
+[[phases]]
+id = "H1.14"
+title = "fuzz_tool_http"
+status = "n/a"
+note = "Active RPC target; see the active-rpc map."
+
+[[phases]]
+id = "H1.15"
+title = "fuzz_tool_process"
+status = "n/a"
+note = "Active RPC target; see the active-rpc map."
+
+[[phases]]
+id = "H1.16"
+title = "fuzz_channel_cap_transfer"
+status = "n/a"
+note = "Active RPC target; see the active-rpc map."
+
+[[phases]]
+id = "H1.17"
+title = "fuzz_transport_framing"
+status = "n/a"
+note = "Active RPC target; see the active-rpc map."
+
+[[phases]]
+id = "H1.18"
+title = "Seed corpus = vectors, examples, almost-valid images; document classes"
+status = "gap"
+note = "CI copies the vectors into an ephemeral corpus; nothing is committed and almost-valid classes are not listed yet."
+
+[[phases]]
+id = "H1.19"
+title = "Every fixed bug adds a minimized seed"
+status = "gap"
+
+[[phases]]
+id = "H1.20"
+title = "CI fuzz budget on PRs, longer on main/nightly, fail on regression"
+status = "partial"
+checks = ["fuzz:decode"]
+note = "A 20k-run campaign runs on every push and PR. No nightly lane and no coverage-regression check."
+
+[[phases]]
+id = "H1.21"
+title = "Optional public sanitized corpus"
+status = "gap"
+
+[[phases]]
+id = "H1.22"
+title = "32-bit target build and test lane (research: CVE-2026-116734, CVE-2021-32629)"
+status = "gap"
+
+[[phases]]
+id = "H1.23"
+title = "Differential canonicalization oracle from an independent encoder"
+status = "gap"
+
+[[phases]]
+id = "H1.24"
+title = "fuzz_tool_policy"
+status = "n/a"
+note = "Active RPC tool target; see the active-rpc map."
+
+[[phases]]
+id = "H2.1"
+title = "Integer overflow and underflow in length and offset arithmetic"
+status = "partial"
+checks = [
+  "test:tests/redteam_tests.rs::threat_count_bombs_in_every_section",
+  "test:tests/redteam_tests.rs::threat_offset_and_overlap_attacks",
+]
+
+[[phases]]
+id = "H2.2"
+title = "Overlapping and out-of-bounds sections"
+status = "partial"
+checks = ["test:tests/redteam_tests.rs::threat_offset_and_overlap_attacks"]
+
+[[phases]]
+id = "H2.3"
+title = "Deep nesting aimed at stack overflow"
+status = "partial"
+checks = ["test:tests/redteam_tests.rs::threat_deep_and_wide_modules_hit_limits_not_the_stack"]
+
+[[phases]]
+id = "H2.4"
+title = "Billion-laughs expansion via references or repeated subgraphs"
+status = "gap"
+
+[[phases]]
+id = "H2.5"
+title = "Huge sparse claims with tiny actual buffers"
+status = "partial"
+checks = [
+  "test:tests/redteam_tests.rs::threat_size_limits_are_enforced_without_allocation",
+  "test:tests/redteam_tests.rs::threat_count_bombs_in_every_section",
+]
+
+[[phases]]
+id = "H2.6"
+title = "Invalid UTF-8, overlong encodings, surrogate nonsense"
+status = "partial"
+checks = ["test:tests/redteam_tests.rs::threat_string_heap_faults"]
+
+[[phases]]
+id = "H2.7"
+title = "Streaming slowloris and oversize total declarations"
+status = "partial"
+checks = [
+  "test:tests/redteam_tests.rs::review_stream_bounds_reject_unbounded_batches",
+  "test:tests/redteam_tests.rs::review_stream_begin_uses_the_caller_limits",
+  "test:tests/redteam_tests.rs::review_delta_fragments_honor_the_stream_limits",
+]
+
+[[phases]]
+id = "H2.8"
+title = "Forge capability IDs"
+status = "n/a"
+note = "Active RPC authorization class; see the active-rpc map."
+
+[[phases]]
+id = "H2.9"
+title = "Attenuate then widen"
+status = "n/a"
+note = "Active RPC authorization class; see the active-rpc map."
+
+[[phases]]
+id = "H2.10"
+title = "Use after revoke or drop; borrowed channel lifetime"
+status = "n/a"
+note = "Active RPC authorization class; see the active-rpc map."
+
+[[phases]]
+id = "H2.11"
+title = "Confused deputy provider"
+status = "n/a"
+note = "Active RPC authorization class; see the active-rpc map."
+
+[[phases]]
+id = "H2.12"
+title = "Tool adapter confused deputy"
+status = "n/a"
+note = "Active RPC authorization class; see the active-rpc map."
+
+[[phases]]
+id = "H2.13"
+title = "Revocation racing with dispatch"
+status = "n/a"
+note = "Active RPC authorization class; see the active-rpc map."
+
+[[phases]]
+id = "H2.14"
+title = "Secrets in every legal position; scan all export paths"
+status = "partial"
+checks = [
+  "test:tests/redteam_tests.rs::threat_secret_never_reaches_any_export_surface",
+  "test:tests/protobuf_tests.rs::taint_follows_references_in_interpolations",
+]
+
+[[phases]]
+id = "H2.15"
+title = "Force secrets into error messages"
+status = "partial"
+checks = ["test:tests/redteam_tests.rs::threat_secret_never_reaches_any_export_surface"]
+
+[[phases]]
+id = "H2.16"
+title = "Equality and ordering oracle attempts"
+status = "partial"
+checks = ["test:tests/redteam_tests.rs::threat_anti_oracle_equality"]
+
+[[phases]]
+id = "H2.17"
+title = "Smuggle secrets via extensions, annotations, provenance, projections"
+status = "partial"
+checks = [
+  "test:tests/redteam_tests.rs::review_projection_redacts_secret_copies_in_keys_and_metadata",
+  "test:tests/protobuf_tests.rs::projection_refuses_an_extension_that_copies_a_secret",
+]
+
+[[phases]]
+id = "H2.18"
+title = "Logging and metrics carry no secrets or raw capability bits"
+status = "n/a"
+note = "The codec has no logging or metrics surface; the API gate keeps secret accessors out. RPC owns telemetry."
+
+[[phases]]
+id = "H2.19"
+title = "Queue storms under a low call budget"
+status = "n/a"
+note = "Active RPC availability class; see the active-rpc map."
+
+[[phases]]
+id = "H2.20"
+title = "Nested value byte bombs under a low byte budget"
+status = "partial"
+checks = ["test:tests/redteam_tests.rs::threat_deep_and_wide_modules_hit_limits_not_the_stack"]
+
+[[phases]]
+id = "H2.21"
+title = "Many lanes, channels and promises to finite limits"
+status = "n/a"
+note = "Active RPC availability class; see the active-rpc map."
+
+[[phases]]
+id = "H2.22"
+title = "Enormous tool payloads and tools that never return"
+status = "n/a"
+note = "Active RPC tool class; see the active-rpc map."
+
+[[phases]]
+id = "H2.23"
+title = "Zero or near-zero ceilings refused where policy needs finite limits"
+status = "n/a"
+note = "Active RPC budget class; Infinity Limits are explicit values with documented floors."
+
+[[phases]]
+id = "H2.24"
+title = "Single-bit mutation fails validation or changes the hash"
+status = "partial"
+checks = ["test:tests/property_tests.rs::byte_flips_are_always_rejected"]
+
+[[phases]]
+id = "H2.25"
+title = "Large-corpus hash collision search"
+status = "gap"
+
+[[phases]]
+id = "H2.26"
+title = "Pipelined vs sequential preserves the authorization side-effect set"
+status = "n/a"
+note = "Active RPC semantic class; see the active-rpc map."
+
+[[phases]]
+id = "H2.27"
+title = "Projection hash and redaction agreement under adversarial valid modules"
+status = "partial"
+checks = [
+  "test:tests/protobuf_tests.rs::projection_is_canonical_for_logically_equal_modules",
+  "test:tests/protobuf_tests.rs::projection_never_contains_secret_material",
+]
+
+[[phases]]
+id = "H2.28"
+title = "Overlapping write capabilities detected or prevented"
+status = "n/a"
+note = "Active RPC capability class; see the active-rpc map."
+
+[[phases]]
+id = "H2.29"
+title = "Audit-only capability cannot write"
+status = "n/a"
+note = "Active RPC capability class; see the active-rpc map."
+
+[[phases]]
+id = "H2.30"
+title = "Stale capability after ownership change refused"
+status = "n/a"
+note = "Active RPC capability class; see the active-rpc map."
+
+[[phases]]
+id = "H2.31"
+title = "Another worker's secret-bearing subgraph denied or fully redacted"
+status = "n/a"
+note = "Active RPC multi-agent class; see the active-rpc map."
+
+[[phases]]
+id = "H2.32"
+title = "Public errors do not enable secret or capability oracles"
+status = "partial"
+checks = [
+  "test:tests/unit_tests.rs::error_codes_are_stable_and_documented",
+  "test:tests/redteam_tests.rs::threat_anti_oracle_equality",
+]
+
+[[phases]]
+id = "H2.33"
+title = "No debug unlock or test ambient authority in release builds"
+status = "gap"
+note = "No debug unlock exists; there is no automated cfg audit yet."
+
+[[phases]]
+id = "H2.34"
+title = "Fuzz corpus treated as permanently hostile input"
+status = "gap"
+
+[[phases]]
+id = "H2.35"
+title = "Docs and examples do not teach insecure patterns without warnings"
+status = "partial"
+checks = ["doc:README.md", "doc:SECURITY.md"]
+
+[[phases]]
+id = "H2.36"
+title = "Allocation ceiling for untrusted counts, not only an error code"
+status = "partial"
+checks = [
+  "test:tests/redteam_tests.rs::threat_size_limits_are_enforced_without_allocation",
+  "test:tests/redteam_tests.rs::threat_count_bombs_in_every_section",
+]
+note = "The error is asserted; an allocation-proportionality oracle is not."
+
+[[phases]]
+id = "H2.37"
+title = "Span arithmetic checked on 32-bit and 64-bit widths"
+status = "gap"
+
+[[phases]]
+id = "H2.38"
+title = "String and blob lengths that end exactly at EOF"
+status = "gap"
+
+[[phases]]
+id = "H2.39"
+title = "Extension skip and duplicate-tag arithmetic"
+status = "partial"
+checks = [
+  "test:tests/unit_tests.rs::duplicate_extension_tags_are_refused",
+  "test:tests/unit_tests.rs::extension_blocks_round_trip_and_are_order_independent",
+]
+
+[[phases]]
+id = "H2.40"
+title = "Abort-free lane under panic=abort"
+status = "gap"
+
+[[phases]]
+id = "H2.41"
+title = "Validation time is linear in image size"
+status = "gap"
+
+[[phases]]
+id = "H2.42"
+title = "Cross-kernel and cross-connection capability transplant"
+status = "n/a"
+note = "Active RPC capability class; see the active-rpc map."
+
+[[phases]]
+id = "H2.43"
+title = "Event and log redaction oracle"
+status = "n/a"
+note = "The codec emits no events. RPC owns this control."
+
+[[phases]]
+id = "H2.44"
+title = "Tool timeout and payload ceiling"
+status = "n/a"
+note = "Active RPC tool class; see the active-rpc map."
+
+[[phases]]
+id = "H2.45"
+title = "Shared-memory frame TOCTOU"
+status = "n/a"
+note = "Active RPC transport class; see the active-rpc map."
+
+[[phases]]
+id = "H2.46"
+title = "URL and path allow-list canonicalization bypass"
+status = "n/a"
+note = "Active RPC tool class; see the active-rpc map."
+
+[[phases]]
+id = "H2.47"
+title = "Promise settlement count under concurrent cancel and resolve"
+status = "n/a"
+note = "Active RPC promise control; see the active-rpc map."
+
+[[phases]]
+id = "H3.1"
+title = "Freeze a review scope document"
+status = "gap"
+
+[[phases]]
+id = "H3.2"
+title = "Independent review with recorded findings"
+status = "partial"
+checks = ["doc:REVIEWS.md"]
+
+[[phases]]
+id = "H3.3"
+title = "Triage findings; critical and high fixed before maturity"
+status = "partial"
+checks = ["doc:REVIEWS.md"]
+
+[[phases]]
+id = "H3.4"
+title = "Re-test after fixes with evidence"
+status = "partial"
+checks = ["doc:REVIEWS.md"]
+
+[[phases]]
+id = "H3.5"
+title = "Schedule delta reviews after model or wire changes"
+status = "gap"
+
+[[phases]]
+id = "H3.6"
+title = "Annual revisit in maintenance"
+status = "gap"
+
+[[phases]]
+id = "H4.1"
+title = "Checked-in benchmark matrix"
+status = "partial"
+checks = ["script:benches/codec.rs"]
+
+[[phases]]
+id = "H4.2"
+title = "Throughput and p50/p99 for encode, decode, validate, hash, projection"
+status = "gap"
+
+[[phases]]
+id = "H4.3"
+title = "RPC call latency, pipelining, concurrency"
+status = "n/a"
+note = "Active RPC performance phase; see the active-rpc map."
+
+[[phases]]
+id = "H4.4"
+title = "Sustained load tests with RSS, allocations, FDs, threads"
+status = "gap"
+
+[[phases]]
+id = "H4.5"
+title = "CI regression gates on the benchmark matrix"
+status = "gap"
+
+[[phases]]
+id = "H4.6"
+title = "Publish docs/performance.md with methodology and numbers"
+status = "partial"
+checks = ["doc:docs/spec/performance.md"]
+
+[[phases]]
+id = "H4.7"
+title = "Explicit DoS scenarios prove budgets cap CPU and memory"
+status = "partial"
+checks = [
+  "test:tests/redteam_tests.rs::threat_size_limits_are_enforced_without_allocation",
+  "test:tests/redteam_tests.rs::threat_deep_and_wide_modules_hit_limits_not_the_stack",
+]
+
+[[phases]]
+id = "H4.8"
+title = "RSS stability over repeated validation cycles"
+status = "gap"
+
+[[phases]]
+id = "H4.9"
+title = "FD and thread stability under connection churn"
+status = "n/a"
+note = "Active RPC transport class; see the active-rpc map."
+
+[[phases]]
+id = "H5.1"
+title = "Runnable examples for round-trip, queries, streaming"
+status = "partial"
+checks = ["doc:README.md"]
+
+[[phases]]
+id = "H5.2"
+title = "Migration from JSON/YAML guide"
+status = "gap"
+
+[[phases]]
+id = "H5.3"
+title = "Why not only Cap'n Proto, FlatBuffers or gRPC comparison"
+status = "gap"
+
+[[phases]]
+id = "H5.4"
+title = "Stable machine-readable error code catalog"
+status = "partial"
+checks = [
+  "test:tests/conformance_tests.rs::every_declared_failure_code_has_a_vector",
+  "test:tests/unit_tests.rs::error_codes_are_stable_and_documented",
+]
+
+[[phases]]
+id = "H5.5"
+title = "Explicit what-is-safe-to-log rules"
+status = "partial"
+checks = ["doc:docs/spec/security.md"]
+
+[[phases]]
+id = "H5.6"
+title = "Misuse documentation"
+status = "partial"
+checks = ["doc:SECURITY.md"]
+
+[[phases]]
+id = "H5.7"
+title = "Optional active-habitat demo"
+status = "n/a"
+note = "Outside the two crates; tracked by the RPC ecosystem phase."
+
+[[phases]]
+id = "H6.1"
+title = "SBOM on every release"
+status = "partial"
+checks = ["doc:docs/release-signing.md"]
+
+[[phases]]
+id = "H6.2"
+title = "cargo deny and advisory audit strict in CI"
+status = "done"
+checks = ["gate:audit", "gate:deny"]
+
+[[phases]]
+id = "H6.3"
+title = "Reproducible builds where feasible, limits documented"
+status = "gap"
+
+[[phases]]
+id = "H6.4"
+title = "Signed tags with allowed_signers enforced"
+status = "partial"
+checks = ["script:release-signing.allowed_signers"]
+note = "Tags are signed and the public key is committed; verification is a documented manual command, not a CI gate yet."
+
+[[phases]]
+id = "H6.5"
+title = "Dual publish checklist mechanical and reviewed"
+status = "partial"
+checks = ["doc:docs/release-signing.md"]
+
+[[phases]]
+id = "H6.6"
+title = "Yank and advisory process exercised in a dry run"
+status = "gap"
+
+[[phases]]
+id = "H6.7"
+title = "Property tests for attenuation monotonicity"
+status = "n/a"
+note = "Active RPC capability phase; see the active-rpc map."
+
+[[phases]]
+id = "H6.8"
+title = "Bounded or exhaustive capability lifecycle model"
+status = "n/a"
+note = "Active RPC capability phase; see the active-rpc map."
+
+[[phases]]
+id = "H6.9"
+title = "Public statement of tested vs fuzzed vs reviewed vs proven"
+status = "partial"
+checks = ["doc:SECURITY.md"]
+
+[[phases]]
+id = "H6.10"
+title = "Exhaustive small-state capability lifecycle model"
+status = "n/a"
+note = "Active RPC capability phase; see the active-rpc map."
+
+[[phases]]
+id = "H7.1"
+title = "Structured events for call, settle, revoke, budget, refusal"
+status = "n/a"
+note = "The codec emits no runtime events; RPC owns observability."
+
+[[phases]]
+id = "H7.2"
+title = "Default logs carry no secrets or raw capability bits"
+status = "n/a"
+note = "The codec has no logging surface. RPC owns telemetry."
+
+[[phases]]
+id = "H7.3"
+title = "Metrics without sensitive payloads"
+status = "n/a"
+note = "The codec has no metrics surface. RPC owns telemetry."
+
+[[phases]]
+id = "H7.4"
+title = "Tests that force sensitive data into events fail CI"
+status = "n/a"
+note = "The codec has no events. RPC owns this gate."
+
+[[phases]]
+id = "H8.1"
+title = "Written wire and format compatibility policy"
+status = "partial"
+checks = ["doc:docs/spec/layout.md"]
+
+[[phases]]
+id = "H8.2"
+title = "Old Infinity images still validate"
+status = "partial"
+checks = ["test:tests/conformance_tests.rs::valid_vectors_validate_and_reencode_identically"]
+note = "AINF 1.0 is the only released wire version; there is no frozen 1.x image corpus yet."
+
+[[phases]]
+id = "H8.3"
+title = "Unknown flags and extensions behavior specified and tested"
+status = "partial"
+checks = [
+  "test:tests/unit_tests.rs::duplicate_extension_tags_are_refused",
+  "test:tests/unit_tests.rs::extension_blocks_round_trip_and_are_order_independent",
+]
+
+[[phases]]
+id = "H8.4"
+title = "Versioned public conformance suite"
+status = "partial"
+checks = ["test:tests/conformance_tests.rs::the_index_and_the_vector_files_agree"]
+
+[[phases]]
+id = "H8.5"
+title = "Deprecation windows for shipped behavior"
+status = "gap"
+
+[[phases]]
+id = "H9.1"
+title = "Nightly continuous fuzz with growing corpus"
+status = "partial"
+checks = ["gate:fuzz"]
+
+[[phases]]
+id = "H9.2"
+title = "Periodic independent review cadence on the calendar"
+status = "partial"
+checks = ["doc:REVIEWS.md"]
+
+[[phases]]
+id = "H9.3"
+title = "Public status section: performance, security posture, residual risks"
+status = "gap"
+
+[[phases]]
+id = "H9.4"
+title = "Hardening checklist reviewed every release; new classes added"
+status = "gap"
+
+[[phases]]
+id = "H9.5"
+title = "Maturity claim only after H0-H8 complete and H9 sustained"
+status = "gap"
+
+# ---------------------------------------------------------------------------
+# Addendum A: research program (R) and domains (D)
+# ---------------------------------------------------------------------------
+
+[[phases]]
+id = "R-0"
+title = "Research sprint before each phase"
+status = "done"
+checks = ["doc:docs/hardening/RESEARCH-LOG.md"]
+
+[[phases]]
+id = "R-1"
+title = "Research sibling components after every critical fix"
+status = "partial"
+checks = ["doc:docs/hardening/RESEARCH-LOG.md"]
+
+[[phases]]
+id = "R-2"
+title = "Full multi-domain pass once per release cycle"
+status = "partial"
+checks = ["doc:docs/hardening/RESEARCH-LOG.md"]
+
+[[phases]]
+id = "R-3"
+title = "Log every finding in RESEARCH-LOG.md"
+status = "done"
+checks = ["doc:docs/hardening/RESEARCH-LOG.md"]
+
+[[phases]]
+id = "R-4"
+title = "Every finding becomes a test, item, ADR or n/a note"
+status = "partial"
+checks = ["doc:docs/hardening/RESEARCH-LOG.md"]
+
+[[phases]]
+id = "D1.1"
+title = "At least 15 historical parser bugs with identifiers"
+status = "done"
+checks = ["doc:docs/hardening/RESEARCH-LOG.md"]
+
+[[phases]]
+id = "D1.2"
+title = "Map each historical bug to layout, validate, stream or wire decode"
+status = "done"
+checks = ["doc:docs/hardening/RESEARCH-LOG.md"]
+
+[[phases]]
+id = "D1.3"
+title = "Add a test or fuzz oracle per mapped class"
+status = "partial"
+checks = ["fuzz:decode"]
+
+[[phases]]
+id = "D1.4"
+title = "Differential parsing and whether a second checker is warranted"
+status = "gap"
+
+[[phases]]
+id = "D2.1"
+title = "At least 10 capability or RPC authz failure patterns"
+status = "n/a"
+note = "RPC research domain; see the active-rpc map."
+
+[[phases]]
+id = "D2.2"
+title = "Map authz patterns to kernel, cap, channel, tool, transport"
+status = "n/a"
+note = "RPC research domain; see the active-rpc map."
+
+[[phases]]
+id = "D2.3"
+title = "Monotonicity, revoke-at-dispatch and confused-deputy tests"
+status = "n/a"
+note = "RPC research domain; see the active-rpc map."
+
+[[phases]]
+id = "D2.4"
+title = "Rights amplification and caretaker patterns"
+status = "n/a"
+note = "RPC research domain; see the active-rpc map."
+
+[[phases]]
+id = "D3.1"
+title = "Enumerate every export path"
+status = "done"
+checks = ["doc:docs/hardening/RESEARCH-LOG.md"]
+
+[[phases]]
+id = "D3.2"
+title = "Attempt redaction bypass techniques in tests"
+status = "partial"
+checks = [
+  "test:tests/redteam_tests.rs::review_projection_redacts_secret_copies_in_keys_and_metadata",
+  "test:tests/protobuf_tests.rs::projection_refuses_an_extension_that_copies_a_non_utf8_secret",
+]
+
+[[phases]]
+id = "D3.3"
+title = "Anti-oracle equality in debug and optimized builds"
+status = "partial"
+checks = ["test:tests/unit_tests.rs::secret_equality_is_always_false"]
+note = "Tested in the default profile; no explicit `--release` lane."
+
+[[phases]]
+id = "D3.4"
+title = "Stable error codes do not branch on secret-dependent data"
+status = "gap"
+
+[[phases]]
+id = "D4.1"
+title = "Compare fuzz targets to structure-aware state of the art"
+status = "partial"
+checks = ["doc:docs/hardening/RESEARCH-LOG.md"]
+
+[[phases]]
+id = "D4.2"
+title = "Semantic oracles, not only crash oracles"
+status = "partial"
+checks = ["fuzz:decode"]
+
+[[phases]]
+id = "D4.3"
+title = "Directed seeds for cold paths"
+status = "gap"
+
+[[phases]]
+id = "D4.4"
+title = "Corpus growth and minimize-and-commit policy"
+status = "partial"
+checks = ["doc:docs/hardening/CORPUS.md"]
+
+[[phases]]
+id = "D5.1"
+title = "Map classic DoS classes to budget dimensions"
+status = "partial"
+checks = ["doc:docs/hardening/RESEARCH-LOG.md"]
+
+[[phases]]
+id = "D5.2"
+title = "Prove hostile input hits budget before host OOM"
+status = "partial"
+checks = ["test:tests/redteam_tests.rs::threat_size_limits_are_enforced_without_allocation"]
+
+[[phases]]
+id = "D5.3"
+title = "Compression bombs at transport edges"
+status = "n/a"
+note = "Infinity has no compression layer."
+
+[[phases]]
+id = "D6.1"
+title = "Escape catalog for HTTP, process and MCP tools"
+status = "n/a"
+note = "RPC tool domain; see the active-rpc map."
+
+[[phases]]
+id = "D6.2"
+title = "Automate escape attempts as red-team tests"
+status = "n/a"
+note = "RPC tool domain; see the active-rpc map."
+
+[[phases]]
+id = "D6.3"
+title = "Runtime sandbox escape claims"
+status = "n/a"
+note = "The codec makes no confinement claim."
+
+[[phases]]
+id = "D7.1"
+title = "Audit dependencies for unnecessary privilege"
+status = "partial"
+checks = ["doc:docs/hardening/RESEARCH-LOG.md"]
+
+[[phases]]
+id = "D7.2"
+title = "cargo deny and advisories gate merges"
+status = "done"
+checks = ["gate:audit", "gate:deny"]
+
+[[phases]]
+id = "D7.3"
+title = "Document residual non-reproducibility sources"
+status = "partial"
+checks = ["doc:docs/release-signing.md"]
+
+[[phases]]
+id = "D8.1"
+title = "Capability patterns for writer, auditor, orchestrator"
+status = "n/a"
+note = "Multi-agent domain; see the active-rpc map."
+
+[[phases]]
+id = "D8.2"
+title = "Overlapping, stale and exfiltration grants"
+status = "n/a"
+note = "Multi-agent domain; see the active-rpc map."
+
+[[phases]]
+id = "D8.3"
+title = "Import applicable multi-agent security tests"
+status = "n/a"
+note = "Multi-agent domain; see the active-rpc map."
+
+[[phases]]
+id = "D9.1"
+title = "Secret- or capability-dependent timing in hot paths"
+status = "gap"
+
+[[phases]]
+id = "D9.2"
+title = "Docs do not reveal privileged test-only behavior"
+status = "partial"
+checks = ["doc:docs/spec/security.md"]
+
+[[phases]]
+id = "D9.3"
+title = "Standing question: what would an infinite-input agent try next"
+status = "gap"

@@ -17,6 +17,7 @@ the bottom is generated from `docs/hardening/invariant-map.toml` by
 | Released tag | `v2.0.7` on `8e83550075d35a6e1d564b61bc788d8177946e3e` |
 | MSRV | 1.85 |
 | Wire format | AINF 1.0 |
+| Final commit | `f292158` |
 | Measured | 2026-10-27 |
 
 ## H0 findings
@@ -209,6 +210,15 @@ Run: `python scripts/negative_controls.py --check`. CI job `negative-controls`.
 - **Timing.** Validation is data-independent in control flow but not
   constant-time; a local attacker who can measure cache behaviour is outside the
   threat model.
+
+### Sustained-assurance window (H9.5)
+
+The maturity claim is point-in-time: every gate above is green on the final
+commit, and the continuous program is configured. The sustained window is
+**seven consecutive green nightly runs** (fuzz matrix plus coverage floor) with
+no new review finding; the nightly workflow is the clock. Until that window
+closes, releases carry "hardening complete, assurance window open" rather than
+an unqualified maturity claim.
 
 ## Maturity sign-off
 

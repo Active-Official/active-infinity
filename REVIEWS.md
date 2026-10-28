@@ -345,3 +345,8 @@ public `Display`/`Debug` that prints free text from secret-capable fields.
 | `api_surface.py` treated a renamed `impl.items` key as an empty list, so the gate stayed green while blind to inherent methods | high | fixed: a missing or non-list `items` array is a finding, and inherent methods count toward the function-count tripwire |
 
 Mutation evidence: renaming `impl.items` exits 1. The clean surface still reports 1,980 items / 550 functions.
+
+## Round 26 - 2026-10-27 (convergence of the gate hardening)
+
+**NO NEW FINDINGS.** The reviewer confirmed the schema-drift finding fires on a
+renamed `impl.items` and that inherent methods count toward the tripwire.

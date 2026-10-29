@@ -146,3 +146,19 @@ jobs:
       - name: README, theme-pair and logo integrity gate
         run: python scripts/check_presentation.py
 
+
+  facades:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        crate:
+          - active-infinity-core
+          - active-infinity-stream
+          - active-infinity-interop
+          - active-infinity-wasm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Facade tests
+        run: cargo test --manifest-path "facades/${{ matrix.crate }}/Cargo.toml"

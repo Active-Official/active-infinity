@@ -1,16 +1,17 @@
 # Active Infinity crate family
 
 The published crates keep the codec, streaming and interop names with the
-project. Facade sources live in `facades/` and are excluded from the main
-`active-infinity` package tarball.
+project. Module facade sources live in `facades/` and are excluded from the main
+`active-infinity` package tarball. `active-infinity-cli` was reserved separately
+and has no source in this repository.
 
 | Crate | Version | Purpose |
 |---|---|---|
 | [`active-infinity`](https://crates.io/crates/active-infinity) | 2.1.0 | Canonical binary, graph-native, secret-safe module codec |
-| [`active-infinity-core`](https://crates.io/crates/active-infinity-core) | 0.1.0 | Encode, decode, validate and content-hash surface |
-| [`active-infinity-stream`](https://crates.io/crates/active-infinity-stream) | 0.1.0 | Bounded streaming frames and canonical reassembly |
-| [`active-infinity-interop`](https://crates.io/crates/active-infinity-interop) | 0.1.0 | Active IR, redacted JSON and Protobuf projections |
-| [`active-infinity-wasm`](https://crates.io/crates/active-infinity-wasm) | 0.1.0 | Reserved WebAssembly binding namespace |
+| [`active-infinity-core`](https://crates.io/crates/active-infinity-core) | 0.1.1 | Encode, decode, validate and content-hash surface |
+| [`active-infinity-stream`](https://crates.io/crates/active-infinity-stream) | 0.1.1 | Bounded streaming frames and canonical reassembly |
+| [`active-infinity-interop`](https://crates.io/crates/active-infinity-interop) | 0.1.1 | Active IR, redacted JSON and Protobuf projections |
+| [`active-infinity-wasm`](https://crates.io/crates/active-infinity-wasm) | 0.1.1 | Reserved WebAssembly binding namespace |
 | [`active-infinity-cli`](https://crates.io/crates/active-infinity-cli) | 0.1.0 | Reserved CLI name |
 
 Each facade is a thin, versioned re-export of the shipped module. The main

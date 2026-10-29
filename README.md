@@ -13,8 +13,8 @@
 [![license](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](LICENSE-MIT)
 
 Published crate family: `active-infinity`, `active-infinity-core`,
-`active-infinity-stream`, `active-infinity-interop` and
-`active-infinity-wasm`. See [`REGISTRY.md`](REGISTRY.md) for the module map.
+`active-infinity-stream`, `active-infinity-interop`,
+`active-infinity-wasm` and the reserved `active-infinity-cli`. See [`REGISTRY.md`](REGISTRY.md) for the module map.
 
 Thank you for opening this page. Whether you build configuration systems, data planes, or multi-agent software, Active Infinity is the binary form designed so that **what you meant is what moves**—for humans, for services, and for AI agents that exchange modules at machine speed.
 

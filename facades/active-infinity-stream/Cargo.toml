@@ -1,0 +1,18 @@
+[package]
+name = "active-infinity-stream"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+authors = ["Active Language Team"]
+license = "MIT OR Apache-2.0"
+description = "Streaming facade for active-infinity: bounded frames and canonical reassembly"
+repository = "https://github.com/Active-Official/active-infinity"
+homepage = "https://github.com/Active-Official/active-infinity"
+documentation = "https://docs.rs/active-infinity-stream"
+readme = "README.md"
+keywords = ["active", "infinity", "stream", "frames", "codec"]
+categories = ["network-programming", "asynchronous"]
+
+
+[dependencies]
+active-infinity = { version = "2.1.0" }

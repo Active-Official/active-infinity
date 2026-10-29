@@ -1,0 +1,18 @@
+[package]
+name = "active-infinity-core"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+authors = ["Active Language Team"]
+license = "MIT OR Apache-2.0"
+description = "Canonical codec facade for active-infinity: encode, decode, validate and hash"
+repository = "https://github.com/Active-Official/active-infinity"
+homepage = "https://github.com/Active-Official/active-infinity"
+documentation = "https://docs.rs/active-infinity-core"
+readme = "README.md"
+keywords = ["active", "infinity", "codec", "canonical", "hash"]
+categories = ["network-programming", "asynchronous"]
+
+
+[dependencies]
+active-infinity = { version = "2.1.0" }

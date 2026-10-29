@@ -13,6 +13,7 @@ readme = "README.md"
 keywords = ["active", "binary", "serialization", "zero-copy", "agents"]
 categories = ["encoding", "config", "data-structures"]
 exclude = [
+    "facades/**",
     "target/**",
     ".scratch/**",
     "fuzz/corpus/**",

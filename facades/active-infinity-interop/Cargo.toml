@@ -1,0 +1,22 @@
+[package]
+name = "active-infinity-interop"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+authors = ["Active Language Team"]
+license = "MIT OR Apache-2.0"
+description = "Interop facade for active-infinity: Active IR, redacted JSON and Protobuf projections"
+repository = "https://github.com/Active-Official/active-infinity"
+homepage = "https://github.com/Active-Official/active-infinity"
+documentation = "https://docs.rs/active-infinity-interop"
+readme = "README.md"
+keywords = ["active", "infinity", "interop", "json", "protobuf"]
+categories = ["network-programming", "asynchronous"]
+
+[features]
+default = ["active-core", "json"]
+active-core = ["active-infinity/active-core"]
+json = ["active-infinity/json"]
+
+[dependencies]
+active-infinity = { version = "2.1.0" }

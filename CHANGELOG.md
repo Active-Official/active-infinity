@@ -9,6 +9,10 @@
   companion-schema hash, and verifies them against the canonical image
   (`infinity/proof` on any mismatch). JSON sidecars round-trip, and
   `active-infinity-cli proof issue|verify` writes and checks them.
+- **Three-way module merge** (ADR-0015): `active_infinity::merge` merges two
+  modules against their base field by field, returns a canonical module when
+  every change is compatible, and reports typed conflicts (`AddAdd`,
+  `ModifyModify`, `DeleteModify`, `KindMismatch`) otherwise.
 
 ## 2.2.0 - 2026-10-31
 

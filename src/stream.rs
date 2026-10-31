@@ -655,7 +655,10 @@ pub fn apply_delta_in_place(module: &mut InfinityModule, ops: &[DeltaOp]) -> Res
     Ok(())
 }
 
-fn merge_fragment(base: &mut InfinityModule, fragment: &InfinityModule) -> Result<NodeId> {
+pub(crate) fn merge_fragment(
+    base: &mut InfinityModule,
+    fragment: &InfinityModule,
+) -> Result<NodeId> {
     let base_count = base.node_count();
     let map: Vec<NodeId> = (0..fragment.node_count())
         .map(|index| NodeId(base_count as u32 + index as u32))

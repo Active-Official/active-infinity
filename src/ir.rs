@@ -1251,6 +1251,11 @@ impl InfinityModule {
         &self.bindings
     }
 
+    /// Drop every name binding.
+    pub fn clear_bindings(&mut self) {
+        self.bindings.clear();
+    }
+
     /// Bind a name to a node. Replaces an existing binding with the same name.
     pub fn bind(&mut self, name: impl Into<String>, id: NodeId) {
         let name = name.into();

@@ -19,3 +19,4 @@ immutable once accepted: a later ADR supersedes it and says so.
 | [0012](0012-schema-class.md) | Schema-class companion modules and the hash boundary |
 | [0013](0013-signature-envelope.md) | Detached signature envelope and store trust |
 | [0014](0014-proof-sidecars.md) | Optional proof-carrying sidecars |
+| [0015](0015-three-way-merge.md) | Three-way field-level module merge |

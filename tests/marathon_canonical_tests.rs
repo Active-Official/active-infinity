@@ -32,6 +32,33 @@ fn module(values_reversed: bool) -> InfinityModule {
 }
 
 #[test]
+fn annotation_order_does_not_change_the_canonical_bytes() {
+    // Two annotation-only subjects, annotated in opposite orders. The annotation
+    // set is the same, so the image must be too: numbering has to be defined by
+    // content, not by the order the caller called `annotate`.
+    let build = |first_on_two: bool| {
+        let mut module = InfinityModule::new();
+        let root = module.push(Inode::Int(1));
+        let two = module.push(Inode::Int(2));
+        let three = module.push(Inode::Int(3));
+        module.set_root(Some(root));
+        if first_on_two {
+            module.annotate(two, active_infinity::AnnotationKind::Intent("a".into()));
+            module.annotate(three, active_infinity::AnnotationKind::Intent("b".into()));
+        } else {
+            module.annotate(three, active_infinity::AnnotationKind::Intent("b".into()));
+            module.annotate(two, active_infinity::AnnotationKind::Intent("a".into()));
+        }
+        module
+    };
+    assert_eq!(
+        encode(&build(true)).expect("forward"),
+        encode(&build(false)).expect("reversed"),
+        "annotation insertion order must not reach the image"
+    );
+}
+
+#[test]
 fn every_nan_normalizes_to_the_canonical_bit_pattern() {
     // A signaling NaN used to be refused by structural validation before
     // canonicalization could normalize it, so the module could not be encoded at

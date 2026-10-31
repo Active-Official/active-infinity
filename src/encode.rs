@@ -425,6 +425,10 @@ pub(crate) fn encode_prepared_into(
     }
     pad(image);
 
+    // The header describes every section with a u32 offset, so the whole image has
+    // to fit that space; a heap can push past it even when each span was written
+    // while still below the limit.
+    u32::try_from(image.len()).map_err(|_| Error::TooLarge)?;
     header.total_size = image.len() as u64;
     header.write(image);
 

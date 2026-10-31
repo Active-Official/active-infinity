@@ -750,15 +750,254 @@ fn remap_node_in_place(node: &mut Inode, remap: &[NodeId]) -> Result<()> {
     Ok(())
 }
 
+/// A content-defined key for a subtree, independent of arena ids.
+///
+/// Used only to order the annotation roots: an annotation subject can be a node
+/// that nothing else reaches, so numbering it in stored order would let the order
+/// of `annotate` calls leak into the image. The render walks children in their
+/// (already canonical) order and writes every non-reference payload; references
+/// are followed, never printed as ids. Secrets contribute a fixed marker, never
+/// their bytes.
+fn content_key(nodes: &[crate::ir::Inode], id: NodeId) -> String {
+    fn render(nodes: &[crate::ir::Inode], id: NodeId, out: &mut String, depth: u32) {
+        if depth > 32 || out.len() > 4096 {
+            out.push('~');
+            return;
+        }
+        let Some(node) = nodes.get(id.index()) else {
+            out.push('?');
+            return;
+        };
+        use crate::ir::Inode as I;
+        match node {
+            I::Null => out.push('n'),
+            I::Bool(value) => out.push(if *value { 't' } else { 'f' }),
+            I::Int(value) => {
+                out.push('i');
+                out.push_str(&value.to_string());
+            }
+            I::Float(value) => {
+                out.push('d');
+                out.push_str(&value.to_bits().to_string());
+            }
+            I::Str(text) => {
+                out.push('s');
+                out.push_str(&text.len().to_string());
+                out.push(':');
+                out.push_str(text);
+            }
+            I::DurationMs(ms) => {
+                out.push('m');
+                out.push_str(&ms.to_string());
+            }
+            I::Quantity { value, unit } => {
+                out.push('q');
+                out.push_str(&unit.discriminant().to_string());
+                out.push(':');
+                render(nodes, *value, out, depth + 1);
+            }
+            I::Array { elements } => {
+                out.push('[');
+                for element in elements {
+                    render(nodes, *element, out, depth + 1);
+                    out.push(',');
+                }
+                out.push(']');
+            }
+            I::Table { fields } => {
+                out.push('{');
+                for (name, value) in fields {
+                    out.push_str(&name.len().to_string());
+                    out.push(':');
+                    out.push_str(name);
+                    out.push('=');
+                    render(nodes, *value, out, depth + 1);
+                    out.push(',');
+                }
+                out.push('}');
+            }
+            // A secret's content is never part of any key.
+            I::Secret(_) => out.push_str("SECRET"),
+            I::SecretRef { locator } => {
+                out.push('S');
+                render(nodes, *locator, out, depth + 1);
+            }
+            I::Ref(target) => {
+                out.push('R');
+                render(nodes, *target, out, depth + 1);
+            }
+            I::Env { name, default } => {
+                out.push('E');
+                out.push_str(name);
+                out.push(':');
+                if let Some(default) = default {
+                    render(nodes, *default, out, depth + 1);
+                }
+            }
+            I::Ident(name) => {
+                out.push('I');
+                out.push_str(name);
+            }
+            I::Interpolate { parts } => {
+                out.push('T');
+                for part in parts {
+                    match part {
+                        crate::ir::InterpPart::Literal(text) => {
+                            out.push('l');
+                            out.push_str(&text.len().to_string());
+                            out.push(':');
+                            out.push_str(text);
+                        }
+                        crate::ir::InterpPart::Expr(expr) => {
+                            out.push('e');
+                            render(nodes, *expr, out, depth + 1);
+                        }
+                    }
+                }
+                out.push('t');
+            }
+            I::Binary { op, lhs, rhs } => {
+                out.push('b');
+                out.push_str(op.as_str());
+                out.push(':');
+                render(nodes, *lhs, out, depth + 1);
+                render(nodes, *rhs, out, depth + 1);
+            }
+            I::Unary { op, expr } => {
+                out.push('u');
+                out.push_str(op.as_str());
+                out.push(':');
+                render(nodes, *expr, out, depth + 1);
+            }
+            I::Constrained { target, constraint } => {
+                out.push('c');
+                out.push_str(&format!("{constraint:?}"));
+                out.push(':');
+                render(nodes, *target, out, depth + 1);
+            }
+            I::Patch(op) => {
+                out.push('p');
+                match op {
+                    crate::ir::PatchOp::Set { path, value } => {
+                        out.push('s');
+                        out.push_str(path);
+                        render(nodes, *value, out, depth + 1);
+                    }
+                    crate::ir::PatchOp::Remove { path } => {
+                        out.push('r');
+                        out.push_str(path);
+                    }
+                    crate::ir::PatchOp::Rename { from, to } => {
+                        out.push('n');
+                        out.push_str(from);
+                        out.push_str(to);
+                    }
+                }
+            }
+            I::SchemaField(spec) => {
+                // Every id-bearing field is followed; only the type itself and the
+                // textual fields are written.
+                out.push('F');
+                out.push_str(&format!("{:?}", spec.typ));
+                for id in [
+                    spec.min,
+                    spec.max,
+                    spec.min_len,
+                    spec.max_len,
+                    spec.pattern,
+                    spec.default,
+                ]
+                .into_iter()
+                .flatten()
+                {
+                    render(nodes, id, out, depth + 1);
+                }
+                if let Some(text) = &spec.deprecated {
+                    out.push('!');
+                    out.push_str(text);
+                }
+            }
+            I::SchemaTable { fields, closed } => {
+                out.push('G');
+                out.push(if *closed { '1' } else { '0' });
+                for (name, value) in fields {
+                    out.push_str(name);
+                    out.push('=');
+                    render(nodes, *value, out, depth + 1);
+                }
+            }
+            I::SchemaArray { element } => {
+                out.push('A');
+                render(nodes, *element, out, depth + 1);
+            }
+            I::Semantic { tag, inner } => {
+                out.push('y');
+                out.push_str(tag.as_str());
+                render(nodes, *inner, out, depth + 1);
+            }
+            I::ContentAddressed { media_type, data } => {
+                out.push('C');
+                render(nodes, *media_type, out, depth + 1);
+                render(nodes, *data, out, depth + 1);
+            }
+            I::Blob {
+                hash,
+                size,
+                tainted,
+                media_type,
+                payload,
+            } => {
+                out.push('B');
+                out.push_str(&crate::ir::hash_hex(hash));
+                out.push_str(&size.to_string());
+                out.push(if *tainted { '1' } else { '0' });
+                out.push_str(media_type);
+                if let Some(payload) = payload {
+                    out.push_str(&payload.len().to_string());
+                }
+            }
+        }
+    }
+    let mut out = String::new();
+    render(nodes, id, &mut out, 0);
+    out
+}
+
 /// Deterministic pre-order numbering over the reachable graph.
 ///
-/// The roots come from [`InfinityModule::roots`], which orders bindings by name
-/// and everything else by its stored (already canonical) order. Ordering them
-/// by numeric id instead would let arena construction order leak into the
-/// canonical bytes: two modules with the same content but a different push order
-/// would hash differently.
+/// The roots are the module root, the bindings in name order, and the annotation
+/// subjects and constraint expressions in content order. Ordering any of them by
+/// numeric id (or by the order they were added) would let arena construction and
+/// `annotate` call order leak into the canonical bytes: two modules with the same
+/// content would hash differently.
 fn canonical_order(nodes: &[Inode], module: &InfinityModule) -> Result<Vec<NodeId>> {
-    let roots = module.roots();
+    let mut roots: Vec<NodeId> = Vec::new();
+    if let Some(root) = module.root() {
+        roots.push(root);
+    }
+    let mut bindings: Vec<&(String, NodeId)> = module.bindings().iter().collect();
+    bindings.sort_by(|a, b| a.0.cmp(&b.0));
+    roots.extend(bindings.into_iter().map(|(_, id)| *id));
+    // An annotation subject may be a node nothing else reaches, so its position
+    // in the annotation list is the only thing that could order it. Order by the
+    // subtree's content instead; equal keys mean interchangeable subtrees.
+    let mut subjects: Vec<(String, NodeId)> = module
+        .annotations()
+        .iter()
+        .map(|annotation| (content_key(nodes, annotation.node), annotation.node))
+        .collect();
+    subjects.sort();
+    roots.extend(subjects.into_iter().map(|(_, id)| id));
+    let mut exprs: Vec<(String, NodeId)> = module
+        .annotations()
+        .iter()
+        .filter_map(|annotation| match &annotation.kind {
+            AnnotationKind::Constraint { expr, .. } => Some((content_key(nodes, *expr), *expr)),
+            _ => None,
+        })
+        .collect();
+    exprs.sort();
+    roots.extend(exprs.into_iter().map(|(_, id)| id));
 
     let mut order = Vec::with_capacity(nodes.len());
     let mut seen = vec![false; nodes.len()];

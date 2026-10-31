@@ -67,6 +67,16 @@ on both remotes, peeled to `fd3f23dac0425106398adcd42b41a995b82994c3`.
 Install verification: `cargo install active-infinity-cli --version 0.3.0
 --locked` then `doctor` and `conformance run` from the registry build.
 
+### Release objects
+
+| Tag | Active-Official | RatioArtificiosa | Assets |
+|-----|-----------------|------------------|--------|
+| `v2.3.0` | https://github.com/Active-Official/active-infinity/releases/tag/v2.3.0 | https://github.com/RatioArtificiosa/active-infinity/releases/tag/v2.3.0 | `active-infinity-2.3.0.cdx.json` (161 components) |
+
+Both are marked **Latest** (`gh api repos/<owner>/active-infinity/releases/latest`
+returns `v2.3.0`). The notes summarise the release, the hardening and the
+verification; the tag is verified with `--verify-tag` at creation.
+
 A CLI-only patch release is recorded here with its commit and does not move the
 library tag: the tag names the library version, and the CLI has its own.
 

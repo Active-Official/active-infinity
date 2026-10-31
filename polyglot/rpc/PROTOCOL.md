@@ -1,9 +1,12 @@
 # Thin RPC clients (polyglot)
 
-Every language in the polyglot matrix ships a thin Active RPC client. The kernel
-stays in Rust; a client proves it can put a real ARP1 envelope with a capability
-on the wire, carry an AINF payload, read the response, and surface a refusal
-code.
+Every language in the polyglot matrix ships a thin Active RPC client, one per
+language row: 20 clients including a Rust client that hand-encodes ARP1 with the
+standard library only (so the reference language is exercised without its own
+codec) and a TypeScript client compiled from `ts_client.ts` with `tsc --strict`.
+The kernel stays in Rust; a client proves it can put a real ARP1 envelope with a
+capability on the wire, carry an AINF payload, read the response, and surface a
+refusal code.
 
 Modern transports (QUIC/HTTP3, HTTP/2) are implemented once, in the Rust stack.
 Thin clients use native ARP1 over TCP, the lowest common denominator that every

@@ -344,7 +344,7 @@ jobs:
           # reference encoder. ACTIVE_RPC_STRICT turns a missing runtime into a
           # failure, so the job cannot go green by dropping a language.
           bash polyglot/rpc/run_clients.sh /tmp/rpc "$PWD" \
-            python c cpp zig js go ruby php lua dart java kotlin scala csharp swift ktnative assemblyscript shell golden
+            python c cpp rust zig js ts go ruby php lua dart java kotlin scala csharp swift ktnative assemblyscript shell golden
 
   cli:
     runs-on: ubuntu-latest

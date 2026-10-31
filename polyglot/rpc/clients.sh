@@ -15,6 +15,23 @@ build_assemblyscript() {
   fi
 }
 
+# The TypeScript row is compiled with `tsc --strict`; it is not the JavaScript
+# client under another name.
+build_typescript() {
+  mkdir -p polyglot/rpc/build
+  if [ ! -f polyglot/rpc/build/ts_client.js ] ||
+    [ polyglot/rpc/ts_client.ts -nt polyglot/rpc/build/ts_client.js ]; then
+    npx --yes -p typescript@5.6.3 tsc polyglot/rpc/ts_client.ts \
+      --strict --target ES2020 --lib ES2020 --module commonjs \
+      --outDir polyglot/rpc/build --noEmitOnError
+  fi
+}
+
+run_typescript() {
+  build_typescript
+  node polyglot/rpc/build/ts_client.js
+}
+
 run_python() { python3 polyglot/rpc/python_client.py; }
 run_c() {
   cc -O2 polyglot/rpc/client.c -o /tmp/rpc-client
@@ -24,12 +41,16 @@ run_cpp() {
   c++ -std=c++17 -O2 polyglot/rpc/client.cpp -o /tmp/rpc-client-cpp
   /tmp/rpc-client-cpp
 }
+run_rust() {
+  rustc -O polyglot/rpc/rust_client.rs -o /tmp/rpc-client-rust
+  /tmp/rpc-client-rust
+}
 run_zig() {
   (cd polyglot/rpc && zig build-exe zig_client.zig -femit-bin=/tmp/rpc-client-zig -lc)
   /tmp/rpc-client-zig
 }
 run_js() { node polyglot/rpc/js_client.js; }
-run_ts() { node polyglot/rpc/js_client.js; }
+run_ts() { run_typescript; }
 run_go() { go run polyglot/rpc/go_client.go; }
 run_ruby() { ruby polyglot/rpc/ruby_client.rb; }
 run_php() { php polyglot/rpc/php_client.php; }
@@ -77,8 +98,10 @@ client_available() {
     python) command -v python3 >/dev/null ;;
     c) command -v cc >/dev/null ;;
     cpp) command -v c++ >/dev/null ;;
+    rust) command -v rustc >/dev/null ;;
     zig) command -v zig >/dev/null ;;
-    js|ts) command -v node >/dev/null ;;
+    js) command -v node >/dev/null ;;
+    ts) command -v node >/dev/null && command -v npx >/dev/null ;;
     go) command -v go >/dev/null ;;
     ruby) command -v ruby >/dev/null ;;
     php) command -v php >/dev/null ;;
@@ -98,5 +121,6 @@ client_available() {
   esac
 }
 
-# Every thin client in the matrix, in a stable order.
-CLIENTS=(python c cpp zig js go ruby php lua dart java kotlin scala csharp swift ktnative assemblyscript shell)
+# Every thin client in the matrix, in a stable order. One entry per language in
+# the Infinity matrix, including Rust and TypeScript.
+CLIENTS=(python c cpp rust zig js ts go ruby php lua dart java kotlin scala csharp swift ktnative assemblyscript shell)

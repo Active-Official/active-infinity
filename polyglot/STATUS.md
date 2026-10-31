@@ -41,8 +41,11 @@ Verified 2026-10-31 at `ebec21d` (Infinity) and `66f9fef` (Active RPC), in the
 - **RPC thin client**: native ARP1 over TCP against `active-rpc`'s real kernel
   peer — one successful `echo` with a server-minted capability carrying an AINF
   payload, one `rpc/method-not-granted` refusal, one `rpc/unknown-capability`
-  refusal. Shell uses `polyglot/rpc/shell_client.sh`; the Rust row is the kernel
-  itself.
+  refusal. Shell uses `polyglot/rpc/shell_client.sh`. Every language has its own
+  client: Rust hand-encodes ARP1 with the standard library only
+  (`polyglot/rpc/rust_client.rs`), and TypeScript is compiled from
+  `polyglot/rpc/ts_client.ts` with `tsc --strict` rather than reusing the
+  JavaScript script.
 
 ## CI jobs
 
@@ -50,8 +53,10 @@ Verified 2026-10-31 at `ebec21d` (Infinity) and `66f9fef` (Active RPC), in the
 `polyglot-scripting`, `polyglot-dotnet`, `polyglot-jvm`, `polyglot-swift`,
 `polyglot-kotlin-native`, `polyglot-assemblyscript`, `polyglot-shell`, and
 `polyglot-rpc` (live matrix plus byte-exact encoder conformance). The
-`polyglot-rpc` job runs with `ACTIVE_RPC_STRICT=1`, so a missing runtime fails
-the job instead of skipping a language.
+`polyglot-rpc` job runs with `ACTIVE_RPC_STRICT=1` and names all 20 clients
+(`python c cpp rust zig js ts go ruby php lua dart java kotlin scala csharp
+swift ktnative assemblyscript shell`), so a missing runtime fails the job
+instead of skipping a language.
 
 ## Reproduce
 
@@ -65,5 +70,8 @@ bash polyglot/rpc/run_clients.sh /path/to/active-rpc "$PWD"
 ```
 
 Encoder bytes are compared with the Rust reference; on a mismatch the check
-prints the first differing byte offset. All 18 runtimes that can execute in CI
-produced identical request bytes.
+prints the first differing byte offset. All 20 languages produce identical
+request bytes: the 18 earlier clients, the TypeScript client compiled with
+`tsc --strict`, and a Rust thin client that hand-encodes ARP1 with the standard
+library only (so the reference language is checked by an implementation that
+does not use the kernel codec).

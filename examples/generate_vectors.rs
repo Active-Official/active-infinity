@@ -137,6 +137,37 @@ fn with_extensions() -> InfinityModule {
     module
 }
 
+/// A flat table of integers, used by the merge vectors.
+fn int_fields(fields: &[(&str, i64)]) -> InfinityModule {
+    let mut module = InfinityModule::new();
+    let mut nodes = Vec::with_capacity(fields.len());
+    for (name, value) in fields {
+        let id = module.push(Inode::Int(*value));
+        nodes.push(((*name).to_string(), id));
+    }
+    let root = module.push(Inode::Table { fields: nodes });
+    module.set_root(Some(root));
+    module
+}
+
+/// One nested table (`server.host`, `server.port`), used by the merge vectors.
+fn nested_fields(port: i64, host: i64) -> InfinityModule {
+    let mut module = InfinityModule::new();
+    let port_node = module.push(Inode::Int(port));
+    let host_node = module.push(Inode::Int(host));
+    let server = module.push(Inode::Table {
+        fields: vec![
+            ("host".to_string(), host_node),
+            ("port".to_string(), port_node),
+        ],
+    });
+    let root = module.push(Inode::Table {
+        fields: vec![("server".to_string(), server)],
+    });
+    module.set_root(Some(root));
+    module
+}
+
 // ---------------------------------------------------------------------------
 // byte-level helpers
 // ---------------------------------------------------------------------------
@@ -693,11 +724,115 @@ fn main() {
     }
     fs::write(stream_dir.join("index.txt"), stream_index).expect("index");
 
+    // ---- proof and merge vectors --------------------------------------
+    //
+    // These two features produce and consume files rather than new image
+    // bytes, so they get their own directories and their own index files. The
+    // proof vectors pin what a verifier must accept and refuse; the merge
+    // vectors pin a clean result byte-for-byte and the exact conflict paths.
+    #[cfg(feature = "json")]
+    {
+        write_proof_vectors(&root);
+    }
+
+    let merge_dir = root.join("merge");
+    fs::create_dir_all(&merge_dir).expect("merge dir");
+    let merge_cases: Vec<(&str, InfinityModule, InfinityModule, InfinityModule)> = vec![
+        (
+            "clean",
+            int_fields(&[("alpha", 1), ("beta", 2)]),
+            int_fields(&[("alpha", 10), ("beta", 2)]),
+            int_fields(&[("alpha", 1), ("beta", 20)]),
+        ),
+        (
+            "nested",
+            nested_fields(80, 1),
+            nested_fields(8080, 1),
+            nested_fields(9090, 1),
+        ),
+        (
+            "metadata",
+            int_fields(&[("alpha", 1)]),
+            {
+                let mut module = int_fields(&[("alpha", 1)]);
+                let root = module.root().expect("root");
+                module.bind("extra", root);
+                module
+            },
+            int_fields(&[("alpha", 1)]),
+        ),
+    ];
+    let mut merge_index = String::from("# name base left right expected\n");
+    for (name, base, left, right) in &merge_cases {
+        let base_bytes = encode(base).expect("encode base");
+        let left_bytes = encode(left).expect("encode left");
+        let right_bytes = encode(right).expect("encode right");
+        fs::write(merge_dir.join(format!("{name}.base.ainf")), &base_bytes).expect("write base");
+        fs::write(merge_dir.join(format!("{name}.left.ainf")), &left_bytes).expect("write left");
+        fs::write(merge_dir.join(format!("{name}.right.ainf")), &right_bytes).expect("write right");
+        let expected = match active_infinity::merge(base, left, right).expect("merge") {
+            active_infinity::Merge::Clean(module) => {
+                let bytes = encode(&module).expect("encode merged");
+                fs::write(merge_dir.join(format!("{name}.merged.ainf")), &bytes)
+                    .expect("write merged");
+                let hash = active_infinity::content_hash(&bytes).expect("hash");
+                format!("clean:{}", active_infinity::ir::hash_hex(&hash))
+            }
+            active_infinity::Merge::Conflicts(conflicts) => {
+                let rendered: Vec<String> = conflicts
+                    .iter()
+                    .map(|conflict| format!("{}:{:?}", conflict.field, conflict.kind))
+                    .collect();
+                format!("conflict:{}", rendered.join(","))
+            }
+        };
+        merge_index.push_str(&format!(
+            "{name} {name}.base.ainf {name}.left.ainf {name}.right.ainf {expected}\n"
+        ));
+    }
+    fs::write(merge_dir.join("index.txt"), merge_index).expect("merge index");
+
     println!(
-        "wrote {} valid, {} invalid and {} invalid-stream vectors to {}",
+        "wrote {} valid, {} invalid and {} invalid-stream vectors, 3 proof cases and {} merge cases to {}",
         fixtures.len() + 1,
         vectors.len(),
         stream_vectors.len(),
+        merge_cases.len(),
         root.display()
     );
+}
+
+/// Write the proof-sidecar vectors. They need the `json` feature because the
+/// sidecar itself is JSON; the merge vectors below do not.
+#[cfg(feature = "json")]
+fn write_proof_vectors(root: &Path) {
+    let proof_dir = root.join("proof");
+    fs::create_dir_all(&proof_dir).expect("proof dir");
+    let good_image = encode(&fixture()).expect("encode");
+    let proof = active_infinity::Proof::issue(&good_image).expect("issue proof");
+    fs::write(proof_dir.join("good.ainf"), &good_image).expect("write proof image");
+    fs::write(proof_dir.join("good.json"), proof.to_json()).expect("write proof sidecar");
+    let tampered = proof.to_json().replace(
+        &format!("\"size\":{}", proof.size),
+        &format!("\"size\":{}", proof.size.saturating_add(1)),
+    );
+    assert_ne!(
+        tampered,
+        proof.to_json(),
+        "the tampered sidecar must differ"
+    );
+    fs::write(proof_dir.join("tampered.json"), &tampered).expect("write tampered sidecar");
+    fs::write(
+        proof_dir.join("wrong.ainf"),
+        encode(&simple()).expect("encode"),
+    )
+    .expect("write wrong image");
+    fs::write(
+        proof_dir.join("index.txt"),
+        "# name image proof expected\n\
+         good good.ainf good.json ok\n\
+         tampered good.ainf tampered.json infinity/proof\n\
+         wrong wrong.ainf good.json infinity/proof\n",
+    )
+    .expect("proof index");
 }

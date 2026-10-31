@@ -202,3 +202,49 @@ its 10k working set leaves the runner's L2 cache; a quadratic encoder would be
 near 100x. CI runs the ratio gate in the `perf-gate` job
 and uploads the matrix as an artifact; `--baseline docs/spec/perf-baseline.json`
 adds an absolute comparison (p50 ≤ 1.6x, p99 ≤ 3.0x) for a release machine.
+
+## Multi-host methodology (M-2.4)
+
+Every number above comes from one machine. A single host cannot tell a cache
+effect from an algorithm, so the protocol below is what a multi-host claim
+requires; the tables in this file stay labelled as single-host until it is run.
+
+### Protocol
+
+1. **Pin the environment.** Same commit, same `Cargo.lock`, same toolchain
+   (`rustc -Vv` recorded), release profile, no turbo/undervolt toggles, and a
+   fixed CPU affinity for the measured process (`taskset -c 2` or equivalent).
+2. **Record the host.** CPU model, physical cores, base/boost frequency, L1/L2/L3
+   sizes, RAM type and speed, kernel (`uname -a`), filesystem and governor. The
+   matrix runner prints a machine-readable header; attach it to the run.
+3. **Warm up, then sample.** One untimed warmup pass, then at least 200 samples
+   per cell; report p50, p95 and p99, never a single run.
+4. **Run each host at least twice**, on different days, and report both runs.
+   A cell whose two runs differ by more than 25% is reported with the spread and
+   does not become a headline number.
+5. **Compare shapes, not absolutes.** Cross-host comparisons use ratios
+   (10k/1k scaling, encode/validate, this crate/competitor on the same host),
+   because ratios survive clock and cache differences that absolutes do not.
+6. **Publish per-host tables** with the host record, plus one summary table that
+   states the range across hosts. Never average hosts into a single number.
+7. **Archive the raw output.** The CI `perf-gate` job already uploads the matrix
+   artifact; a multi-host campaign archives one artifact per host under the same
+   run id.
+
+### What the harness gives you
+
+```text
+cargo run --release --locked --quiet --example perf_matrix --all-features
+python scripts/perf_gate.py --matrix perf-matrix.json --baseline docs/spec/perf-baseline.json
+```
+
+`perf_matrix` emits the JSON the gate consumes, so a second host is a matter of
+running the same command there and keeping both files. The gate's absolute
+baseline is host-specific by construction: regenerate
+`docs/spec/perf-baseline.json` on a new host and record that you did.
+
+### Status
+
+- Single-host: measured and published above (this document).
+- Multi-host: not yet run. The checklist item records that this section is the
+  methodology and the tables remain single-host by design.

@@ -361,3 +361,143 @@ fn an_unrelated_field_change_does_not_conflict_on_identical_bindings() {
     assert_eq!(fields.get("a"), Some(&2));
     assert_eq!(fields.get("c"), Some(&3));
 }
+
+/// Build a module with one level of nested tables.
+fn nested(fields: &[(&str, Vec<(&str, Inode)>)]) -> InfinityModule {
+    let mut module = InfinityModule::new();
+    let mut outer = Vec::new();
+    for (name, inners) in fields {
+        let mut inner_fields = Vec::new();
+        for (key, value) in inners {
+            let id = module.push(value.clone());
+            inner_fields.push(((*key).to_string(), id));
+        }
+        let table = module.push(Inode::Table {
+            fields: inner_fields,
+        });
+        outer.push(((*name).to_string(), table));
+    }
+    let root = module.push(Inode::Table { fields: outer });
+    module.set_root(Some(root));
+    module
+}
+
+#[test]
+fn a_nested_leaf_conflict_is_reported_with_its_path() {
+    let base = nested(&[(
+        "server",
+        vec![("host", Inode::Int(1)), ("port", Inode::Int(80))],
+    )]);
+    let left = nested(&[(
+        "server",
+        vec![("host", Inode::Int(1)), ("port", Inode::Int(8080))],
+    )]);
+    let right = nested(&[(
+        "server",
+        vec![("host", Inode::Int(1)), ("port", Inode::Int(9090))],
+    )]);
+    let conflicts = match merge(&base, &left, &right).expect("merge") {
+        Merge::Conflicts(conflicts) => conflicts,
+        Merge::Clean(_) => panic!("a nested leaf conflict must not merge cleanly"),
+    };
+    assert_eq!(conflicts.len(), 1, "{conflicts:?}");
+    assert_eq!(conflicts[0].field, "server.port");
+    assert_eq!(conflicts[0].kind, ConflictKind::ModifyModify);
+}
+
+#[test]
+fn a_nested_add_conflict_is_reported_with_its_path() {
+    let base = nested(&[("server", vec![("port", Inode::Int(80))])]);
+    let left = nested(&[(
+        "server",
+        vec![("port", Inode::Int(80)), ("tls", Inode::Bool(true))],
+    )]);
+    let right = nested(&[(
+        "server",
+        vec![("port", Inode::Int(80)), ("tls", Inode::Bool(false))],
+    )]);
+    let conflicts = match merge(&base, &left, &right).expect("merge") {
+        Merge::Conflicts(conflicts) => conflicts,
+        Merge::Clean(_) => panic!("both sides added the same nested field differently"),
+    };
+    assert_eq!(conflicts.len(), 1, "{conflicts:?}");
+    assert_eq!(conflicts[0].field, "server.tls");
+    assert_eq!(conflicts[0].kind, ConflictKind::AddAdd);
+}
+
+#[test]
+fn a_nested_delete_modify_is_reported_with_its_path() {
+    let base = nested(&[(
+        "server",
+        vec![("port", Inode::Int(80)), ("tls", Inode::Bool(true))],
+    )]);
+    let left = nested(&[("server", vec![("port", Inode::Int(80))])]);
+    let right = nested(&[(
+        "server",
+        vec![("port", Inode::Int(80)), ("tls", Inode::Bool(false))],
+    )]);
+    let conflicts = match merge(&base, &left, &right).expect("merge") {
+        Merge::Conflicts(conflicts) => conflicts,
+        Merge::Clean(_) => panic!("delete versus modify must conflict"),
+    };
+    assert_eq!(conflicts.len(), 1, "{conflicts:?}");
+    assert_eq!(conflicts[0].field, "server.tls");
+    assert_eq!(conflicts[0].kind, ConflictKind::DeleteModify);
+}
+
+#[test]
+fn a_two_level_conflict_reports_the_leaf_path() {
+    let build = |port: i64| {
+        let mut module = InfinityModule::new();
+        let leaf = module.push(Inode::Int(port));
+        let middle = module.push(Inode::Table {
+            fields: vec![("port".to_string(), leaf)],
+        });
+        let outer = module.push(Inode::Table {
+            fields: vec![("server".to_string(), middle)],
+        });
+        let root = module.push(Inode::Table {
+            fields: vec![("config".to_string(), outer)],
+        });
+        module.set_root(Some(root));
+        module
+    };
+    let base = build(80);
+    let left = build(8080);
+    let right = build(9090);
+    let conflicts = match merge(&base, &left, &right).expect("merge") {
+        Merge::Conflicts(conflicts) => conflicts,
+        Merge::Clean(_) => panic!("a deep leaf conflict must not merge cleanly"),
+    };
+    assert_eq!(conflicts[0].field, "config.server.port");
+}
+
+/// A secret inside a nested table is never walked into: the report names the
+/// table, and the outcome says nothing about whether the secrets match.
+#[test]
+fn a_secret_inside_a_nested_table_keeps_the_parent_conflict() {
+    use active_infinity::SecretBytes;
+
+    let with_secret = |value: &[u8]| {
+        let mut module = InfinityModule::new();
+        let secret = module.push(Inode::Secret(SecretBytes::new(value.to_vec())));
+        let inner = module.push(Inode::Table {
+            fields: vec![("token".to_string(), secret)],
+        });
+        let root = module.push(Inode::Table {
+            fields: vec![("server".to_string(), inner)],
+        });
+        module.set_root(Some(root));
+        module
+    };
+    let base = with_secret(b"plain");
+    let left = with_secret(b"a");
+    let right = with_secret(b"b");
+    let conflicts = match merge(&base, &left, &right).expect("merge") {
+        Merge::Conflicts(conflicts) => conflicts,
+        Merge::Clean(_) => panic!("a secret field must not merge"),
+    };
+    assert_eq!(conflicts.len(), 1, "{conflicts:?}");
+    assert_eq!(conflicts[0].field, "server");
+    assert_eq!(conflicts[0].kind, ConflictKind::ModifyModify);
+}

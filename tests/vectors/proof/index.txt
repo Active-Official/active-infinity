@@ -1,0 +1,4 @@
+# name image proof expected
+good good.ainf good.json ok
+tampered good.ainf tampered.json infinity/proof
+wrong wrong.ainf good.json infinity/proof

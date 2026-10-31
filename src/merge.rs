@@ -53,7 +53,8 @@ pub enum ConflictKind {
 /// One conflicting field.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Conflict {
-    /// Dotted field path (`""` for the root itself).
+    /// Dotted field path from the module root (`"server.port"`); `""` names the
+    /// root itself.
     pub field: String,
     /// Why the merge refused to choose.
     pub kind: ConflictKind,
@@ -162,10 +163,20 @@ pub fn merge(
         let l = left_map.get(name).copied();
         let r = right_map.get(name).copied();
         match decide(base, left, right, b, l, r)? {
-            Decision::Conflict(kind) => conflicts.push(Conflict {
-                field: name.to_string(),
-                kind,
-            }),
+            Decision::Conflict(kind) => {
+                // Describe the conflict as precisely as the shapes allow: both
+                // sides being tables means the disagreement is inside them, and
+                // a dotted path names the field that actually differs.
+                let before = conflicts.len();
+                let ctx = MergeCtx { base, left, right };
+                ctx.nested_conflicts(name, b, l, r, 0, &mut conflicts)?;
+                if conflicts.len() == before {
+                    conflicts.push(Conflict {
+                        field: name.to_string(),
+                        kind,
+                    });
+                }
+            }
             decision => {
                 decisions.insert(name.to_string(), decision);
             }
@@ -281,6 +292,104 @@ fn decide(
         ConflictKind::ModifyModify
     };
     Ok(Decision::Conflict(kind))
+}
+
+/// The fields of a table node, keyed by name.
+fn table_fields(module: &InfinityModule, id: NodeId) -> Option<BTreeMap<&str, NodeId>> {
+    match module.get(id) {
+        Some(Inode::Table { fields }) => Some(
+            fields
+                .iter()
+                .map(|(name, id)| (name.as_str(), *id))
+                .collect(),
+        ),
+        _ => None,
+    }
+}
+
+/// The three modules a conflict walk needs.
+struct MergeCtx<'a> {
+    base: &'a InfinityModule,
+    left: &'a InfinityModule,
+    right: &'a InfinityModule,
+}
+
+impl MergeCtx<'_> {
+    /// Describe a conflict inside two tables with dotted paths.
+    ///
+    /// The caller has already established that the two top-level values
+    /// disagree. When both are tables, the disagreement is inside them:
+    /// recurse per field so the report names `server.port` rather than
+    /// `server`. A subtree that reaches a secret is never walked (the parent
+    /// conflict stands), and the depth is capped so a pathological shape cannot
+    /// recurse without bound. Nothing is appended when the shapes cannot be
+    /// described, which lets the caller fall back to the field's own conflict.
+    fn nested_conflicts(
+        &self,
+        path: &str,
+        b: Option<NodeId>,
+        l: Option<NodeId>,
+        r: Option<NodeId>,
+        depth: usize,
+        out: &mut Vec<Conflict>,
+    ) -> Result<()> {
+        const MAX_DEPTH: usize = 64;
+        if depth >= MAX_DEPTH {
+            return Ok(());
+        }
+        let (Some(left_id), Some(right_id)) = (l, r) else {
+            return Ok(());
+        };
+        if subtree_has_secret(self.left, left_id) || subtree_has_secret(self.right, right_id) {
+            return Ok(());
+        }
+        let (Some(left_fields), Some(right_fields)) = (
+            table_fields(self.left, left_id),
+            table_fields(self.right, right_id),
+        ) else {
+            return Ok(());
+        };
+        let base_fields = b.and_then(|id| table_fields(self.base, id));
+        let names: BTreeSet<&str> = left_fields
+            .keys()
+            .chain(right_fields.keys())
+            .copied()
+            .collect();
+        for name in names {
+            let child_base = base_fields
+                .as_ref()
+                .and_then(|fields| fields.get(name))
+                .copied();
+            let child_left = left_fields.get(name).copied();
+            let child_right = right_fields.get(name).copied();
+            if let Decision::Conflict(kind) = decide(
+                self.base,
+                self.left,
+                self.right,
+                child_base,
+                child_left,
+                child_right,
+            )? {
+                let child_path = format!("{path}.{name}");
+                let before = out.len();
+                self.nested_conflicts(
+                    &child_path,
+                    child_base,
+                    child_left,
+                    child_right,
+                    depth + 1,
+                    out,
+                )?;
+                if out.len() == before {
+                    out.push(Conflict {
+                        field: child_path,
+                        kind,
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Compare two optional nodes across modules by their canonical subtree image.

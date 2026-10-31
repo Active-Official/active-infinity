@@ -61,8 +61,12 @@ would leak equality:
   directly. Comparing prepared indices instead would miss a retarget between two
   shape-identical nodes (silent loss) and would report a conflict whenever one
   side added a node (spurious).
-- Nested conflicts are reported at the top-level field name in v1. A dotted
-  path and recursive resolution are additive extensions.
+- Nested conflicts are reported with a **dotted path** (`server.port`) to the
+  leaf that differs, with the leaf's own kind (`AddAdd`, `ModifyModify`,
+  `DeleteModify`). The walk stops at 64 levels, never descends into a subtree
+  that reaches a secret, and falls back to the parent field's conflict when the
+  shapes cannot be described.
+- Resolution is still all-or-nothing: any conflict returns no module.
 - A module with any metadata on one side only cannot be merged by this API. A
   caller that needs to merge such modules strips the metadata it does not need
   (or merges it itself) before calling; the merge never discards it.

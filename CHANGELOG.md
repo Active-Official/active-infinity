@@ -1,5 +1,39 @@
 # Changelog - Active Infinity
 
+## 2.2.0 - 2026-10-31
+
+Additive release from the Active Maturity Program. The `AINF` wire format is
+still 1.0 and canonical bytes are unchanged.
+
+### Added
+
+- **Optional zstd compression** (`zstd`, `compress`): plain, dictionary and
+  dictionary training, with a mandatory output ceiling on decompression. The
+  content hash stays over the uncompressed canonical bytes.
+- **Detached Ed25519 signature envelope** (`signatures`) and the
+  **content-addressed store** (`Store`): dedupe, hash-addressed get, integrity
+  check on read.
+- **Versioned conformance pack** (`conformance/manifest.json`) and
+  `conformance run` with a JSON scorecard.
+- **C ABI** (`ffi/active-infinity-ffi`, ABI 1) and a WASM build with exactly one
+  host import; used by the polyglot bindings.
+- **Polyglot matrix**: C, C++, Python, Go, JavaScript, TypeScript, Java,
+  Kotlin/JVM, Scala, C#, Swift, Zig, Ruby, PHP, Dart, Kotlin/Native,
+  AssemblyScript, Lua and shell, all validated against the shared manifest,
+  with thin ARP1 RPC clients for every runtime.
+- **`active-infinity-cli` 0.2.0**: `dict train/apply`, `bench`, an
+  example-rich `help`, stable exit codes and end-to-end tests.
+
+### Performance
+
+- In-place canonical remap and batch encode; measured competitor tables in
+  `docs/spec/performance.md`.
+
+### Security
+
+- zstd-safe 8.2.0 (RUSTSEC-2026-0395..0406) and rkyv 0.8.18
+  (RUSTSEC-2026-0235) replace the affected versions.
+
 ## 2.1.0 - 2026-10-28
 
 Hardening release. No wire-format change; `AINF` is still 1.0.

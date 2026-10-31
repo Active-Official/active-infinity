@@ -14,7 +14,7 @@ keywords = ["active", "infinity", "cli", "codec", "conformance"]
 categories = ["command-line-utilities", "encoding"]
 
 [dependencies]
-active-infinity = { path = "../..", version = "2.1.0", features = ["active-core", "json", "zstd"] }
+active-infinity = { path = "../..", version = "2.2.0", features = ["active-core", "json", "zstd"] }
 serde_json = "1"
 
 [[bin]]

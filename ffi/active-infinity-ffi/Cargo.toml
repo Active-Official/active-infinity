@@ -15,7 +15,7 @@ name = "active_infinity_ffi"
 crate-type = ["cdylib", "staticlib", "rlib"]
 
 [dependencies]
-active-infinity = { path = "../..", version = "2.1.0", features = ["active-core", "json"] }
+active-infinity = { path = "../..", version = "2.2.0", features = ["active-core", "json"] }
 # `active-core` reaches getrandom 0.2. The custom backend keeps the WASM module
 # free of wasm-bindgen glue: the host supplies one `active_random_fill` import.
 getrandom = { version = "0.2", features = ["custom"] }

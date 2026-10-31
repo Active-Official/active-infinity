@@ -45,6 +45,10 @@ blake3 = "1.5"
 name = "codec"
 harness = false
 
+[[bench]]
+name = "bakeoff"
+harness = false
+
 [lib]
 name = "active_infinity"
 path = "src/lib.rs"

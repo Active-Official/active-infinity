@@ -15,3 +15,4 @@ immutable once accepted: a later ADR supersedes it and says so.
 | [0008](0008-dependency-policy.md) | Dependency policy and supply chain |
 | [0009](0009-protobuf-projection.md) | Protobuf interop projection |
 | [0010](0010-no-public-secret-accessor.md) | No public secret accessor |
+| [0011](0011-bakeoff-methodology.md) | Public bakeoff methodology and CI regression policy |

@@ -14,11 +14,35 @@
 
 Published crate family: `active-infinity`, `active-infinity-core`,
 `active-infinity-stream`, `active-infinity-interop`,
-`active-infinity-wasm` and the reserved `active-infinity-cli`. See [`REGISTRY.md`](REGISTRY.md) for the module map.
+`active-infinity-wasm` and `active-infinity-cli`. See [`REGISTRY.md`](REGISTRY.md) for the module map.
 
 Thank you for opening this page. Whether you build configuration systems, data planes, or multi-agent software, Active Infinity is the binary form designed so that **what you meant is what moves**—for humans, for services, and for AI agents that exchange modules at machine speed.
 
 If Infinity saves you from one silent corruption, one leaked secret in a log, or one “which version of this blob is authoritative?” debate, give the repo a star so the next engineer or agent finds it first.
+
+---
+
+## Install and use the CLI
+
+```text
+cargo install active-infinity-cli          # from crates.io
+cargo install --path cli/active-infinity-cli   # from this checkout
+```
+
+```text
+active-infinity-cli encode app.active --name app.active --output app.ainf
+active-infinity-cli validate app.ainf
+active-infinity-cli hash app.ainf
+active-infinity-cli decode app.ainf              # redacted JSON
+active-infinity-cli dict train --output frames.dict tests/vectors/valid/*.ainf
+active-infinity-cli conformance run --manifest conformance/manifest.json
+```
+
+Exit codes are stable: `0` success, `1` validation/codec failure (message starts
+with the `infinity/...` code), `2` usage. The manual page is
+[`docs/man/active-infinity-cli.1`](docs/man/active-infinity-cli.1); the full
+reference, including `store`, `stream` and `bench`, is
+[`cli/active-infinity-cli/README.md`](cli/active-infinity-cli/README.md).
 
 ---
 

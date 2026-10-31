@@ -1,0 +1,86 @@
+.TH ACTIVE-INFINITY-CLI 1 "2026-10-31" "active-infinity-cli 0.2.0" "User Commands"
+.SH NAME
+active-infinity-cli \- encode, validate, hash and store Active Infinity modules
+.SH SYNOPSIS
+.B active-infinity-cli
+.I command
+.RI [ options ]
+.SH DESCRIPTION
+.B active-infinity-cli
+is the production command-line surface for the Active Infinity codec. Every
+command calls the Rust reference, so bytes, hashes and redaction match the
+library. Without
+.B --output
+commands that emit bytes write to standard output.
+.SH COMMANDS
+.TP
+.B encode \fIsource.active\fR [--name NAME] [--output PATH]
+Compile Active text to canonical AINF. The module name does not affect the
+content hash.
+.TP
+.B decode \fIimage.ainf\fR
+Validate, then print the redacted JSON projection. Secret values never appear.
+.TP
+.B validate \fIimage.ainf\fR
+Fail-closed validation; prints node and byte counts.
+.TP
+.B hash \fIimage.ainf\fR
+Print the Blake3 content hash over the canonical image (64 hex characters).
+.TP
+.B stream \fIimage.ainf\fR
+Reassemble an AINS stream and print the image hash.
+.TP
+.B store put \fIimage.ainf\fR [--root DIR]
+.TQ
+.B store get \fIhash\fR [--root DIR] [--output PATH]
+Content-addressed local store (default root
+.IR .active-store ).
+.TP
+.B dict train --output \fIdict\fR [--size N] \fIsample\fR...
+Train a zstd dictionary. The default size is derived from the corpus; a size
+larger than the samples can support is refused.
+.TP
+.B dict apply --dictionary \fIdict\fR [--decompress] [--level N] [--max-bytes N] \fIinput\fR
+Compress with a dictionary, or decompress with an explicit output ceiling
+(default 64 MiB).
+.TP
+.B bench \fIencode|decode|validate|hash\fR \fIfile\fR [--iterations N]
+Local microbench; prints p50, p95 and p99 in nanoseconds.
+.TP
+.B conformance run [--manifest PATH]
+Run the vector pack and print a JSON scorecard. Any failing case fails the
+command.
+.TP
+.B doctor
+Version, compiled features and exit codes.
+.TP
+.B help
+Full usage with examples.
+.SH EXIT STATUS
+.TP
+.B 0
+Success.
+.TP
+.B 1
+Validation, verification, I/O or codec failure. The message starts with the
+stable
+.I infinity/...
+code.
+.TP
+.B 2
+Usage error: unknown command, missing argument or bad flag.
+.SH EXAMPLES
+.nf
+active-infinity-cli encode app.active --name app.active --output app.ainf
+active-infinity-cli hash app.ainf
+active-infinity-cli decode app.ainf
+active-infinity-cli dict train --output frames.dict tests/vectors/valid/*.ainf
+active-infinity-cli dict apply --dictionary frames.dict --output app.ainf.zst app.ainf
+active-infinity-cli bench validate app.ainf --iterations 100
+fi
+.SH NOTES
+Compression is transport and storage only: the content hash is always computed
+over the uncompressed canonical image. Diagnostics never print secret payloads
+or raw capability authority.
+.SH SEE ALSO
+.BR active-rpc-cli (1)

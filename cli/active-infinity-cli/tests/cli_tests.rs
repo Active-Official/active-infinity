@@ -327,3 +327,17 @@ fn proof_verify_without_a_sidecar_is_a_usage_error() {
     let output = run(&["proof", "verify"]);
     assert_eq!(output.status.code(), Some(2));
 }
+
+#[test]
+fn version_prints_the_cli_and_library() {
+    for flag in ["version", "--version", "-V"] {
+        let output = run(&[flag]);
+        assert!(output.status.success(), "{flag}: {}", stderr(&output));
+        let text = stdout(&output);
+        assert!(
+            text.contains(concat!("active-infinity-cli ", env!("CARGO_PKG_VERSION"))),
+            "{text}"
+        );
+        assert!(text.contains("(active-infinity "), "{text}");
+    }
+}

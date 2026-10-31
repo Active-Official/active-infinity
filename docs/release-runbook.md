@@ -55,6 +55,17 @@ maturity release; the executed record lives in `STATUS.md`.
 
 ## Executed record
 
-| Date | Library | CLI | Remotes |
-|------|---------|-----|---------|
-| 2026-10-31 | 2.3.0 | 0.3.0 | Active-Official + RatioArtificiosa, same SHA |
+| Date | Library | CLI | Commit | Tag (both remotes) | crates.io |
+|------|---------|-----|--------|--------------------|-----------|
+| 2026-10-31 | 2.3.0 | 0.3.0 | `fd3f23d` (`v2.3.0^{}`) | `f67ba71` on Active-Official and RatioArtificiosa, identical peeled SHA | `active-infinity` 2.3.0, `active-infinity-cli` 0.3.0 |
+| 2026-10-31 | 2.2.0 | 0.2.0 | `ddc4e3f` (`v2.2.0^{}`) | backfilled tag for the published 2.2.0 | `active-infinity` 2.2.0 |
+
+Release commit `fd3f23d`: CI 41203155120 (Active-Official) and 41203157346
+(RatioArtificiosa), both green. Tag object `f67ba71f86505fca2cd5b3bd0db8a2fa0de5884f`
+on both remotes, peeled to `fd3f23dac0425106398adcd42b41a995b82994c3`.
+
+Install verification: `cargo install active-infinity-cli --version 0.3.0
+--locked` then `doctor` and `conformance run` from the registry build.
+
+A CLI-only patch release is recorded here with its commit and does not move the
+library tag: the tag names the library version, and the CLI has its own.

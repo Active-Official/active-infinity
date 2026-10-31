@@ -86,6 +86,14 @@ fn run(args: Vec<String>) -> Result<(), String> {
             println!("{}", help_text());
             Ok(())
         }
+        "version" | "--version" | "-V" => {
+            println!(
+                "active-infinity-cli {} (active-infinity {})",
+                env!("CARGO_PKG_VERSION"),
+                active_infinity::VERSION
+            );
+            Ok(())
+        }
         "doctor" => {
             println!(
                 "active-infinity-cli {} (active-infinity {})",
@@ -545,7 +553,7 @@ fn hex(bytes: &[u8]) -> String {
 }
 
 fn usage() -> String {
-    "usage: active-infinity-cli <encode|decode|validate|hash|stream|store|dict|bench|conformance|doctor|help> ...\n       run `active-infinity-cli help` for examples"
+    "usage: active-infinity-cli <encode|decode|validate|hash|stream|store|dict|bench|conformance|doctor|version|help> ...\n       run `active-infinity-cli help` for examples"
         .to_string()
 }
 

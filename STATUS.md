@@ -8,7 +8,7 @@ has a test or a CI job behind it; residual risks are listed, not hidden.
 | Item | Value |
 |------|-------|
 | Library | `active-infinity` 2.3.0 |
-| CLI | `active-infinity-cli` 0.3.0 |
+| CLI | `active-infinity-cli` 0.3.1 |
 | AINF wire format | 1.0 (unchanged through the maturity program) |
 | CI | every job green on both `Active-Official` and `RatioArtificiosa` at the release commit |
 
@@ -23,7 +23,7 @@ has a test or a CI job behind it; residual risks are listed, not hidden.
 | C-6 transports (RPC) | complete | see `active-rpc/STATUS.md` |
 | C-7 speed and bakeoffs | complete | `docs/spec/performance.md`, `perf-gate` |
 | C-8 polyglot matrix (20 languages) | complete | `polyglot/STATUS.md`, `polyglot-rpc`, `polyglot-matrix` |
-| C-9 CLIs | complete | `active-infinity-cli` 0.3.0 on crates.io, man page, CLI tests |
+| C-9 CLIs | complete | `active-infinity-cli` 0.3.1 on crates.io, man page, CLI tests |
 | C-10 hardening | complete | nightly fuzz, `polyglot-rpc` strict mode, supply-chain gates, review rounds 27-28 |
 | C-11 innovations | complete | TTL caps and receipts (RPC), replay (RPC), WASM tools (RPC), proof sidecars, three-way merge, topics (RPC) |
 | C-12 interop | complete | `docs/spec/projection.md` authority rules, bridge spec in the RPC repository |

@@ -12,7 +12,7 @@ project. Module facade sources live in `facades/` and are excluded from the main
 | [`active-infinity-stream`](https://crates.io/crates/active-infinity-stream) | 0.1.1 | Bounded streaming frames and canonical reassembly |
 | [`active-infinity-interop`](https://crates.io/crates/active-infinity-interop) | 0.1.1 | Active IR, redacted JSON and Protobuf projections |
 | [`active-infinity-wasm`](https://crates.io/crates/active-infinity-wasm) | 0.1.1 | Reserved WebAssembly binding namespace |
-| [`active-infinity-cli`](https://crates.io/crates/active-infinity-cli) | 0.3.0 | `encode`, `validate`, `hash`, `decode`, `stream`, `store`, `dict`, `proof`, `bench` and `conformance` |
+| [`active-infinity-cli`](https://crates.io/crates/active-infinity-cli) | 0.3.1 | `encode`, `validate`, `hash`, `decode`, `stream`, `store`, `dict`, `proof`, `bench` and `conformance` |
 
 Each facade is a thin, versioned re-export of the shipped module. The main
 crate remains the implementation and the source of truth.

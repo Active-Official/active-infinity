@@ -1,5 +1,10 @@
 # Changelog - Active Infinity
 
+## CLI 0.3.1 - 2026-10-31
+
+- `version` (also `--version`, `-V`) prints the CLI and library versions, and
+  the command appears in `help`.
+
 ## 2.3.0 - 2026-10-31
 
 Maturity release for the Active Maturity Program: proof sidecars and the

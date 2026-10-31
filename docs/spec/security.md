@@ -93,3 +93,21 @@ that would violate one stops and needs an ADR.
 Security reports go to the address in `SECURITY.md`. Please include the vector,
 the code returned, and the expected behaviour. Do not include secret material in
 a report.
+
+## 7. Module maximum (absolute-max baseline)
+
+Active Infinity has no capability model of its own; the cap kernel lives in
+`active-rpc`. The properties below are the codec's maximum bar, each mapped to
+the code that enforces it and the test that would fail if it regressed.
+
+| Trait | Enforcement | Evidence | Status |
+|---|---|---|---|
+| Canonical identity | Blake3 over the canonical payload; `validate_canonical` proves a received image re-encodes to itself | `tests/conformance_tests.rs`, `tests/property_tests.rs` | enforced |
+| Structural secrets | `SecretBytes` is a kind with no `Display`/`Serialize`; locators are promoted at canonicalization | `tests/redteam_tests.rs`, `tests/invariant_gate.rs` | enforced |
+| Anti-oracle equality | `SecretBytes::eq` is always false; module equality blinds payloads; merge refuses secret fields | `tests/merge_tests.rs`, `tests/redteam_tests.rs` | enforced |
+| Fail-closed validation | every count, range, edge and reachability check runs before allocation; `DecodeOpts::paranoid()` for untrusted input | `tests/conformance_tests.rs`, fuzz `decode` | enforced |
+| Bounded resources | `Limits` cover total bytes, depth, nodes, strings and arrays; streams are bounded by the declared size | `tests/redteam_tests.rs` (limit and stream cases), `tests/perf_budget.rs` | enforced |
+| Projection authority | JSON/Protobuf are derived views; a consumer re-validates the AINF bytes (`projection.md` §0) | `tests/projection_authority_tests.rs` | enforced |
+| Proof vs signature | a proof sidecar is integrity about an image; authenticity is the signature envelope, and a false `canonical` flag is refused | `tests/proof_tests.rs`, `tests/store_tests.rs` (`signed_store_object_verifies_and_rejects_tampering`) | enforced (store/CLI verify under M-2.1) |
+| Merge conservatism | metadata compares by value and conflicts; secret-bearing fields always conflict; node ceiling bounds the work | `tests/merge_tests.rs` | enforced (nested paths under M-2.3) |
+| Store integrity | content-addressed get/put by hash; signature verify on the store path is the next step | `tests/store_tests.rs` | planned (M-2.1) |

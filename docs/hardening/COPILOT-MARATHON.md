@@ -195,7 +195,24 @@ before any change, as with every other section.
 Resume here: verify each claim against the current tree, then follow the usual
 loop (regression test first, fix, full gates, log the disposition).
 
-**Finding 2 fixed, 2026-10-31** (`tests/marathon_canonical_tests.rs`): the claim
+**Finding 3 assessment (no change yet):** the promotion rule clears a node's
+taint when its direct parent is not a secret, so a non-secret node *inside* a
+secret subtree (an `Env` under a `SecretRef`, say) exposes its own children. The
+concrete leak is narrower than the finding states: `Env.name` and
+`InterpPart::Literal` are inline text, not string-table nodes, so promotion
+cannot move them; what promotion covers is `Inode::Str` nodes. The next session
+decides the rule — promote every `Str` reachable only through secret parents
+(a one-pass exposure BFS that stops descending at a secret node), or declare
+locator literals structural and document it — because either choice changes
+hashes for modules whose locators carry string nodes, and a wrong rule would
+promote ordinary field values.
+
+**Finding 4 assessment (no change yet):** `redact_text` substitutes occurrences
+of secret literals with `SECRET_MARKER`; if a secret is a substring of the marker
+itself (`SEC`, `*`, `S`), the substitution re-inserts it. The fix is to refuse
+the encode (a marker collision) rather than emit an image whose redaction
+contains the secret, but it needs the same decision as finding 3 about which
+strings are redacted. (`tests/marathon_canonical_tests.rs`): the claim
 was correct. `canonical_order` built its roots from the root node, the binding
 targets **sorted by numeric id**, the annotation subjects and the constraint
 expressions; the spec and `InfinityModule::roots` order bindings by **name**.

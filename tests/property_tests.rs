@@ -254,8 +254,26 @@ fn canonicalization_is_a_fixpoint_for_secret_metadata() {
             ..active_infinity::Provenance::default()
         }));
 
-        let first = encode(&module).unwrap();
+        // A secret that is a substring of the marker cannot be represented in
+        // redacted text: the encode refuses rather than publishing it. For every
+        // other module the canonical form is still a fixpoint.
+        let first = match encode(&module) {
+            Ok(image) => image,
+            Err(error) => {
+                prop_assert_eq!(error.code(), "infinity/encode");
+                prop_assert!(
+                    secret.contains('*')
+                        || "***SECRET***".contains(secret.as_str()),
+                    "only a marker collision may refuse: {secret:?}"
+                );
+                return Ok(());
+            }
+        };
         let second = encode(&decode(&first).unwrap()).unwrap();
+        prop_assert!(
+            !"***SECRET***".contains(secret.as_str()) || !note.contains(secret.as_str()),
+            "a marker-colliding secret reached redacted text"
+        );
         prop_assert_eq!(first, second, "canonical form must be a fixpoint");
     });
 }

@@ -694,48 +694,42 @@ fn extension_payloads_must_be_packed() {
 }
 
 #[test]
-fn redaction_is_idempotent_when_a_secret_is_part_of_the_marker() {
-    // "S" is a substring of "***SECRET***": inserting the marker would
-    // reintroduce the secret, so the whole text must collapse to the marker and
-    // a second canonicalization pass must be a fixpoint. The order of the secret
-    // table must not matter, and a second, ordinary secret in the same module
-    // must not change the outcome.
-    for (index, secrets) in [
+fn a_secret_inside_the_marker_is_refused_and_plain_marker_secrets_are_fine() {
+    // "S" is a substring of "***SECRET***". Inserting the marker into text that
+    // contains "S" would publish the secret as part of the marker, so the encode
+    // refuses. A module that carries the same secret but no text to redact is
+    // still encodable and remains a fixpoint.
+    let mut refused = fixture();
+    let secret = refused.push(Inode::Secret(SecretBytes::from("S")));
+    refused.bind("secret", secret);
+    let root = refused.root().unwrap();
+    refused.annotate(root, AnnotationKind::Intent("prefix S".into()));
+    let error = encode(&refused).expect_err("the marker cannot carry the secret");
+    assert_eq!(error.code(), "infinity/encode");
+    assert!(
+        error.to_string().contains("marker"),
+        "the reason names the marker, got {error}"
+    );
+
+    for secrets in [
         vec!["S"],
         vec!["S", "hunter2-secret"],
         vec!["hunter2-secret", "S"],
-    ]
-    .into_iter()
-    .enumerate()
-    {
+    ] {
         let mut module = fixture();
         for (position, secret) in secrets.iter().enumerate() {
             let id = module.push(Inode::Secret(SecretBytes::from(*secret)));
-            module.bind(format!("secret-{index}-{position}"), id);
+            module.bind(format!("secret-{position}"), id);
         }
+        // Text that carries no marker-colliding secret still redacts normally.
         let root = module.root().unwrap();
-        module.annotate(
-            root,
-            AnnotationKind::Intent("prefix S hunter2-secret".into()),
-        );
-
+        module.annotate(root, AnnotationKind::Intent("no secret here".into()));
         let first = encode(&module).unwrap();
         let second = encode(&decode(&first).unwrap()).unwrap();
         assert_eq!(
             first, second,
             "canonical form must be a fixpoint for {secrets:?}"
         );
-
-        let decoded = decode(&first).unwrap();
-        let intent = decoded
-            .annotations()
-            .iter()
-            .find_map(|annotation| match &annotation.kind {
-                AnnotationKind::Intent(text) => Some(text.clone()),
-                _ => None,
-            })
-            .expect("the intent annotation survives");
-        assert_eq!(intent, active_infinity::interop::SECRET_MARKER);
     }
 }
 
@@ -786,17 +780,18 @@ fn provenance_keys_that_collide_after_redaction_are_refused() {
     // emitting two entries for one key would produce an image the validator
     // refuses, so the encoder refuses first.
     let mut module = fixture();
-    let secret = module.push(Inode::Secret(SecretBytes::from("S")));
+    let secret = module.push(Inode::Secret(SecretBytes::from("hunter2-secret")));
     module.bind("secret", secret);
     module.set_provenance(Some(Provenance {
         producer: Some("tester".into()),
         entries: vec![
             ProvEntry {
-                key: "a-S".into(),
+                key: "a hunter2-secret".into(),
                 value: ProvValue::Text("one".into()),
             },
+            // Redacts to the same key as the entry above.
             ProvEntry {
-                key: "b-S".into(),
+                key: "a ***SECRET***".into(),
                 value: ProvValue::Text("two".into()),
             },
         ],

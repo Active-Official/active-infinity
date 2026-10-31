@@ -6,3 +6,4 @@
 # everyone who runs the test benefits from these saved cases.
 cc 4d7698212f4d1916e9ebf6b0302b43f4f920713294045c12a865782b6b804f8a # shrinks to text = "", secrets = [""]
 cc 6e85dca826434d8640ca5582ea71b3918b0857a7e522e6ab75d9dc345c340484 # shrinks to secret = "*", note = "", key = ""
+cc 1fb308b9f9e8e8d67df5e3010a62cc9e06ad601a973f43c439765f5c3efa00c5 # shrinks to secret = "*", note = "*", key = ""

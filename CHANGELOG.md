@@ -27,6 +27,16 @@
   canonical.
 - **Store**: `Store::put` now enforces the canonical form it documents instead of
   accepting any structurally valid image.
+- **Secrets**: the promotion rule now treats a secret node as a barrier, so a
+  string reachable only through a secret — the fallback of `secret(env.X ?: …)`,
+  an interpolated literal — moves to the secret heap instead of the public string
+  heap, even when a non-secret node (`Env`, `Interpolate`) sits between it and the
+  secret. Hash-affecting for such modules.
+- **Secrets**: a secret that is a substring of `***SECRET***` (`S`, `SEC`, `*`)
+  can no longer be redacted — inserting the marker would publish it. An encode
+  that would redact text in that situation now fails with `infinity/encode`
+  instead of writing the secret into the image; a module with such a secret and
+  no text to redact still encodes.
 
 ### Added
 

@@ -16,7 +16,7 @@ the code → regression test first → minimal fix → targeted tests + clippy �
 |----|---------|-------|-------|------------------------------------|---------|
 | I-01 | layout / header | `src/layout.rs` | CLEAN (round 2 open items fixed) | 10 fixed, 1 rejected, 0 open | this commit |
 | I-02 | validate | `src/validate.rs` | **CLEAN** (round 3: 3 high fixed, 10 triaged) | 24 fixed, 10 rejected, 0 open | this commit |
-| I-03 | encode / canonical | `src/encode.rs`, `src/canonical.rs` | in progress (finding 2 fixed; rest pending) | 1 fixed, 0 rejected, 0 open | this commit |
+| I-03 | encode / canonical | `src/encode.rs`, `src/canonical.rs` | in progress (findings 2, 3 and 4 fixed; rest pending) | 3 fixed, 0 rejected, 0 open | this commit |
 | I-04 | decode / view | `src/decode.rs`, `src/view.rs` | pending | — | — |
 | I-05 | IR / units | `src/ir.rs`, `src/unit.rs` | pending | — | — |
 | I-06 | stream / delta | `src/stream.rs` | pending | — | — |
@@ -212,7 +212,34 @@ of secret literals with `SECRET_MARKER`; if a secret is a substring of the marke
 itself (`SEC`, `*`, `S`), the substitution re-inserts it. The fix is to refuse
 the encode (a marker collision) rather than emit an image whose redaction
 contains the secret, but it needs the same decision as finding 3 about which
-strings are redacted. (`tests/marathon_canonical_tests.rs`): the claim
+strings are redacted.
+
+**Findings 3 and 4 fixed, 2026-10-31** (`tests/marathon_secrets_tests.rs`, 5
+tests; three fail against the pre-fix tree, with the leaked heap captured in the
+failure output):
+
+- **Finding 3, promotion by exposure.** `promote_secret_locators` now computes
+  the public set as a breadth-first walk from `roots()` that *stops at a secret
+  node*: what a secret references is locator material, not public data. Every
+  `Str` that is referenced and not public is promoted to `Inode::Secret`. An env
+  fallback and an interpolated fallback (the finding's "one level deeper" case)
+  no longer reach the public string heap. Inline `Env.name` and
+  `InterpPart::Literal` text stay metadata by design: they are structural parts of
+  the locator expression, not the literal a `SecretRef` reads, and they are
+  documented as such.
+- **Finding 4, marker collision.** `try_redact_text` refuses when a secret is a
+  substring of `SECRET_MARKER` *and* the text actually contains it: the marker
+  cannot represent that secret, so the encode fails with `infinity/encode`
+  instead of publishing it. A module carrying such a secret with no text to
+  redact still encodes (nothing is inserted). The public
+  `interop::redact_text` projection keeps its infallible best-effort behaviour and
+  is documented as such.
+- Two existing tests encoded the old behaviour and were rewritten to the new
+  rule: the marker-collision test now asserts the refusal plus the
+  no-text case, and the provenance key-collision test uses an ordinary secret so
+  it still exercises the key-collision rule. The proptest now accepts the refusal
+  and asserts that a successful encode never let a marker-colliding secret reach
+  redacted text. (`tests/marathon_canonical_tests.rs`): the claim
 was correct. `canonical_order` built its roots from the root node, the binding
 targets **sorted by numeric id**, the annotation subjects and the constraint
 expressions; the spec and `InfinityModule::roots` order bindings by **name**.

@@ -148,19 +148,20 @@ pub(crate) fn prepare(module: &InfinityModule) -> Result<Prepared> {
         .iter()
         .map(|annotation| {
             let node = remap[annotation.node.index()];
-            let kind = match &annotation.kind {
-                AnnotationKind::Intent(text) => {
-                    AnnotationKind::Intent(redact_text(text, &secret_literals))
-                }
-                AnnotationKind::Constraint { source, expr } => AnnotationKind::Constraint {
-                    source: redact_text(source, &secret_literals),
+            let kind: Result<AnnotationKind> = match &annotation.kind {
+                AnnotationKind::Intent(text) => Ok(AnnotationKind::Intent(try_redact_text(
+                    text,
+                    &secret_literals,
+                )?)),
+                AnnotationKind::Constraint { source, expr } => Ok(AnnotationKind::Constraint {
+                    source: try_redact_text(source, &secret_literals)?,
                     expr: remap[expr.index()],
-                },
-                AnnotationKind::AiImmutable(flag) => AnnotationKind::AiImmutable(*flag),
+                }),
+                AnnotationKind::AiImmutable(flag) => Ok(AnnotationKind::AiImmutable(*flag)),
             };
-            Annotation { node, kind }
+            Ok(Annotation { node, kind: kind? })
         })
-        .collect();
+        .collect::<Result<Vec<Annotation>>>()?;
 
     // 4. Collect and sort every symbol table.
     let mut strings = Vec::new();
@@ -416,6 +417,26 @@ pub const SECRET_MARKER: &str = "***SECRET***";
 /// that secret, and a second canonicalization pass would then change the text
 /// again. In that case the whole text collapses to the marker, which is the one
 /// value the rule maps to itself.
+/// Redact free text for an image, refusing the one case the marker cannot
+/// represent.
+///
+/// When a secret is a substring of [`SECRET_MARKER`], inserting the marker would
+/// publish that secret as part of the text the image stores. There is no safe
+/// substitution, so the encode fails instead of writing it.
+pub(crate) fn try_redact_text(text: &str, secrets: &[String]) -> Result<String> {
+    let marker_tainted = secrets
+        .iter()
+        .any(|secret| !secret.is_empty() && SECRET_MARKER.contains(secret.as_str()));
+    if marker_tainted
+        && secrets
+            .iter()
+            .any(|secret| !secret.is_empty() && text.contains(secret.as_str()))
+    {
+        return Err(Error::Encode("a secret occurs inside the redaction marker"));
+    }
+    Ok(redact_text(text, secrets))
+}
+
 pub(crate) fn redact_text(text: &str, secrets: &[String]) -> String {
     let marker_tainted = secrets
         .iter()
@@ -451,15 +472,24 @@ fn redact_provenance(mut prov: Provenance, secrets: &[String]) -> Result<Provena
     if secrets.is_empty() {
         return Ok(prov);
     }
-    prov.producer = prov.producer.map(|text| redact_text(&text, secrets));
-    prov.model = prov.model.map(|text| redact_text(&text, secrets));
-    prov.tool = prov.tool.map(|text| redact_text(&text, secrets));
+    prov.producer = prov
+        .producer
+        .map(|text| try_redact_text(&text, secrets))
+        .transpose()?;
+    prov.model = prov
+        .model
+        .map(|text| try_redact_text(&text, secrets))
+        .transpose()?;
+    prov.tool = prov
+        .tool
+        .map(|text| try_redact_text(&text, secrets))
+        .transpose()?;
     for entry in &mut prov.entries {
         // Keys live in the string heap too: a copy there would be stored in the
         // image even though the projections hide it.
-        entry.key = redact_text(&entry.key, secrets);
+        entry.key = try_redact_text(&entry.key, secrets)?;
         if let ProvValue::Text(text) = &entry.value {
-            entry.value = ProvValue::Text(redact_text(text, secrets));
+            entry.value = ProvValue::Text(try_redact_text(text, secrets)?);
         }
     }
     Ok(prov)
@@ -474,48 +504,46 @@ fn promote_secret_locators(mut nodes: Vec<Inode>, module: &InfinityModule) -> Ve
     if nodes.is_empty() {
         return nodes;
     }
-    let mut exposed = vec![false; nodes.len()];
-    let mut mark = |id: NodeId| {
-        if let Some(slot) = exposed.get_mut(id.index()) {
-            *slot = true;
+    let count = nodes.len();
+    // Public nodes are the ones a root reaches without passing through a secret.
+    // A secret node is a barrier: what it references is locator material (the
+    // fallback of an env lookup, an interpolated literal), not public data.
+    let mut public = vec![false; count];
+    let mut queue: std::collections::VecDeque<NodeId> = module
+        .roots()
+        .into_iter()
+        .filter(|id| !id.is_none() && id.index() < count)
+        .collect();
+    while let Some(id) = queue.pop_front() {
+        if public[id.index()] {
+            continue;
         }
-    };
-    if let Some(root) = module.root() {
-        mark(root);
-    }
-    for (_, id) in module.bindings() {
-        mark(*id);
-    }
-    for annotation in module.annotations() {
-        mark(annotation.node);
-        if let AnnotationKind::Constraint { expr, .. } = &annotation.kind {
-            mark(*expr);
+        public[id.index()] = true;
+        if nodes[id.index()].is_secret() {
+            continue;
+        }
+        for child in nodes[id.index()].children() {
+            if child.index() < count && !public[child.index()] {
+                queue.push_back(child);
+            }
         }
     }
-    // A string is secret-only when every one of its dependents is a secret
-    // node and it is not itself a root.
-    let mut secret_only = vec![true; nodes.len()];
-    let mut referenced = vec![false; nodes.len()];
+    let mut referenced = vec![false; count];
     for node in &nodes {
         for child in node.children() {
-            let Some(slot) = secret_only.get_mut(child.index()) else {
-                continue;
-            };
-            referenced[child.index()] = true;
-            if !node.is_secret() {
-                *slot = false;
+            if let Some(slot) = referenced.get_mut(child.index()) {
+                *slot = true;
             }
         }
     }
     for (index, node) in nodes.iter_mut().enumerate() {
-        let eligible = referenced[index] && secret_only[index] && !exposed[index];
-        if !eligible {
+        if !referenced[index] || public[index] {
             continue;
         }
         if let Inode::Str(text) = node {
-            // Only promote when the literal actually looks like secret
-            // material; a secret node pointing at an empty or trivially short
-            // literal is still promoted, because structure is the signal.
+            // Only promote when the literal is reachable solely through secrets;
+            // promotion moves its bytes from the public string heap into the
+            // secret heap, so a shared or public string is never moved.
             *node = Inode::Secret(crate::ir::SecretBytes::from(text.clone()));
         }
     }

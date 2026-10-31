@@ -68,7 +68,8 @@ function encodeRequest(exports, { id, method, payload, capId, capMethods }) {
 		methodsLength = blob.length;
 		methodsCount = methods.length;
 	}
-	const outPointer = exports.allocate(payload.length + 4096);
+	const outCapacity = payload.length + 4096;
+	const outPointer = exports.allocate(outCapacity);
 
 	const length = exports.buildRequest(
 		BigInt(id),
@@ -81,8 +82,12 @@ function encodeRequest(exports, { id, method, payload, capId, capMethods }) {
 		methodsCount,
 		methodsLength,
 		outPointer,
+		outCapacity,
 	);
-	if (length <= 0) throw new Error(`AssemblyScript encoded ${length} bytes`);
+	if (length <= 0)
+		throw new Error(
+			`AssemblyScript encoded ${length} bytes (buffer too small)`,
+		);
 	return Buffer.from(new Uint8Array(memory.buffer, outPointer, length));
 }
 

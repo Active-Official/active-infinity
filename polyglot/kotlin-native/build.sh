@@ -10,22 +10,12 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 OUT="$ROOT/polyglot/kotlin-native"
 CACHE="${POLYGLOT_CACHE:-/cache}"
-VERSION="${KOTLIN_NATIVE_VERSION:-2.0.21}"
 KONAN="$CACHE/kotlin-native"
 # Keep the LLVM/libffi dependency downloads with the compiler so a fresh
 # container reuses them instead of re-downloading ~110 MB.
 export KONAN_DATA_DIR="${KONAN_DATA_DIR:-$CACHE/konan-data}"
 
-if [ ! -x "$KONAN/bin/konanc" ]; then
-  mkdir -p "$CACHE"
-  archive="$CACHE/kotlin-native-$VERSION.tar.gz"
-  if [ ! -f "$archive" ]; then
-    curl -fL "https://github.com/JetBrains/kotlin/releases/download/v${VERSION}/kotlin-native-prebuilt-linux-x86_64-${VERSION}.tar.gz" \
-      -o "$archive"
-  fi
-  tar -xzf "$archive" -C "$CACHE"
-  mv "$CACHE/kotlin-native-prebuilt-linux-x86_64-${VERSION}" "$KONAN"
-fi
+POLYGLOT_CACHE="$CACHE" bash "$OUT/install.sh"
 
 cargo build --release --manifest-path "$ROOT/ffi/active-infinity-ffi/Cargo.toml"
 

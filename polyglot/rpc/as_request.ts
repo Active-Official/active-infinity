@@ -37,7 +37,18 @@ export function buildRequest(
 	capMethodsCount: i32,
 	capMethodsLength: i32,
 	outPointer: usize,
+	outCapacity: i32,
 ): i32 {
+	// Refuse rather than write past the caller's output buffer: a raw store
+	// overflow would corrupt other module memory.
+	let needed = 16 + 4 + methodLength + 4 + 4 + payloadLength + 4;
+	if (capPointer != 0) {
+		needed += 16 + 4 + capMethodsLength + 56 + 3;
+	}
+	if (needed > outCapacity) {
+		return -1;
+	}
+
 	let cursor = outPointer;
 	store<u8>(cursor++, 0x41); // A
 	store<u8>(cursor++, 0x52); // R

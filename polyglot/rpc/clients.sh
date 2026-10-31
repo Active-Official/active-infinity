@@ -92,7 +92,8 @@ client_available() {
     assemblyscript) command -v node >/dev/null ;;
     shell) return 0 ;;
     ktnative) command -v konanc >/dev/null ||
-      [ -x "${POLYGLOT_CACHE:-/cache}/kotlin-native/bin/konanc" ] ;;
+      [ -x "${POLYGLOT_CACHE:-/cache}/kotlin-native/bin/konanc" ] ||
+      command -v curl >/dev/null ;;
     *) return 1 ;;
   esac
 }

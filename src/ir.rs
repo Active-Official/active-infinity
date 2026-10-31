@@ -570,9 +570,14 @@ impl fmt::Debug for Inode {
 
 /// Lowercase hex of a 32-byte digest.
 pub fn hash_hex(hash: &[u8; 32]) -> String {
+    // Two pushes per byte into one pre-sized buffer. The previous version
+    // formatted each byte with `format!`, which allocates 32 times per hash;
+    // this is on the hot path of every content hash, receipt and log head.
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(64);
     for byte in hash {
-        out.push_str(&format!("{byte:02x}"));
+        out.push(DIGITS[(byte >> 4) as usize] as char);
+        out.push(DIGITS[(byte & 0x0f) as usize] as char);
     }
     out
 }

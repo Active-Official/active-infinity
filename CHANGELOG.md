@@ -1,5 +1,22 @@
 # Changelog - Active Infinity
 
+## Unreleased
+
+### Added
+
+- `canonical::remap_node` is public. Projecting a module into a smaller arena
+  (a subgraph, a pruned view) is a real consumer operation, and the reference
+  rewrite is exhaustive over `Inode`; duplicating it outside the codec is how a
+  projection ends up with a dangling reference. `restrict`-style callers in
+  Active RPC switch to it with the next dependency bump.
+
+### Changed
+
+- `ir::hash_hex` writes two characters per byte into one buffer instead of
+  calling `format!` per byte: 4.1 µs to 126 ns per 32-byte digest on the
+  benchmark host, one allocation instead of 32. Output is byte-identical
+  (lowercase hex) and `parse_hash_hex` round-trips unchanged.
+
 ## CLI 0.3.1 - 2026-10-31
 
 - `version` (also `--version`, `-V`) prints the CLI and library versions, and

@@ -139,5 +139,23 @@ fn benchmarks(criterion: &mut Criterion) {
     }
 }
 
-criterion_group!(benches, benchmarks);
+/// Hash formatting sits on every content address, receipt and log head.
+///
+/// The formatter used to call `format!` once per byte (32 allocations per
+/// hash); this group keeps the one-allocation version honest.
+fn bench_hash_text(criterion: &mut Criterion) {
+    let mut group = criterion.benchmark_group("hash_text");
+    let hash =
+        active_infinity::content_hash(&encode(&wide_module(64)).expect("encode")).expect("hash");
+    group.bench_function("hash_hex", |bencher| {
+        bencher.iter(|| black_box(active_infinity::ir::hash_hex(black_box(&hash))));
+    });
+    let text = active_infinity::ir::hash_hex(&hash);
+    group.bench_function("parse_hash_hex", |bencher| {
+        bencher.iter(|| black_box(active_infinity::ir::parse_hash_hex(black_box(&text))));
+    });
+    group.finish();
+}
+
+criterion_group!(benches, benchmarks, bench_hash_text);
 criterion_main!(benches);

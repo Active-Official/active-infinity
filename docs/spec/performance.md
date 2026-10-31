@@ -103,6 +103,21 @@ canonical identity no zero-copy format offers.
 
 These are tracked as follow-up work, not correctness gaps.
 
+## Hash formatting (unreleased)
+
+`cargo bench --bench codec -- hash_text` (criterion, 100 samples, 1 s warm-up,
+3 s measurement, same host as above, machine shared). `ir::hash_hex` now writes
+two characters per byte into one pre-sized buffer instead of calling `format!`
+per byte:
+
+| Operation | Before | After |
+|---|---|---|
+| `hash_hex` (32-byte digest) | 4.1 µs (measured from `active-infinity` 2.3.0 by the Active RPC `domain` bench) | 126 ns (119–133 ns) |
+| `parse_hash_hex` | unchanged | 64 ns (62–65 ns) |
+
+The old formatter allocated 32 short strings per hash; the new one allocates
+once. Content hashes, `ARRL` log heads and CLI output all pay this per call.
+
 ## Regression policy
 
 A change that makes `validate` or `encode` more than 20% slower on the same

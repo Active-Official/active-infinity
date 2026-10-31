@@ -522,7 +522,18 @@ fn promote_secret_locators(mut nodes: Vec<Inode>, module: &InfinityModule) -> Ve
     nodes
 }
 
-pub(crate) fn remap_node(node: &Inode, remap: &[NodeId]) -> Result<Inode> {
+/// Rewrite every node reference in `node` through `remap`.
+///
+/// `remap` is indexed by the old node id and holds `NodeId::NONE` for nodes that
+/// are not part of the destination arena; a reference to one of those fails with
+/// [`Error::EncodeDangling`]. The match is exhaustive over [`Inode`], so a new
+/// child-bearing variant cannot be forgotten by a caller that projects a module
+/// into a smaller arena.
+///
+/// Canonicalization uses this internally; it is public because building a
+/// sub-arena (a subgraph, a pruned view) is a legitimate consumer operation and
+/// duplicating this match outside the codec is how dangling references happen.
+pub fn remap_node(node: &Inode, remap: &[NodeId]) -> Result<Inode> {
     let map = |id: NodeId| -> Result<NodeId> {
         remap
             .get(id.index())

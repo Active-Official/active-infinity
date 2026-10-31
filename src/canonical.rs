@@ -898,7 +898,24 @@ fn content_key(nodes: &[crate::ir::Inode], id: NodeId) -> String {
                 // Every id-bearing field is followed; only the type itself and the
                 // textual fields are written.
                 out.push('F');
-                out.push_str(&format!("{:?}", spec.typ));
+                // The type is rendered field by field: `Debug` redacts enum
+                // members to a count, which would give two different types the
+                // same ordering key.
+                match &spec.typ {
+                    crate::ir::TypeSpec::Enum(members) => {
+                        out.push('E');
+                        for member in members {
+                            out.push_str(&member.len().to_string());
+                            out.push(':');
+                            out.push_str(member);
+                        }
+                    }
+                    crate::ir::TypeSpec::Table { closed } => {
+                        out.push('T');
+                        out.push(if *closed { '1' } else { '0' });
+                    }
+                    other => out.push_str(&format!("{other:?}")),
+                }
                 for id in [
                     spec.min,
                     spec.max,

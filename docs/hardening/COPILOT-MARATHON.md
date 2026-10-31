@@ -20,7 +20,7 @@ the code → regression test first → minimal fix → targeted tests + clippy �
 | I-04 | decode / view | `src/decode.rs`, `src/view.rs` | CLEAN | 7 fixed, 3 rejected, 0 open | this commit |
 | I-05 | IR / units | `src/ir.rs`, `src/unit.rs` | CLEAN | 5 fixed, 2 rejected, 1 deferred | this commit |
 | I-06 | stream and delta | `src/stream.rs` | CLEAN | 7 fixed, 2 rejected, 0 open | this commit |
-| I-07 | schema | `src/schema.rs` | pending | — | — |
+| I-07 | schema class | `src/schema.rs` | CLEAN | 6 fixed, 1 rejected | this commit |
 | I-08 | store | `src/store.rs` | pending | — | — |
 | I-09 | compress | `src/compress.rs` | pending | — | — |
 | I-10 | signature / proof | `src/signature.rs`, `src/proof.rs` | pending | — | — |
@@ -96,6 +96,20 @@ Gate: clippy clean; `cargo test --all-features` 252 passed and
 | 9 | low | a batch could start at section 1, and the accumulated-size check used a wrapping `sum` after appending | **fixed**: the first batch must be section 0, the sum saturates, and the bound is checked before the append; `a_generation_must_start_at_section_zero` |
 
 Gate: clippy clean; `cargo test --all-features` 258 passed, 0 failed.
+
+### I-07 schema class — 2026-10-31
+
+| # | Severity | Finding | Disposition |
+|---|---|---|---|
+| 1 | high | `validate_instance` ignored the declared `min`/`max`/`min_len`/`max_len`/`pattern`/`default`, so a schema that looked restrictive accepted anything | **fixed**: numeric bounds and string lengths are enforced, a default is type-checked, and a pattern (no engine in this crate) is refused instead of ignored; `declared_bounds_are_enforced`, `string_length_bounds_are_enforced`, `a_pattern_constraint_is_refused_instead_of_ignored`, `a_default_of_the_wrong_type_is_refused` |
+| 2 | high | `matches_type` accepted program fragments as values (`Ident`/`Interpolate` for `String`, any `Quantity` for `Duration`, `SchemaTable` for `Table`, `SecretRef` for `Secret`, `ContentAddressed` for `Bytes`) | **fixed**: only the value plane matches, and a duration needs a time unit; `only_value_nodes_match_a_declared_type`, `a_duration_accepts_time_units_only` |
+| 3 | high | `from_fields` used a panicking `push` and accepted duplicate names, so one spec was silently unchecked | **fixed**: `try_push` and a duplicate-name refusal; `duplicate_field_names_are_refused_at_construction` |
+| 4 | medium | `validate_bytes` validated twice, and distinct messages form a field-existence oracle | **fixed for the double pass** (a validating `decode` is the only pass); the messages stay distinct, and the oracle is rejected: the caller supplies both the schema and the instance, so the message describes its own data |
+| 5 | medium | a `default` made a missing field pass without checking the default's type; enum members are interned in the public heap | **fixed for the default** (type-checked); enum members are schema names and follow the rule documented in `layout.md` §3.1 |
+| 6 | medium | `from_bytes` accepted a schema module carrying `Secret`/`SecretRef`/`Blob` nodes reachable from a default, a covert channel inside the pinned schema hash | **fixed**: such a module is refused with `infinity/schema`; `a_schema_carrying_a_secret_node_is_refused` |
+| 7 | low | `content_key` rendered a schema type through `Debug`, which hides enum members, so two different types could share an ordering key | **fixed**: the key renders enum members and the table flag field by field |
+
+Gate: clippy clean; `cargo test --all-features` 267 passed, 0 failed.
 
 ### I-01 layout / header — 2026-10-31 (rounds 1 and 2)
 

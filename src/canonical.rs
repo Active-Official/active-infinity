@@ -360,6 +360,11 @@ pub(crate) fn prepare(module: &InfinityModule) -> Result<Prepared> {
         }
     }
 
+    // A secret copied into a binary surface cannot be redacted: there is no
+    // marker that fits a 32-byte hash and no way to rewrite an opaque payload
+    // without corrupting it. Refuse the encode instead of storing the copy.
+    reject_secret_copies(provenance.as_ref(), &extensions, &secrets)?;
+
     let prepared = Prepared {
         nodes,
         root,
@@ -507,6 +512,68 @@ fn redact_provenance(mut prov: Provenance, secrets: &[String]) -> Result<Provena
         }
     }
     Ok(prov)
+}
+
+/// Largest amount of extension-payload scanning one encode may do, in bytes
+/// compared. A producer with many secrets and many large payloads is refused
+/// rather than allowed to turn the encode into a quadratic job.
+pub(crate) const MAX_SECRET_SCAN_BYTES: usize = 64 << 20;
+
+/// Refuse a provenance hash or extension payload that carries a secret literal.
+///
+/// Provenance text is redacted by [`redact_provenance`]; a hash value and an
+/// opaque extension are binary, so redaction cannot apply. The encoder refuses
+/// them, which keeps the invariant "a secret is not published" true for the
+/// stored image as well as for every projection.
+fn reject_secret_copies(
+    provenance: Option<&Provenance>,
+    extensions: &[(u64, Vec<u8>)],
+    secrets: &[Vec<u8>],
+) -> Result<()> {
+    if secrets.is_empty() {
+        return Ok(());
+    }
+    let hash_secrets: std::collections::BTreeSet<&[u8]> = secrets
+        .iter()
+        .filter(|secret| secret.len() == 32)
+        .map(Vec::as_slice)
+        .collect();
+    if let Some(provenance) = provenance {
+        if let Some(parent) = provenance.parent {
+            if hash_secrets.contains(parent.as_slice()) {
+                return Err(Error::Encode("provenance parent equals a secret"));
+            }
+        }
+        for entry in &provenance.entries {
+            if let ProvValue::Hash(hash) = &entry.value {
+                if hash_secrets.contains(hash.as_slice()) {
+                    return Err(Error::Encode("provenance hash equals a secret"));
+                }
+            }
+        }
+    }
+    let mut work = 0usize;
+    for (_, payload) in extensions {
+        for secret in secrets {
+            if secret.is_empty() || secret.len() > payload.len() {
+                continue;
+            }
+            work = work.saturating_add(payload.len() - secret.len());
+            if work > MAX_SECRET_SCAN_BYTES {
+                return Err(Error::Limit {
+                    kind: "secret copy scan bytes",
+                    limit: MAX_SECRET_SCAN_BYTES as u64,
+                });
+            }
+            if payload
+                .windows(secret.len())
+                .any(|window| window == secret.as_slice())
+            {
+                return Err(Error::Encode("extension payload carries a secret literal"));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn normalize_type(typ: &TypeSpec) -> TypeSpec {

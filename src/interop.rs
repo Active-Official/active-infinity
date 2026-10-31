@@ -396,10 +396,19 @@ mod bridge {
 
     /// Convert an Infinity module back into an `active-core` module.
     ///
-    /// Blob identity has no `active-core` 1.4.0 representation; a module that
-    /// carries a blob node is refused with a stable error rather than silently
-    /// dropping the fingerprint.
+    /// Blob identity has no `active-core` 1.4.0 representation, and a secret has
+    /// no structural form on the other side: a module that carries a blob or a
+    /// secret node is refused with a stable error rather than silently dropping
+    /// the fingerprint or exporting the plaintext.
     pub fn to_active_core(module: &InfinityModule) -> Result<CoreModule> {
+        // `active-core` models a secret as a plain string. Lowering one would
+        // hand the plaintext to every consumer of the bridge, so a
+        // secret-bearing module stays in Infinity (ADR-0010).
+        if module.has_secret() {
+            return Err(Error::Encode(
+                "the active-core bridge does not export secret material; keep the module in Infinity",
+            ));
+        }
         let mut out = CoreModule::new("infinity");
         for node in module.nodes() {
             out.add_node(convert_node(node)?);
@@ -783,18 +792,29 @@ pub(crate) fn redacted_key(text: &str, secrets: &[String]) -> String {
 ///
 /// Reference wrappers must be transparent for taint: an interpolated
 /// `${ref_to_secret}` has to redact the whole string, not render it as `${}`.
-fn resolves_to_secret(module: &InfinityModule, id: NodeId, depth: usize) -> bool {
+fn resolves_to_secret(
+    module: &InfinityModule,
+    id: NodeId,
+    depth: usize,
+    budget: &mut usize,
+) -> Result<bool> {
+    *budget = budget.saturating_add(1);
+    if *budget > PROJECTION_NODE_BUDGET {
+        return Err(Error::Encode("projection node budget exceeded"));
+    }
     if depth > PROJECTION_DEPTH {
         // A pathological chain is treated as secret: fail closed.
-        return true;
+        return Ok(true);
     }
-    match module.get(id) {
+    Ok(match module.get(id) {
         Some(Inode::Secret(_)) | Some(Inode::SecretRef { .. }) => true,
-        Some(Inode::Ref(inner)) => resolves_to_secret(module, *inner, depth + 1),
-        Some(Inode::Semantic { inner, .. }) => resolves_to_secret(module, *inner, depth + 1),
+        Some(Inode::Ref(inner)) => resolves_to_secret(module, *inner, depth + 1, budget)?,
+        Some(Inode::Semantic { inner, .. }) => {
+            resolves_to_secret(module, *inner, depth + 1, budget)?
+        }
         Some(node) => node.is_secret(),
         None => false,
-    }
+    })
 }
 
 fn build_projected(
@@ -858,10 +878,13 @@ fn build_projected(
                 for part in parts {
                     match part {
                         InterpPart::Literal(literal) => text.push_str(literal),
-                        InterpPart::Expr(id) => match id.index() {
-                            _ if resolves_to_secret(module, *id, 0) => tainted = true,
-                            _ => text.push_str("${}"),
-                        },
+                        InterpPart::Expr(id) => {
+                            if resolves_to_secret(module, *id, 0, budget)? {
+                                tainted = true;
+                            } else {
+                                text.push_str("${}");
+                            }
+                        }
                     }
                 }
                 if tainted {
@@ -983,6 +1006,19 @@ mod projection {
     /// `secrets` (the module's secret literals).
     pub fn provenance_json(prov: &Provenance, secrets: &[String]) -> serde_json::Value {
         let text = |value: &str| serde_json::Value::from(redacted_value(value, secrets));
+        // A 32-byte secret can be copied into a hash field verbatim. A hash has
+        // no textual form to redact, so a copy is replaced by the marker rather
+        // than published as hex.
+        let hash_value = |hash: &[u8; 32], secrets: &[String]| -> serde_json::Value {
+            if secrets
+                .iter()
+                .any(|secret| !secret.is_empty() && secret.as_bytes() == hash.as_slice())
+            {
+                serde_json::Value::from(SECRET_MARKER)
+            } else {
+                serde_json::Value::from(crate::ir::hash_hex(hash))
+            }
+        };
         let mut map = serde_json::Map::new();
         if let Some(producer) = &prov.producer {
             map.insert("producer".into(), text(producer));
@@ -1000,10 +1036,7 @@ mod projection {
             map.insert("tool".into(), text(tool));
         }
         if let Some(parent) = prov.parent {
-            map.insert(
-                "parent".into(),
-                serde_json::Value::from(crate::ir::hash_hex(&parent)),
-            );
+            map.insert("parent".into(), hash_value(&parent, secrets));
         }
         let mut entries = serde_json::Map::new();
         for entry in first_entry_per_key(&prov.entries) {
@@ -1011,7 +1044,7 @@ mod projection {
                 ProvValue::Text(t) => text(t),
                 ProvValue::Int(number) => serde_json::Value::from(*number),
                 ProvValue::Flag(flag) => serde_json::Value::from(*flag),
-                ProvValue::Hash(hash) => serde_json::Value::from(crate::ir::hash_hex(hash)),
+                ProvValue::Hash(hash) => hash_value(hash, secrets),
             };
             entries.insert(redacted_key(&entry.key, secrets), value);
         }
@@ -1324,15 +1357,25 @@ pub fn provenance_lines(module: &InfinityModule) -> Vec<String> {
     if let Some(tool) = &prov.tool {
         lines.push(format!("tool={}", redact(tool)));
     }
+    let hash_text = |hash: &[u8; 32]| -> String {
+        if secrets
+            .iter()
+            .any(|secret| !secret.is_empty() && secret.as_bytes() == hash.as_slice())
+        {
+            SECRET_MARKER.to_string()
+        } else {
+            format!("blake3:{}", crate::ir::hash_hex(hash))
+        }
+    };
     if let Some(parent) = prov.parent {
-        lines.push(format!("parent=blake3:{}", crate::ir::hash_hex(&parent)));
+        lines.push(format!("parent={}", hash_text(&parent)));
     }
     for entry in first_entry_per_key(&prov.entries) {
         let value = match &entry.value {
             ProvValue::Text(text) => redacted_value(text, &secrets),
             ProvValue::Int(number) => number.to_string(),
             ProvValue::Flag(flag) => flag.to_string(),
-            ProvValue::Hash(hash) => format!("blake3:{}", crate::ir::hash_hex(hash)),
+            ProvValue::Hash(hash) => hash_text(hash),
         };
         lines.push(format!("{}={value}", redacted_key(&entry.key, &secrets)));
     }

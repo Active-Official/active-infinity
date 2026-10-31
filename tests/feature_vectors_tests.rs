@@ -60,7 +60,7 @@ fn the_proof_vectors_cover_accept_tamper_and_wrong_image() {
 fn merge_vectors_follow_their_index() {
     let dir = vectors().join("merge");
     let rows = cases(&dir.join("index.txt"));
-    assert_eq!(rows.len(), 3, "the index must list three merge cases");
+    assert_eq!(rows.len(), 4, "the index must list four merge cases");
     for row in rows {
         assert_eq!(row.len(), 5, "{row:?}");
         let base = decode(&fs::read(dir.join(&row[1])).expect("base")).expect("decode base");

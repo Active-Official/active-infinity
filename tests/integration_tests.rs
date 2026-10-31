@@ -49,6 +49,40 @@ fn module() -> InfinityModule {
     from_active_source(SOURCE, "integration.active").expect("parse + lower")
 }
 
+/// The same document without the secret: `active-core` models a secret as a
+/// plain string, so a secret-bearing module cannot cross the bridge.
+const PLAIN_SOURCE: &str = r#"
+# @intent: "Service topology for the integration test"
+# @ai_immutable: true
+[app]
+name        = "infinity-integration"
+environment = env.APP_ENV ?: "test"
+debug       = true
+
+let base = "https://api.example.com"
+let timeout = 1500ms
+let retries = 3
+
+[server]
+host         = "127.0.0.1"
+port         = 8080
+read_timeout = timeout * 2
+ratio        = 25%
+
+[services]
+auth_url  = "${base}/auth"
+users_url = "${base}/users"
+weights   = [1, 2, 3, 5, 8]
+
+[database]
+host = "localhost"
+pool = 16
+"#;
+
+fn plain_module() -> InfinityModule {
+    from_active_source(PLAIN_SOURCE, "integration.active").expect("parse + lower")
+}
+
 #[test]
 fn real_modules_round_trip_with_equal_values() {
     let module = module();
@@ -130,15 +164,20 @@ fn units_annotations_and_secrets_survive_the_binary_form() {
 
 #[test]
 fn lowering_is_idempotent_through_active_core() {
-    let module = module();
-    let core = to_active_core(&module).expect("back to active-core");
+    let plain = plain_module();
+    let core = to_active_core(&plain).expect("back to active-core");
     let again = from_active_core(&core).expect("and back to infinity");
-    assert_eq!(encode(&again).unwrap(), encode(&module).unwrap());
+    assert_eq!(encode(&again).unwrap(), encode(&plain).unwrap());
+
+    // A secret has no structural form in active-core 1.4.0, so the bridge
+    // refuses the module instead of exporting the plaintext.
+    let error = to_active_core(&module()).expect_err("a secret-bearing module is refused");
+    assert_eq!(error.code(), "infinity/encode", "{error}");
 }
 
 #[test]
 fn evaluation_still_works_after_the_binary_round_trip() {
-    let module = module();
+    let module = plain_module();
     let bytes = encode(&module).unwrap();
     let decoded = decode(&bytes).unwrap();
     let (value, diagnostics) =

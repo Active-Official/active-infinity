@@ -249,6 +249,14 @@ fn encode_value(value: &Projected, out: &mut Vec<u8>) {
 // module
 // ---------------------------------------------------------------------------
 
+/// Largest projection this function will build, in bytes.
+///
+/// The node budget bounds the tree shape, not the bytes: every expanded node
+/// carries text, and a shared DAG can expand to a tree. A projection past this
+/// ceiling is refused with `infinity/limit` instead of growing until the
+/// process aborts.
+pub const MAX_PROTOBUF_BYTES: usize = 1 << 30;
+
 /// Project `module` into protobuf wire format.
 ///
 /// The result is deterministic and redacted. The `content_hash` field is the
@@ -278,6 +286,7 @@ pub fn to_protobuf(module: &InfinityModule) -> Result<Vec<u8>> {
     let mut out = Vec::new();
     bytes(&mut out, 1, &hash);
     uint(&mut out, 2, image.len() as u64);
+    check_size(&out)?;
 
     // One budget for the whole projection: a binding that aliases the root's
     // DAG must not get a fresh 100k allowance per binding.
@@ -286,7 +295,9 @@ pub fn to_protobuf(module: &InfinityModule) -> Result<Vec<u8>> {
         let value = project_node_with(module, root, &secrets, &mut budget)?;
         let mut body = Vec::new();
         encode_value(&value, &mut body);
+        check_size(&body)?;
         message(&mut out, 3, &body);
+        check_size(&out)?;
     }
 
     for (name, id) in module.bindings() {
@@ -295,20 +306,26 @@ pub fn to_protobuf(module: &InfinityModule) -> Result<Vec<u8>> {
         string(&mut binding, 1, &redacted_key(name, &secrets));
         let mut encoded = Vec::new();
         encode_value(&value, &mut encoded);
+        check_size(&encoded)?;
         message(&mut binding, 2, &encoded);
         message(&mut out, 4, &binding);
+        check_size(&out)?;
     }
 
     if let Some(prov) = module.provenance() {
         message(&mut out, 5, &encode_provenance(prov, &secrets));
+        check_size(&out)?;
     }
 
     for annotation in module.annotations() {
         message(&mut out, 6, &encode_annotation(annotation, &secrets));
+        check_size(&out)?;
     }
 
+    let mut scan_work = 0usize;
+
     for (tag, payload) in module.extensions() {
-        if carries_secret(payload, &raw_secrets) {
+        if carries_secret(payload, &raw_secrets, &mut scan_work)? {
             return Err(Error::Encode(
                 "extension payload carries secret material; a projection must not copy it",
             ));
@@ -317,18 +334,40 @@ pub fn to_protobuf(module: &InfinityModule) -> Result<Vec<u8>> {
         uint(&mut extension, 1, *tag);
         bytes(&mut extension, 2, payload);
         message(&mut out, 7, &extension);
+        check_size(&out)?;
     }
 
     Ok(out)
 }
 
+fn check_size(out: &[u8]) -> Result<()> {
+    if out.len() > MAX_PROTOBUF_BYTES {
+        return Err(Error::Limit {
+            kind: "protobuf projection bytes",
+            limit: MAX_PROTOBUF_BYTES as u64,
+        });
+    }
+    Ok(())
+}
+
 /// Whether an opaque payload contains a secret literal, comparing raw bytes.
-fn carries_secret(payload: &[u8], secrets: &[Vec<u8>]) -> bool {
-    secrets.iter().any(|secret| {
+///
+/// The comparison count is charged against one budget for the whole projection:
+/// a module with many secrets and many large payloads is refused with
+/// `infinity/limit` instead of scanning quadratically.
+fn carries_secret(payload: &[u8], secrets: &[Vec<u8>], work: &mut usize) -> Result<bool> {
+    *work = work.saturating_add(payload.len().saturating_mul(secrets.len()));
+    if *work > crate::canonical::MAX_SECRET_SCAN_BYTES {
+        return Err(Error::Limit {
+            kind: "protobuf secret scan bytes",
+            limit: crate::canonical::MAX_SECRET_SCAN_BYTES as u64,
+        });
+    }
+    Ok(secrets.iter().any(|secret| {
         !secret.is_empty()
             && secret.len() <= payload.len()
             && payload.windows(secret.len()).any(|window| window == secret)
-    })
+    }))
 }
 
 fn encode_annotation(annotation: &crate::ir::Annotation, secrets: &[String]) -> Vec<u8> {

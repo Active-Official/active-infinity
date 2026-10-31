@@ -24,8 +24,8 @@ the code → regression test first → minimal fix → targeted tests + clippy �
 | I-08 | store | `src/store.rs` | **CLEAN** | 7 fixed, 1 rejected | this commit |
 | I-09 | compress | `src/compress.rs`, CLI `dict` | **CLEAN** | 6 fixed, 4 rejected/documented | this commit |
 | I-10 | signature / proof | `src/signature.rs`, `src/proof.rs` | **CLEAN** | 6 fixed, 2 rejected/documented | this commit |
-| I-11 | merge | `src/merge.rs` | pending | — | — |
-| I-12 | interop / protobuf | `src/interop.rs`, `src/protobuf.rs` | pending | — | — |
+| I-11 | merge | `src/merge.rs` | **CLEAN** | 7 fixed, 1 rejected | this commit |
+| I-12 | interop / protobuf | `src/interop.rs`, `src/protobuf.rs` | **CLEAN** | 6 fixed, 1 rejected | this commit |
 | I-13 | error codes | `src/error.rs` | pending | — | — |
 | I-14 | FFI | `ffi/**` | pending | — | — |
 | I-15 | CLI | `cli/active-infinity-cli/**` | pending | — | — |
@@ -436,3 +436,48 @@ Envelope replication and the absence of a transparency log remain as recorded in
 Gate: clippy clean on both feature sets; Infinity 285 passed all-features / 227
 no-default; CLI 15; doc gates 15. Five signature tests and both proof tests fail
 against the pre-fix tree (`src/signature.rs` then `src/proof.rs` stashed).
+
+### I-11 merge - 2026-10-31
+
+| # | Severity | Finding | Disposition |
+|---|---|---|---|
+| 1 | high | `import_subtree` cloned the whole right arena and `merge_fragment` appended every node, so k takes grew the arena by k x N with no ceiling | **fixed**: `subtree_fragment` materialises only the reachable cone of the taken root (post-order, shared children once) and the imported total is charged against `MAX_MERGE_NODES`. `the_import_budget_refuses_two_takes_of_a_shared_cone` (fails pre-fix) |
+| 2 | high | every comparison cloned and encoded the whole module, so F fields cost O(F x N) despite the node ceiling | **fixed**: cone-only comparison, plus a total visit budget (`MAX_MERGE_WORK`, 16 x `MAX_MERGE_NODES`). Measured on a 60 000-node arena with 1 000 fields: 62.46 s before, 107.4 ms after (release, same machine, temporary harness removed) |
+| 3 | medium | dotted paths were unescaped, so a field named `a.b` was indistinguishable from a nested `a.b`, and a field named `<bindings>` from the metadata marker | **fixed**: `escape_field` escapes `\`, `.` and a leading `<`; `a_field_name_with_a_dot_is_escaped_in_the_path`, `a_field_name_named_like_a_metadata_marker_is_escaped` |
+| 4 | medium | when the base was a non-table and both sides turned the field into a table, the walk descended and reported `server.port` as `AddAdd` instead of `server` as `ModifyModify` | **fixed**: the walk refuses to descend when the base node is not a table; `a_non_table_base_is_not_descended_into` |
+| 5 | medium | metadata ignored the base (a one-sided provenance/extension change always conflicted), and raw text comparison was a secret-equality oracle | **fixed**: bindings, provenance and extensions are base-aware (one-sided changes are adopted), and provenance/annotation text is compared redacted. A non-UTF-8 extension payload next to a secret is a conflict rather than a comparison. `a_binding_added_on_one_side_is_adopted`, `a_provenance_changed_on_one_side_is_adopted`, `a_one_sided_extension_is_adopted`, `a_provenance_changed_differently_on_both_sides_conflicts`, `provenance_text_is_compared_redacted` |
+| 6 | medium | annotation comparison zipped stored order (spurious conflict on reorder) and compared intent/constraint text raw | **fixed**: order-insensitive keys, redacted text; `annotations_in_a_different_order_do_not_conflict` |
+| 7 | low | `removed.contains` was O(F^2) and conflict paths had no ceiling | **fixed**: `BTreeSet` for removals; total escaped path bytes capped at 1 MiB (`infinity/limit`) |
+| 8 | low | a dangling/cyclic input failed late with an inconsistent code, and the "merged root disappeared" case was mapped to a retryable `InvalidArgument` | **fixed**: `validate_structure` runs on all three inputs first (`infinity/node-ref` / `infinity/limit`), and the internal case is `infinity/encode`; `a_dangling_reference_is_refused_before_any_comparison` |
+
+Annotations remain all-or-nothing (a difference is `<annotations>`): an
+annotation has no name to merge by, and a set union would let two sides that
+each replaced the same annotation keep both. The ADR records the decision.
+
+The metadata vectors changed accordingly: `metadata` is now a clean adoption
+with its merged golden, and a new `binding` vector pins the
+`conflict:<bindings>:KindMismatch` case.
+
+Gate: 25 merge tests, 9 marathon tests; Infinity 302 all-features / 242
+no-default; clippy clean both feature sets.
+
+### I-12 interop and protobuf - 2026-10-31
+
+| # | Severity | Finding | Disposition |
+|---|---|---|---|
+| 1 | critical | `interop::to_active_core` lowered `Inode::Secret` to `CoreValue::Secret(plaintext)`, a full structural-secret export through a public, default-feature API (and the facade glob) | **fixed**: the bridge refuses a secret-bearing module (`infinity/encode`). `active-core` 1.4.0 models a secret as a plain string, so there is no lossless structural form. `the_bridge_refuses_a_secret_bearing_module` (fails pre-fix); the two integration tests that bridged the fixture now use a secret-free copy and assert the refusal |
+| 2 | high | a 32-byte secret copied into `Provenance.parent` or `ProvValue::Hash` reached the image verbatim and the projections as raw bytes/hex | **fixed**: the encoder refuses a hash copy, the JSON and `provenance_lines` projections substitute the marker for a matching hash in a hand-built module, and the extension payload copy is refused at encode as well as at projection. `a_provenance_parent_equal_to_a_secret_is_refused_at_encode`, `a_provenance_hash_entry_equal_to_a_secret_is_refused_at_encode`, `an_extension_payload_copying_a_secret_is_refused_at_encode`, `a_provenance_hash_equal_to_a_secret_is_redacted_in_json`, `provenance_lines_redacts_a_hash_equal_to_a_secret` (all fail pre-fix) |
+| 3 | high | `provenance_pairs` is a public raw accessor over `ProvEntry` | **rejected**: `InfinityModule::provenance()` already returns the same `&Provenance` with public fields, so making the helper crate-private would not remove the read path. A decoded module's text is already redacted by canonicalization; a hand-built module's provenance is the caller's own data. The rule that matters (a secret copy never reaches an image or a projection) is closed by finding 2 |
+| 4 | medium | the extension secret scan was O(secrets x payload) with no budget | **fixed**: one 64 MiB comparison budget for the whole projection (`infinity/limit`) |
+| 5 | medium | `to_protobuf` had no byte ceiling; a shared DAG expanded into a tree bounded by nodes, not bytes | **fixed**: `MAX_PROTOBUF_BYTES` (1 GiB), checked after each section and after each value body (`infinity/limit`) |
+| 6 | low | `resolves_to_secret` walks were not charged to the projection budget | **fixed**: the taint walk takes the shared `PROJECTION_NODE_BUDGET` counter and returns `infinity/encode` on exhaustion |
+| 7 | low | `tests/projection_tests.rs` covered remapping, not projections | **fixed**: renamed to `tests/remap_tests.rs` |
+
+Residual: the Protobuf byte cap bounds the final vector and each section body,
+while the node budget (100 000) is the expansion bound; a single value body can
+still approach the cap before it is refused. A secret that is a substring of the
+marker is refused at encode (I-03), so the marker-substitution path stays a
+fixpoint.
+
+Gate: Infinity 302 all-features / 242 no-default, CLI 15, clippy clean both
+feature sets, doc gates green.

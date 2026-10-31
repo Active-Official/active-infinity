@@ -1,4 +1,5 @@
 # name base left right expected
 clean clean.base.ainf clean.left.ainf clean.right.ainf clean:933ed16b5057d003e8c3faccdeb6713d00c84a448e11fb53c878e9f86b4b0c3c
 nested nested.base.ainf nested.left.ainf nested.right.ainf conflict:server.port:ModifyModify
-metadata metadata.base.ainf metadata.left.ainf metadata.right.ainf conflict:<bindings>:KindMismatch
+metadata metadata.base.ainf metadata.left.ainf metadata.right.ainf clean:0ebbd503b0857ce93e7dfb3f3a3680675e0e39c4ed4cb9e107d84686ce106de0
+binding binding.base.ainf binding.left.ainf binding.right.ainf conflict:<bindings>:KindMismatch

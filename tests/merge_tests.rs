@@ -217,29 +217,42 @@ fn a_conflict_returns_no_module() {
     assert_eq!(result.conflicts().len(), 1);
 }
 
-/// Module metadata is not combined by the field merge. A difference between the
-/// two sides is a conflict named after the component, so no side's change is
-/// dropped silently.
+/// A module-level component changed on one side only is adopted: metadata is
+/// base-aware, like a field.
 #[test]
-fn a_binding_difference_is_a_conflict_not_a_silent_choice() {
+fn a_binding_added_on_one_side_is_adopted() {
     let base = int_fields(&[("a", 1)]);
     let left = int_fields(&[("a", 1)]);
     let mut right = int_fields(&[("a", 1)]);
     let root = right.root().expect("root");
     right.bind("extra", root);
 
+    let merged = merge(&base, &left, &right).expect("merge");
+    let module = merged.module().expect("a one-sided binding is adopted");
+    assert!(
+        module.bindings().iter().any(|(name, _)| name == "extra"),
+        "the binding is carried"
+    );
+}
+
+/// Two sides that add the same binding name to different values disagree.
+#[test]
+fn a_binding_changed_differently_on_both_sides_conflicts() {
+    let base = int_fields(&[("a", 1)]);
+    let left = bound_module(&[("a", 1)], 100);
+    let right = bound_module(&[("a", 1)], 200);
+
     match merge(&base, &left, &right).expect("merge") {
         Merge::Conflicts(conflicts) => {
-            assert_eq!(conflicts.len(), 1, "{conflicts:?}");
-            assert_eq!(conflicts[0].field, "<bindings>");
+            assert_eq!(conflicts[0].field, "<bindings>", "{conflicts:?}");
             assert_eq!(conflicts[0].kind, ConflictKind::KindMismatch);
         }
-        Merge::Clean(_) => panic!("a binding difference must not merge cleanly"),
+        Merge::Clean(_) => panic!("a retargeted binding must not merge cleanly"),
     }
 }
 
 #[test]
-fn a_provenance_difference_is_a_conflict() {
+fn a_provenance_changed_on_one_side_is_adopted() {
     use active_infinity::Provenance;
 
     let base = int_fields(&[("a", 1)]);
@@ -250,17 +263,44 @@ fn a_provenance_difference_is_a_conflict() {
         ..Provenance::default()
     }));
 
-    match merge(&base, &left, &right).expect("merge") {
-        Merge::Conflicts(conflicts) => assert_eq!(conflicts[0].field, "<provenance>"),
-        Merge::Clean(_) => panic!("a provenance difference must not merge cleanly"),
-    }
-    // Both sides agreeing on the metadata is not a conflict.
-    let mut twin = int_fields(&[("a", 1)]);
-    twin.set_provenance(right.provenance().cloned());
-    assert!(merge(&base, &twin, &right)
+    let module = merge(&base, &left, &right)
         .expect("merge")
-        .module()
-        .is_some());
+        .into_module()
+        .expect("a one-sided provenance is adopted");
+    assert_eq!(
+        module
+            .provenance()
+            .and_then(|prov| prov.producer.as_deref()),
+        Some("agent-b")
+    );
+}
+
+#[test]
+fn a_provenance_changed_differently_on_both_sides_conflicts() {
+    use active_infinity::Provenance;
+
+    let mut base = int_fields(&[("a", 1)]);
+    base.set_provenance(Some(Provenance {
+        producer: Some("agent-base".into()),
+        ..Provenance::default()
+    }));
+    let mut left = int_fields(&[("a", 1)]);
+    left.set_provenance(Some(Provenance {
+        producer: Some("agent-left".into()),
+        ..Provenance::default()
+    }));
+    let mut right = int_fields(&[("a", 1)]);
+    right.set_provenance(Some(Provenance {
+        producer: Some("agent-right".into()),
+        ..Provenance::default()
+    }));
+
+    match merge(&base, &left, &right).expect("merge") {
+        Merge::Conflicts(conflicts) => {
+            assert_eq!(conflicts[0].field, "<provenance>", "{conflicts:?}");
+        }
+        Merge::Clean(_) => panic!("different provenance must not merge cleanly"),
+    }
 }
 
 /// Equality of secrets is an oracle (`SECURITY.md` I-2). A field whose subtree

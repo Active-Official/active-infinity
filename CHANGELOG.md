@@ -35,6 +35,30 @@
 - **Secrets**: `SecretBytes` zeroes its buffer with `zeroize` on drop (a volatile
   write the optimizer cannot elide), `has_secret()` recognises `SecretRef`, and
   `TypeSpec::name()` no longer echoes enum members.
+- **Interop / projections** (`interop.rs`, `protobuf.rs`): the `active-core`
+  bridge refuses a secret-bearing module instead of lowering `Inode::Secret` to
+  a plain `CoreValue::Secret` string (a full plaintext export that bypassed
+  ADR-0010). A provenance `parent` or hash entry equal to a 32-byte secret is
+  refused at encode and rendered as the marker by the JSON and `provenance_lines`
+  projections of a hand-built module; an extension payload containing a secret
+  literal is refused at encode too (the Protobuf check existed, the stored image
+  was the gap). The secret-taint walk now charges the shared projection node
+  budget, the extension secret scan is capped at 64 MiB of comparisons, and the
+  Protobuf projection is capped at 1 GiB (`infinity/limit`).
+- **Merge** (`merge.rs`): a subtree comparison materialises only the reachable
+  cone of that subtree instead of cloning and encoding the whole module per
+  comparison (measured on a 60 000-node arena with 1 000 fields: 62.5 s to
+  107 ms, release, same machine). A right-hand import copies the cone only, and
+  the imported total, the total node visits (`MAX_MERGE_WORK`) and the
+  conflict-path bytes (1 MiB) are all bounded with `infinity/limit`. Inputs are
+  structure-validated first, so a dangling reference, cycle or excessive depth
+  is `infinity/node-ref` / `infinity/limit` instead of a late, inconsistent
+  failure. Conflicts are reported with escaped paths, so a field named `a.b`
+  renders `a\.b` and cannot be confused with a nested `a.b` or a `<bindings>`
+  marker. Bindings, provenance and extensions are base-aware (a one-sided change
+  is adopted; a differing change on both sides is a conflict), metadata text is
+  compared redacted, annotations compare order-insensitively, and a base that is
+  not a table is no longer misreported as a nested `AddAdd`.
 - **Signature** (`signature.rs`): `SignedImage::sign` and `verify` prove the
   canonical form, so an envelope can no longer certify bytes that re-encode
   differently. Parsing an envelope is bounded at the codec ceiling plus the fixed

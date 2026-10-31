@@ -80,6 +80,16 @@ Redaction is structural, not textual:
   canonicalizer repeats the pass until the text is clean and falls back to the
   marker. That makes redaction a fixpoint for every secret set, including a
   secret that is itself part of `***SECRET***`;
+- **binary surfaces are not text.** A provenance `parent` or hash entry whose
+  bytes equal a 32-byte secret, and an opaque extension payload that contains a
+  secret literal, cannot use the marker: there is no textual form to replace.
+  The encoder refuses such a module (`infinity/encode`); a projection of a
+  hand-built module that was never encoded substitutes the marker for a matching
+  hash and refuses a matching extension payload. The copy therefore never
+  reaches a stored image or a projection.
+- **the `active-core` bridge refuses a secret-bearing module**
+  (`infinity/encode`). `active-core` 1.4.0 models a secret as a plain string, so
+  lowering one would export the plaintext to every consumer of the bridge.
 - reference wrappers are transparent: an interpolated `${ref_to_secret}` redacts
   the whole string instead of rendering `${}`;
 - a blob projects its identity only (hash, size, media type, taint); its payload
@@ -247,3 +257,12 @@ A projection follows the graph recursively. It refuses, rather than approximates
   duplicate field name, because `to_protobuf` requires a canonical image.
 
 A refused projection returns an error; it never emits a truncated tree.
+
+Two resource ceilings turn a hostile module into a refusal instead of a stall:
+
+- the shared node budget (`PROJECTION_NODE_BUDGET`, 100 000 visits) covers the
+  value tree *and* every secret-taint walk, so a hostile interpolation shape
+  cannot spend an unbounded number of lookups;
+- the Protobuf output is capped at `MAX_PROTOBUF_BYTES` (1 GiB) and the
+  extension secret scan at `MAX_SECRET_SCAN_BYTES` (64 MiB of comparisons), both
+  `infinity/limit`.

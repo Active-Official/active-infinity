@@ -3,36 +3,59 @@
 //! Two parties start from a shared `base` module and each produces a `left` and
 //! a `right` module. The merge compares the root tables field by field and
 //! reports a typed conflict whenever both sides changed the same field in
-//! incompatible ways. Subtrees are compared by their canonical encoding, so a
-//! field that merely moved inside a module still compares equal.
+//! incompatible ways. Subtrees are compared by the canonical encoding of the
+//! subtree alone, so a field that merely moved inside a module still compares
+//! equal.
 //!
 //! Two things never merge automatically, because a "clean" answer would be a
 //! lie or an oracle:
 //!
-//! - **Module metadata** (bindings, annotations, provenance, extensions) is not
-//!   combined field by field. If the two sides disagree on any component, the
-//!   merge reports a conflict named after that component rather than keeping
-//!   one side and dropping the other's change.
+//! - **Annotations** are not combined field by field. If the two sides carry
+//!   different annotations, the merge reports `<annotations>` rather than
+//!   guessing which intent, constraint or immutability flag survives. (An
+//!   annotation has no name to merge by, and two sides that each replaced the
+//!   same annotation would otherwise end up with both.)
 //! - **Secret material** is never compared. A field whose subtree reaches a
 //!   secret conflicts even when both sides are byte-identical, so the outcome
 //!   says nothing about whether two secrets match (`SECURITY.md` I-2).
 //!
-//! A caller that wants to resolve conflicts can merge each side against the
-//! base with the same API, or strip the metadata it does not need.
+//! Bindings, provenance and extensions are base-aware: a component changed on
+//! one side only is taken, and a component changed differently on both sides is
+//! a conflict. Free text in metadata is compared **redacted** (secret literals
+//! are replaced by the marker first), so a metadata comparison cannot be used
+//! to guess a secret.
+//!
+//! Work is bounded by a node budget: every subtree comparison materialises only
+//! the reachable cone of that subtree (never the whole module), imported
+//! right-hand nodes are charged against [`MAX_MERGE_NODES`], and a total visit
+//! budget [`MAX_MERGE_WORK`] stops a pathological conflict walk.
 
+use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::ir::{AnnotationKind, InfinityModule, Inode, NodeId};
+use crate::ir::{AnnotationKind, InfinityModule, Inode, NodeId, Provenance};
 use crate::stream::merge_fragment;
-use crate::{decode, encode, Result};
+use crate::{decode, encode, Error, Result};
 
-/// Largest module this merge accepts, in nodes.
+/// Largest module this merge accepts, in nodes, and the most right-hand nodes
+/// it will import in total.
 ///
-/// Each field comparison re-encodes a subtree, so the work is proportional to
-/// the node count times the field count. The ceiling keeps one hostile or
-/// accidental input from turning a local merge into an unbounded job; it is
-/// far above any module an agent edits by hand.
+/// Each subtree comparison encodes a subtree, so the work is proportional to
+/// the reachable node count. The ceiling keeps one hostile or accidental input
+/// from turning a local merge into an unbounded job; it is far above any module
+/// an agent edits by hand.
 pub const MAX_MERGE_NODES: usize = 262_144;
+
+/// Total node visits one merge may spend on substring materialisation and
+/// secret walks. Three comparisons per disjoint field stay well below this;
+/// a pathological nested conflict walk hits it and fails closed.
+pub const MAX_MERGE_WORK: usize = 16 * MAX_MERGE_NODES;
+
+/// Total bytes of conflict paths one merge may report.
+pub const MAX_CONFLICT_PATH_BYTES: usize = 1 << 20;
+
+/// Deepest nested conflict path reported.
+const MAX_CONFLICT_DEPTH: usize = 64;
 
 /// Why a field could not be merged automatically.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -43,18 +66,21 @@ pub enum ConflictKind {
     ModifyModify,
     /// One side deleted the field while the other changed it.
     DeleteModify,
-    /// The roots are not tables of the same shape, or a module-level metadata
-    /// component (bindings, annotations, provenance, extensions) differs
-    /// between the two sides. The merge never descends into a non-table field
-    /// to classify a mismatch: a nested shape change is `ModifyModify`.
+    /// The roots are not tables of the same shape. The merge never descends into
+    /// a non-table field to classify a mismatch: a nested shape change is
+    /// `ModifyModify`.
     KindMismatch,
 }
 
 /// One conflicting field.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Conflict {
-    /// Dotted field path from the module root (`"server.port"`); `""` names the
-    /// root itself.
+    /// Path from the module root (`"server.port"`); `""` names the root itself.
+    ///
+    /// A field name is escaped so the path is unambiguous: `\` becomes `\\`,
+    /// `.` becomes `\.`, and a leading `<` becomes `\<` (the `<bindings>`,
+    /// `<annotations>`, `<provenance>` and `<extensions>` markers belong to the
+    /// merge, not to a field). Unescape by reversing those three rules.
     pub field: String,
     /// Why the merge refused to choose.
     pub kind: ConflictKind,
@@ -101,53 +127,43 @@ pub fn merge(
     left: &InfinityModule,
     right: &InfinityModule,
 ) -> Result<Merge> {
-    // Bound the work before touching canonical forms: `prepare` is linear in
-    // the node count and the per-field comparison multiplies it by the field
-    // count.
+    // Reject dangling references, cycles, excessive depth and oversized
+    // modules before any canonical work: every later walk assumes a graph.
+    let max_depth = crate::layout::Limits::default().max_depth;
     for module in [base, left, right] {
         if module.node_count() > MAX_MERGE_NODES {
-            return Err(crate::Error::Limit {
+            return Err(Error::Limit {
                 kind: "merge node count",
                 limit: MAX_MERGE_NODES as u64,
             });
         }
+        module.validate_structure(MAX_MERGE_NODES as u64, max_depth)?;
     }
-    // Module-level metadata is not combined field by field. Refuse rather than
-    // keep the left copy and drop the right side's change.
-    let metadata = metadata_conflicts(left, right)?;
-    if !metadata.is_empty() {
-        return Ok(Merge::Conflicts(metadata));
-    }
+    let ctx = Ctx {
+        base,
+        left,
+        right,
+        budget: Cell::new(MAX_MERGE_WORK),
+    };
+
+    let mut conflicts = ConflictSet::default();
+    let plan = ctx.metadata_plan(&mut conflicts)?;
+
     let Some(base_fields) = root_fields(base) else {
-        return Ok(Merge::Conflicts(vec![Conflict {
-            field: String::new(),
-            kind: ConflictKind::KindMismatch,
-        }]));
+        conflicts.push(String::new(), ConflictKind::KindMismatch)?;
+        return Ok(Merge::Conflicts(conflicts.into_vec()));
     };
     let Some(left_fields) = root_fields(left) else {
-        return Ok(Merge::Conflicts(vec![Conflict {
-            field: String::new(),
-            kind: ConflictKind::KindMismatch,
-        }]));
+        conflicts.push(String::new(), ConflictKind::KindMismatch)?;
+        return Ok(Merge::Conflicts(conflicts.into_vec()));
     };
     let Some(right_fields) = root_fields(right) else {
-        return Ok(Merge::Conflicts(vec![Conflict {
-            field: String::new(),
-            kind: ConflictKind::KindMismatch,
-        }]));
+        conflicts.push(String::new(), ConflictKind::KindMismatch)?;
+        return Ok(Merge::Conflicts(conflicts.into_vec()));
     };
-    let base_map: BTreeMap<&str, NodeId> = base_fields
-        .iter()
-        .map(|(name, id)| (name.as_str(), *id))
-        .collect();
-    let left_map: BTreeMap<&str, NodeId> = left_fields
-        .iter()
-        .map(|(name, id)| (name.as_str(), *id))
-        .collect();
-    let right_map: BTreeMap<&str, NodeId> = right_fields
-        .iter()
-        .map(|(name, id)| (name.as_str(), *id))
-        .collect();
+    let base_map = field_map(base_fields);
+    let left_map = field_map(left_fields);
+    let right_map = field_map(right_fields);
 
     let names: BTreeSet<&str> = base_map
         .keys()
@@ -157,24 +173,19 @@ pub fn merge(
         .collect();
 
     let mut decisions: BTreeMap<String, Decision> = BTreeMap::new();
-    let mut conflicts = Vec::new();
     for name in names {
         let b = base_map.get(name).copied();
         let l = left_map.get(name).copied();
         let r = right_map.get(name).copied();
-        match decide(base, left, right, b, l, r)? {
+        match ctx.decide(b, l, r)? {
             Decision::Conflict(kind) => {
                 // Describe the conflict as precisely as the shapes allow: both
                 // sides being tables means the disagreement is inside them, and
                 // a dotted path names the field that actually differs.
                 let before = conflicts.len();
-                let ctx = MergeCtx { base, left, right };
                 ctx.nested_conflicts(name, b, l, r, 0, &mut conflicts)?;
                 if conflicts.len() == before {
-                    conflicts.push(Conflict {
-                        field: name.to_string(),
-                        kind,
-                    });
+                    conflicts.push(escape_field(name), kind)?;
                 }
             }
             decision => {
@@ -183,39 +194,44 @@ pub fn merge(
         }
     }
     if !conflicts.is_empty() {
-        conflicts.sort_by(|a, b| a.field.cmp(&b.field));
-        return Ok(Merge::Conflicts(conflicts));
+        conflicts.sort();
+        return Ok(Merge::Conflicts(conflicts.into_vec()));
     }
 
     let mut merged = left.clone();
+    let mut imported = 0usize;
     let mut additions: Vec<(String, NodeId)> = Vec::new();
     if let Some(root) = merged.root() {
         // Copy right-hand subtrees before mutating the root table, so the
         // fragment import never sees a borrowed root.
         for (name, decision) in &decisions {
             if let Decision::TakeRight(id) = decision {
-                let copied = import_subtree(&mut merged, right, *id)?;
+                let (copied, nodes) = import_subtree(&mut merged, right, *id)?;
+                imported = imported.saturating_add(nodes);
+                if imported > MAX_MERGE_NODES {
+                    return Err(Error::Limit {
+                        kind: "merge imported nodes",
+                        limit: MAX_MERGE_NODES as u64,
+                    });
+                }
                 additions.push((name.clone(), copied));
             }
         }
-        let mut removed: Vec<String> = decisions
+        let removed: BTreeSet<&str> = decisions
             .iter()
             .filter_map(|(name, decision)| match decision {
-                Decision::Delete => Some(name.clone()),
+                Decision::Delete => Some(name.as_str()),
                 _ => None,
             })
             .collect();
-        removed.sort();
         let table = merged
             .node_mut(root)
-            .map_err(|_| crate::Error::InvalidArgument("merged root disappeared"))?;
+            .map_err(|_| Error::Encode("merged root disappeared"))?;
         let Inode::Table { fields } = table else {
-            return Ok(Merge::Conflicts(vec![Conflict {
-                field: String::new(),
-                kind: ConflictKind::KindMismatch,
-            }]));
+            conflicts.push(String::new(), ConflictKind::KindMismatch)?;
+            return Ok(Merge::Conflicts(conflicts.into_vec()));
         };
-        fields.retain(|(name, _)| !removed.contains(name));
+        fields.retain(|(name, _)| !removed.contains(name.as_str()));
         for (name, id) in additions {
             match fields.iter_mut().find(|(field, _)| *field == name) {
                 Some((_, slot)) => *slot = id,
@@ -225,12 +241,18 @@ pub fn merge(
         fields.sort_by(|a, b| a.0.cmp(&b.0));
     }
 
+    apply_metadata(&mut merged, right, plan, &mut imported)?;
+
     // Canonicalize: this drops any fragment nodes the selected subtree does not
     // reach and validates the result.
     let image = encode(&merged)?;
     let module = decode(&image)?;
     Ok(Merge::Clean(Box::new(module)))
 }
+
+// ---------------------------------------------------------------------------
+// Decisions
+// ---------------------------------------------------------------------------
 
 enum Decision {
     KeepLeft,
@@ -239,91 +261,156 @@ enum Decision {
     Conflict(ConflictKind),
 }
 
-fn decide(
-    base: &InfinityModule,
-    left: &InfinityModule,
-    right: &InfinityModule,
-    b: Option<NodeId>,
-    l: Option<NodeId>,
-    r: Option<NodeId>,
-) -> Result<Decision> {
-    // Secret material is never compared. Equality is an oracle (`SECURITY.md`
-    // I-2), so a field that holds a secret on either side is a conflict even
-    // when the two subtrees are byte-identical: `Conflict` then says nothing
-    // about whether the secrets match. Only a field that both sides deleted is
-    // still a clean deletion.
-    if l.is_some() || r.is_some() {
-        let left_secret = l.is_some_and(|id| subtree_has_secret(left, id));
-        let right_secret = r.is_some_and(|id| subtree_has_secret(right, id));
-        if left_secret || right_secret {
-            return Ok(Decision::Conflict(ConflictKind::ModifyModify));
-        }
-    }
-    let left_eq_base = equal(base, left, b, l)?;
-    let right_eq_base = equal(base, right, b, r)?;
-    let left_eq_right = equal(left, right, l, r)?;
-
-    if left_eq_base && right_eq_base {
-        return Ok(Decision::KeepLeft);
-    }
-    if left_eq_right {
-        // Both sides agree; prefer the right node so a value added on both
-        // sides is carried once.
-        return Ok(match r {
-            Some(_) => Decision::TakeRight(r.expect("checked")),
-            None => Decision::Delete,
-        });
-    }
-    if left_eq_base {
-        return Ok(match r {
-            Some(id) => Decision::TakeRight(id),
-            None => Decision::Delete,
-        });
-    }
-    if right_eq_base {
-        return Ok(Decision::KeepLeft);
-    }
-    // Both sides changed the field and disagree.
-    let kind = if b.is_none() {
-        ConflictKind::AddAdd
-    } else if l.is_none() || r.is_none() {
-        ConflictKind::DeleteModify
-    } else {
-        ConflictKind::ModifyModify
-    };
-    Ok(Decision::Conflict(kind))
+/// One module-level component the field merge does not own.
+enum BindingAction {
+    TakeRight(NodeId),
+    Delete,
 }
 
-/// The fields of a table node, keyed by name.
-fn table_fields(module: &InfinityModule, id: NodeId) -> Option<BTreeMap<&str, NodeId>> {
-    match module.get(id) {
-        Some(Inode::Table { fields }) => Some(
-            fields
-                .iter()
-                .map(|(name, id)| (name.as_str(), *id))
-                .collect(),
-        ),
-        _ => None,
-    }
+#[derive(Default)]
+struct MetaPlan {
+    bindings: Vec<(String, BindingAction)>,
+    /// `Some(new value)` applies the right-hand provenance.
+    provenance: Option<Option<Provenance>>,
+    /// `Some(new set)` applies the right-hand extensions.
+    extensions: Option<Vec<(u64, Vec<u8>)>>,
 }
 
-/// The three modules a conflict walk needs.
-struct MergeCtx<'a> {
+struct Ctx<'a> {
     base: &'a InfinityModule,
     left: &'a InfinityModule,
     right: &'a InfinityModule,
+    budget: Cell<usize>,
 }
 
-impl MergeCtx<'_> {
+impl Ctx<'_> {
+    fn charge(&self, nodes: usize) -> Result<()> {
+        let remaining = self.budget.get();
+        if remaining < nodes {
+            return Err(Error::Limit {
+                kind: "merge work",
+                limit: MAX_MERGE_WORK as u64,
+            });
+        }
+        self.budget.set(remaining - nodes);
+        Ok(())
+    }
+
+    fn decide(&self, b: Option<NodeId>, l: Option<NodeId>, r: Option<NodeId>) -> Result<Decision> {
+        // Secret material is never compared. Equality is an oracle
+        // (`SECURITY.md` I-2), so a field that holds a secret on either side is
+        // a conflict even when the two subtrees are byte-identical: the
+        // `Conflict` then says nothing about whether the secrets match. Only a
+        // field that both sides deleted is still a clean deletion.
+        if l.is_some() || r.is_some() {
+            let left_secret = match l {
+                Some(id) => self.has_secret(self.left, id)?,
+                None => false,
+            };
+            let right_secret = match r {
+                Some(id) => self.has_secret(self.right, id)?,
+                None => false,
+            };
+            if left_secret || right_secret {
+                return Ok(Decision::Conflict(ConflictKind::ModifyModify));
+            }
+        }
+        let left_eq_base = self.equal(self.base, b, self.left, l)?;
+        let right_eq_base = self.equal(self.base, b, self.right, r)?;
+        let left_eq_right = self.equal(self.left, l, self.right, r)?;
+
+        if left_eq_base && right_eq_base {
+            return Ok(Decision::KeepLeft);
+        }
+        if left_eq_right {
+            // Both sides agree; prefer the right node so a value added on both
+            // sides is carried once.
+            return Ok(match r {
+                Some(_) => Decision::TakeRight(r.expect("checked")),
+                None => Decision::Delete,
+            });
+        }
+        if left_eq_base {
+            return Ok(match r {
+                Some(id) => Decision::TakeRight(id),
+                None => Decision::Delete,
+            });
+        }
+        if right_eq_base {
+            return Ok(Decision::KeepLeft);
+        }
+        // Both sides changed the field and disagree.
+        let kind = if b.is_none() {
+            ConflictKind::AddAdd
+        } else if l.is_none() || r.is_none() {
+            ConflictKind::DeleteModify
+        } else {
+            ConflictKind::ModifyModify
+        };
+        Ok(Decision::Conflict(kind))
+    }
+
+    /// Compare two optional nodes across modules by their canonical subtree.
+    ///
+    /// A secret anywhere in either subtree makes the answer `false` without
+    /// comparing bytes: the caller turns that into a conflict.
+    fn equal(
+        &self,
+        first: &InfinityModule,
+        a: Option<NodeId>,
+        second: &InfinityModule,
+        b: Option<NodeId>,
+    ) -> Result<bool> {
+        match (a, b) {
+            (None, None) => Ok(true),
+            (Some(_), None) | (None, Some(_)) => Ok(false),
+            (Some(a), Some(b)) => {
+                if self.has_secret(first, a)? || self.has_secret(second, b)? {
+                    return Ok(false);
+                }
+                Ok(self.image(first, a)? == self.image(second, b)?)
+            }
+        }
+    }
+
+    /// Canonical bytes of one subtree: only the reachable cone, with every
+    /// other root cleared, so equal subtrees in different modules agree.
+    fn image(&self, module: &InfinityModule, id: NodeId) -> Result<Vec<u8>> {
+        let fragment = subtree_fragment(module, id)?;
+        self.charge(fragment.node_count())?;
+        encode(&fragment)
+    }
+
+    /// Whether a subtree reaches secret material, charging every node visited.
+    fn has_secret(&self, module: &InfinityModule, id: NodeId) -> Result<bool> {
+        let mut seen = BTreeSet::new();
+        let mut stack = vec![id];
+        let mut found = false;
+        while let Some(current) = stack.pop() {
+            if !seen.insert(current) {
+                continue;
+            }
+            let Some(node) = module.get(current) else {
+                return Err(Error::NodeRef(current.0));
+            };
+            if node.is_secret() {
+                found = true;
+            }
+            stack.extend(node.children());
+        }
+        self.charge(seen.len())?;
+        Ok(found)
+    }
+
     /// Describe a conflict inside two tables with dotted paths.
     ///
     /// The caller has already established that the two top-level values
-    /// disagree. When both are tables, the disagreement is inside them:
-    /// recurse per field so the report names `server.port` rather than
-    /// `server`. A subtree that reaches a secret is never walked (the parent
-    /// conflict stands), and the depth is capped so a pathological shape cannot
-    /// recurse without bound. Nothing is appended when the shapes cannot be
-    /// described, which lets the caller fall back to the field's own conflict.
+    /// disagree. When both are tables *and the base agrees they are tables*,
+    /// the disagreement is inside them: recurse per field so the report names
+    /// `server.port` rather than `server`. A base that is not a table means the
+    /// shape changed, and the parent's `ModifyModify` stands. A subtree that
+    /// reaches a secret is never walked, and the depth is capped so a
+    /// pathological shape cannot recurse without bound.
     fn nested_conflicts(
         &self,
         path: &str,
@@ -331,25 +418,32 @@ impl MergeCtx<'_> {
         l: Option<NodeId>,
         r: Option<NodeId>,
         depth: usize,
-        out: &mut Vec<Conflict>,
+        out: &mut ConflictSet,
     ) -> Result<()> {
-        const MAX_DEPTH: usize = 64;
-        if depth >= MAX_DEPTH {
+        if depth >= MAX_CONFLICT_DEPTH {
             return Ok(());
         }
         let (Some(left_id), Some(right_id)) = (l, r) else {
             return Ok(());
         };
-        if subtree_has_secret(self.left, left_id) || subtree_has_secret(self.right, right_id) {
+        if self.has_secret(self.left, left_id)? || self.has_secret(self.right, right_id)? {
             return Ok(());
         }
+        let base_fields = match b {
+            Some(id) => match table_fields(self.base, id) {
+                Some(fields) => Some(fields),
+                // The base is not a table while both sides are: the shape
+                // changed, so this is the parent's conflict, not a child's.
+                None => return Ok(()),
+            },
+            None => None,
+        };
         let (Some(left_fields), Some(right_fields)) = (
             table_fields(self.left, left_id),
             table_fields(self.right, right_id),
         ) else {
             return Ok(());
         };
-        let base_fields = b.and_then(|id| table_fields(self.base, id));
         let names: BTreeSet<&str> = left_fields
             .keys()
             .chain(right_fields.keys())
@@ -362,15 +456,8 @@ impl MergeCtx<'_> {
                 .copied();
             let child_left = left_fields.get(name).copied();
             let child_right = right_fields.get(name).copied();
-            if let Decision::Conflict(kind) = decide(
-                self.base,
-                self.left,
-                self.right,
-                child_base,
-                child_left,
-                child_right,
-            )? {
-                let child_path = format!("{path}.{name}");
+            if let Decision::Conflict(kind) = self.decide(child_base, child_left, child_right)? {
+                let child_path = format!("{path}.{}", escape_field(name));
                 let before = out.len();
                 self.nested_conflicts(
                     &child_path,
@@ -381,178 +468,286 @@ impl MergeCtx<'_> {
                     out,
                 )?;
                 if out.len() == before {
-                    out.push(Conflict {
-                        field: child_path,
-                        kind,
-                    });
+                    out.push(child_path, kind)?;
                 }
             }
         }
         Ok(())
     }
-}
 
-/// Compare two optional nodes across modules by their canonical subtree image.
-fn equal(
-    first: &InfinityModule,
-    second: &InfinityModule,
-    a: Option<NodeId>,
-    b: Option<NodeId>,
-) -> Result<bool> {
-    match (a, b) {
-        (None, None) => Ok(true),
-        (Some(_), None) | (None, Some(_)) => Ok(false),
-        (Some(a), Some(b)) => Ok(subtree_image(first, a)? == subtree_image(second, b)?),
-    }
-}
+    /// Compare the module-level components and plan how to apply the one-sided
+    /// changes.
+    fn metadata_plan(&self, conflicts: &mut ConflictSet) -> Result<MetaPlan> {
+        let mut plan = MetaPlan::default();
+        let base_map = binding_map(self.base);
+        let left_map = binding_map(self.left);
+        let right_map = binding_map(self.right);
+        let names: BTreeSet<&str> = base_map
+            .keys()
+            .chain(left_map.keys())
+            .chain(right_map.keys())
+            .copied()
+            .collect();
+        for name in names {
+            let b = base_map.get(name).copied();
+            let l = left_map.get(name).copied();
+            let r = right_map.get(name).copied();
+            if self.equal(self.left, l, self.right, r)? {
+                continue;
+            }
+            if self.equal(self.base, b, self.right, r)? {
+                // Right is unchanged; keep the left binding (or its absence).
+                continue;
+            }
+            if self.equal(self.base, b, self.left, l)? {
+                match r {
+                    Some(id) => plan
+                        .bindings
+                        .push((name.to_string(), BindingAction::TakeRight(id))),
+                    None => plan
+                        .bindings
+                        .push((name.to_string(), BindingAction::Delete)),
+                }
+                continue;
+            }
+            conflicts.push("<bindings>".to_string(), ConflictKind::KindMismatch)?;
+        }
 
-/// Whether a subtree reaches secret material.
-///
-/// Walks the node references rather than the whole module: a secret elsewhere
-/// in the module does not block merging an unrelated field, but a secret inside
-/// the compared subtree does.
-fn subtree_has_secret(module: &InfinityModule, id: NodeId) -> bool {
-    let mut seen = BTreeSet::new();
-    let mut stack = vec![id];
-    while let Some(current) = stack.pop() {
-        if !seen.insert(current) {
-            continue;
-        }
-        let Some(node) = module.get(current) else {
-            continue;
-        };
-        if node.is_secret() {
-            return true;
-        }
-        stack.extend(node.children());
-    }
-    false
-}
-
-/// Conflicts in the module-level metadata the field merge does not combine.
-///
-/// Comparisons are by **value**, never by canonical position: two modules with
-/// the same shape renumber identically, so comparing prepared indices would
-/// miss a retargeted binding (silent loss) and would report a conflict whenever
-/// one side added a node (spurious). A target that reaches a secret is a
-/// conflict rather than a comparison, for the same anti-oracle reason the field
-/// merge refuses secret fields.
-fn metadata_conflicts(left: &InfinityModule, right: &InfinityModule) -> Result<Vec<Conflict>> {
-    let mut conflicts = Vec::new();
-    let mut push = |field: &str| {
-        conflicts.push(Conflict {
-            field: field.to_string(),
-            kind: ConflictKind::KindMismatch,
-        })
-    };
-    if bindings_differ(left, right)? {
-        push("<bindings>");
-    }
-    if annotations_differ(left, right)? {
-        push("<annotations>");
-    }
-    if left.provenance() != right.provenance() {
-        push("<provenance>");
-    }
-    if left.extensions() != right.extensions() {
-        push("<extensions>");
-    }
-    Ok(conflicts)
-}
-
-fn bindings_differ(left: &InfinityModule, right: &InfinityModule) -> Result<bool> {
-    let left_bindings: BTreeMap<&str, NodeId> = left
-        .bindings()
-        .iter()
-        .map(|(name, id)| (name.as_str(), *id))
-        .collect();
-    let right_bindings: BTreeMap<&str, NodeId> = right
-        .bindings()
-        .iter()
-        .map(|(name, id)| (name.as_str(), *id))
-        .collect();
-    if left_bindings.len() != right_bindings.len() {
-        return Ok(true);
-    }
-    for (name, left_id) in left_bindings {
-        let Some(right_id) = right_bindings.get(name) else {
-            return Ok(true);
-        };
-        if nodes_differ(left, left_id, right, *right_id)? {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
-
-fn annotations_differ(left: &InfinityModule, right: &InfinityModule) -> Result<bool> {
-    if left.annotations().len() != right.annotations().len() {
-        return Ok(true);
-    }
-    for (first, second) in left.annotations().iter().zip(right.annotations()) {
-        if kind_text(&first.kind) != kind_text(&second.kind) {
-            return Ok(true);
-        }
-        if nodes_differ(left, first.node, right, second.node)? {
-            return Ok(true);
-        }
-        if let (
-            AnnotationKind::Constraint {
-                expr: left_expr, ..
-            },
-            AnnotationKind::Constraint {
-                expr: right_expr, ..
-            },
-        ) = (&first.kind, &second.kind)
-        {
-            if nodes_differ(left, *left_expr, right, *right_expr)? {
-                return Ok(true);
+        // Provenance: one block, compared through a redacted rendering.
+        let left_key = provenance_key(self.left);
+        let right_key = provenance_key(self.right);
+        if left_key != right_key {
+            let base_key = provenance_key(self.base);
+            if base_key == left_key {
+                plan.provenance = Some(self.right.provenance().cloned());
+            } else if base_key != right_key {
+                conflicts.push("<provenance>".to_string(), ConflictKind::KindMismatch)?;
             }
         }
+
+        // Extensions: one set, sorted by tag, compared through redacted
+        // payloads. A payload that is not text cannot be redacted, so a set
+        // holding one next to a secret is never compared: it conflicts.
+        let left_key = extensions_key(self.left);
+        let right_key = extensions_key(self.right);
+        if left_key.is_none() || right_key.is_none() {
+            conflicts.push("<extensions>".to_string(), ConflictKind::KindMismatch)?;
+        } else if left_key != right_key {
+            let base_key = extensions_key(self.base);
+            if left_key == base_key {
+                plan.extensions = Some(self.right.extensions().to_vec());
+            } else if right_key != base_key {
+                conflicts.push("<extensions>".to_string(), ConflictKind::KindMismatch)?;
+            }
+        }
+
+        // Annotations: no name to merge by, so any difference is a conflict.
+        // The comparison is order-insensitive and redacted.
+        if self.annotation_keys(self.left)? != self.annotation_keys(self.right)? {
+            conflicts.push("<annotations>".to_string(), ConflictKind::KindMismatch)?;
+        }
+        Ok(plan)
     }
-    Ok(false)
-}
 
-/// Whether two subtrees differ. A secret on either side is "different" without
-/// being compared.
-fn nodes_differ(
-    first: &InfinityModule,
-    a: NodeId,
-    second: &InfinityModule,
-    b: NodeId,
-) -> Result<bool> {
-    if subtree_has_secret(first, a) || subtree_has_secret(second, b) {
-        return Ok(true);
+    fn annotation_keys(&self, module: &InfinityModule) -> Result<Vec<String>> {
+        let secrets = crate::interop::secret_texts(module);
+        let mut keys = Vec::with_capacity(module.annotations().len());
+        for annotation in module.annotations() {
+            let subject = if self.has_secret(module, annotation.node)? {
+                "SECRET".to_string()
+            } else {
+                hex(&self.image(module, annotation.node)?)
+            };
+            let (code, text, expr) = match &annotation.kind {
+                AnnotationKind::Intent(text) => (0u8, text.clone(), String::new()),
+                AnnotationKind::Constraint { source, expr } => (
+                    1,
+                    source.clone(),
+                    if self.has_secret(module, *expr)? {
+                        "SECRET".to_string()
+                    } else {
+                        hex(&self.image(module, *expr)?)
+                    },
+                ),
+                AnnotationKind::AiImmutable(flag) => (2, flag.to_string(), String::new()),
+            };
+            let text = crate::interop::redact_text(&text, &secrets);
+            keys.push(format!("{code}|{subject}|{expr}|{text}"));
+        }
+        keys.sort();
+        Ok(keys)
     }
-    Ok(subtree_image(first, a)? != subtree_image(second, b)?)
 }
 
-/// The annotation payload without its node references.
-fn kind_text(kind: &AnnotationKind) -> (u8, String) {
-    match kind {
-        AnnotationKind::Intent(text) => (0, text.clone()),
-        AnnotationKind::Constraint { source, .. } => (1, source.clone()),
-        AnnotationKind::AiImmutable(flag) => (2, flag.to_string()),
+// ---------------------------------------------------------------------------
+// Applying a clean merge
+// ---------------------------------------------------------------------------
+
+fn apply_metadata(
+    merged: &mut InfinityModule,
+    right: &InfinityModule,
+    plan: MetaPlan,
+    imported: &mut usize,
+) -> Result<()> {
+    if !plan.bindings.is_empty() {
+        let mut bindings: BTreeMap<String, NodeId> = merged.bindings().iter().cloned().collect();
+        for (name, action) in plan.bindings {
+            match action {
+                BindingAction::Delete => {
+                    bindings.remove(&name);
+                }
+                BindingAction::TakeRight(id) => {
+                    let (copied, nodes) = import_subtree(merged, right, id)?;
+                    *imported = imported.saturating_add(nodes);
+                    if *imported > MAX_MERGE_NODES {
+                        return Err(Error::Limit {
+                            kind: "merge imported nodes",
+                            limit: MAX_MERGE_NODES as u64,
+                        });
+                    }
+                    bindings.insert(name, copied);
+                }
+            }
+        }
+        merged.clear_bindings();
+        for (name, id) in bindings {
+            merged.bind(name, id);
+        }
+    }
+    if let Some(provenance) = plan.provenance {
+        merged.set_provenance(provenance);
+    }
+    if let Some(extensions) = plan.extensions {
+        merged.set_extensions(extensions);
+    }
+    Ok(())
+}
+
+/// Copy the reachable cone of `id` into `into`, returning the new root and the
+/// number of nodes appended.
+fn import_subtree(
+    into: &mut InfinityModule,
+    from: &InfinityModule,
+    id: NodeId,
+) -> Result<(NodeId, usize)> {
+    let fragment = subtree_fragment(from, id)?;
+    let nodes = fragment.node_count();
+    let root = merge_fragment(into, &fragment)?;
+    Ok((root, nodes))
+}
+
+/// A module holding only the reachable cone of `id`.
+///
+/// Nodes are appended in post-order, so every child is mapped before its
+/// parent is remapped. A shared child is materialised once, and a cycle (which
+/// [`InfinityModule::validate_structure`] has already refused) fails closed on
+/// the dangling remap instead of looping.
+fn subtree_fragment(module: &InfinityModule, id: NodeId) -> Result<InfinityModule> {
+    let mut mapped: Vec<NodeId> = vec![NodeId::NONE; module.node_count()];
+    let mut order: Vec<NodeId> = Vec::new();
+    let mut seen: BTreeSet<NodeId> = BTreeSet::new();
+    let mut stack = vec![(id, false)];
+    while let Some((node, expanded)) = stack.pop() {
+        if expanded {
+            order.push(node);
+            continue;
+        }
+        if !seen.insert(node) {
+            continue;
+        }
+        if module.get(node).is_none() {
+            return Err(Error::NodeRef(node.0));
+        }
+        stack.push((node, true));
+        for child in module.get(node).map(Inode::children).unwrap_or_default() {
+            stack.push((child, false));
+        }
+    }
+    let mut fragment = InfinityModule::new();
+    for old in order {
+        let node = module.get(old).ok_or(Error::NodeRef(old.0))?;
+        let remapped = crate::canonical::remap_node(node, &mapped)?;
+        mapped[old.index()] = fragment.push(remapped);
+    }
+    fragment.set_root(Some(mapped[id.index()]));
+    Ok(fragment)
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+#[derive(Default)]
+struct ConflictSet {
+    list: Vec<Conflict>,
+    bytes: usize,
+}
+
+impl ConflictSet {
+    fn len(&self) -> usize {
+        self.list.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.list.is_empty()
+    }
+
+    fn push(&mut self, field: String, kind: ConflictKind) -> Result<()> {
+        self.bytes = self.bytes.saturating_add(field.len());
+        if self.bytes > MAX_CONFLICT_PATH_BYTES {
+            return Err(Error::Limit {
+                kind: "merge conflict paths",
+                limit: MAX_CONFLICT_PATH_BYTES as u64,
+            });
+        }
+        self.list.push(Conflict { field, kind });
+        Ok(())
+    }
+
+    fn sort(&mut self) {
+        self.list.sort_by(|a, b| a.field.cmp(&b.field));
+    }
+
+    fn into_vec(self) -> Vec<Conflict> {
+        self.list
     }
 }
 
-fn subtree_image(module: &InfinityModule, id: NodeId) -> Result<Vec<u8>> {
-    // Compare just this subtree: drop every other root (bindings, annotations,
-    // provenance, extensions) so two equal subtrees in different modules encode
-    // to the same bytes.
-    let mut probe = module.clone();
-    probe.clear_bindings();
-    probe.clear_annotations();
-    probe.set_provenance(None);
-    probe.set_extensions(Vec::new());
-    probe.set_root(Some(id));
-    encode(&probe)
+/// Escape a field name so a dotted path is unambiguous.
+fn escape_field(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    for (index, character) in name.chars().enumerate() {
+        match character {
+            '\\' => out.push_str("\\\\"),
+            '.' => out.push_str("\\."),
+            '<' if index == 0 => out.push_str("\\<"),
+            _ => out.push(character),
+        }
+    }
+    out
 }
 
-fn import_subtree(into: &mut InfinityModule, from: &InfinityModule, id: NodeId) -> Result<NodeId> {
-    let mut fragment = from.clone();
-    fragment.set_root(Some(id));
-    merge_fragment(into, &fragment)
+fn field_map(fields: &[(String, NodeId)]) -> BTreeMap<&str, NodeId> {
+    fields
+        .iter()
+        .map(|(name, id)| (name.as_str(), *id))
+        .collect()
+}
+
+fn binding_map(module: &InfinityModule) -> BTreeMap<&str, NodeId> {
+    module
+        .bindings()
+        .iter()
+        .map(|(name, id)| (name.as_str(), *id))
+        .collect()
+}
+
+/// The fields of a table node, keyed by name.
+fn table_fields(module: &InfinityModule, id: NodeId) -> Option<BTreeMap<&str, NodeId>> {
+    match module.get(id) {
+        Some(Inode::Table { fields }) => Some(field_map(fields)),
+        _ => None,
+    }
 }
 
 fn root_fields(module: &InfinityModule) -> Option<&[(String, NodeId)]> {
@@ -561,4 +756,82 @@ fn root_fields(module: &InfinityModule) -> Option<&[(String, NodeId)]> {
         Some(Inode::Table { fields }) => Some(fields),
         _ => None,
     }
+}
+
+/// A deterministic rendering of provenance with every free text redacted.
+fn provenance_key(module: &InfinityModule) -> Option<String> {
+    let provenance = module.provenance()?;
+    let secrets = crate::interop::secret_texts(module);
+    let redact = |text: &str| crate::interop::redact_text(text, &secrets);
+    let mut out = String::new();
+    for text in [
+        provenance.producer.as_deref(),
+        provenance.model.as_deref(),
+        provenance.tool.as_deref(),
+    ] {
+        match text {
+            Some(text) => {
+                let text = redact(text);
+                out.push_str(&format!("S{}:{};", text.len(), text));
+            }
+            None => out.push_str("N;"),
+        }
+    }
+    out.push_str(&format!("t{};", provenance.timestamp_ms));
+    match provenance.parent {
+        Some(hash) => out.push_str(&format!("p{};", hex(&hash))),
+        None => out.push_str("p-;"),
+    }
+    let mut entries: Vec<(String, String)> = provenance
+        .entries
+        .iter()
+        .map(|entry| {
+            let key = redact(&entry.key);
+            let value = match &entry.value {
+                crate::ir::ProvValue::Text(text) => format!("T{}", redact(text)),
+                crate::ir::ProvValue::Int(value) => format!("I{value}"),
+                crate::ir::ProvValue::Flag(flag) => format!("F{flag}"),
+                crate::ir::ProvValue::Hash(hash) => format!("H{}", hex(hash)),
+            };
+            (key, value)
+        })
+        .collect();
+    entries.sort();
+    for (key, value) in entries {
+        out.push_str(&format!("K{}:{}={};", key.len(), key, value));
+    }
+    Some(out)
+}
+
+/// A deterministic rendering of the extension set with payloads redacted when
+/// they are text.
+///
+/// `None` means the set cannot be compared safely: a secret is present and a
+/// payload is not UTF-8, so redaction would not be faithful.
+fn extensions_key(module: &InfinityModule) -> Option<String> {
+    let secrets = crate::interop::secret_texts(module);
+    let mut extensions = module.extensions().to_vec();
+    extensions.sort_by_key(|(tag, _)| *tag);
+    let mut out = String::new();
+    for (tag, payload) in extensions {
+        out.push_str(&format!("{tag}:{}:", payload.len()));
+        if secrets.is_empty() {
+            out.push_str(&hex(&payload));
+        } else {
+            let text = std::str::from_utf8(&payload).ok()?;
+            let text = crate::interop::redact_text(text, &secrets);
+            out.push_str(&format!("{}:{}", text.len(), text));
+        }
+        out.push(';');
+    }
+    Some(out)
+}
+
+fn hex(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        let _ = write!(out, "{byte:02x}");
+    }
+    out
 }

@@ -8,6 +8,9 @@ the shared WASM module, so canonical bytes and content hashes cannot drift.
   host import (`env.active_random_fill`).
 - **Vectors**: `conformance/manifest.json` is the shared oracle for every
   language.
+- **RPC**: `polyglot/rpc/` holds the thin ARP1 clients and the encoder
+  conformance gate; see `polyglot/rpc/PROTOCOL.md`.
+- **Status**: `polyglot/STATUS.md` is the pass/fail matrix.
 
 Build the artifacts once (from the repository root):
 
@@ -45,7 +48,7 @@ Build the artifacts once (from the repository root):
 Every row validates an AINF image, reproduces the manifest content hash,
 re-encodes to canonical bytes, compiles Active text, and asserts that the
 redaction canary `CANARY_SECRET_` never appears. The RPC thin client for each
-language is tracked separately in `polyglot/rpc/PROTOCOL.md` (C-8.3).
+language lives in `polyglot/rpc/` (C-8.3).
 
 ### Notes on toolchains
 
@@ -57,6 +60,29 @@ language is tracked separately in `polyglot/rpc/PROTOCOL.md` (C-8.3).
   put `ffi/active-infinity-ffi/target/release` on the loader path.
 
 ## Quickstarts
+
+Short quickstarts live next to each binding:
+
+| Language | Quickstart |
+|----------|------------|
+| C | this file, [C](#c) |
+| C++ | this file, [C++](#c) |
+| Python | this file, [Python](#python) |
+| Go | this file, [Go](#go) |
+| JavaScript / TypeScript | this file, [JavaScript](#javascript) |
+| Zig | this file, [Zig](#zig) |
+| Java | `polyglot/java/README.md` |
+| Kotlin/JVM | `polyglot/kotlin/README.md` |
+| Scala | `polyglot/scala/README.md` |
+| C# / .NET | `polyglot/csharp/README.md` |
+| Swift | `polyglot/swift/README.md` |
+| Kotlin/Native | `polyglot/kotlin-native/README.md` |
+| Ruby | `polyglot/ruby/README.md` |
+| PHP | `polyglot/php/README.md` |
+| Dart | `polyglot/dart/README.md` |
+| AssemblyScript | `polyglot/assemblyscript/README.md` |
+| Lua | `polyglot/lua/README.md` |
+| Shell / ops | `polyglot/shell/README.md` |
 
 ### C
 
@@ -141,4 +167,5 @@ Uses `@cImport` of the C header and the same shared library.
 
 Every binding exposes `redacted_json` (or the equivalent) and its conformance
 test asserts that `CANARY_SECRET_` never appears. The canary is the same fixture
-the Rust redaction suite uses.
+the Rust redaction suite uses. `polyglot/STATUS.md` records the per-language
+evidence.

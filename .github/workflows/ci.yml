@@ -336,12 +336,45 @@ jobs:
         env:
           SCALA_CLI: /tmp/scala-cli
           POLYGLOT_CACHE: /tmp/konan-cache
+          ACTIVE_RPC_STRICT: "1"
         run: |
           mkdir -p /tmp/konan-cache
           # `golden` byte-compares every client's encoded request with the Rust
-          # reference encoder before the live round trips run.
+          # reference encoder. ACTIVE_RPC_STRICT turns a missing runtime into a
+          # failure, so the job cannot go green by dropping a language.
           bash polyglot/rpc/run_clients.sh /tmp/rpc "$PWD" \
             python c cpp zig js go ruby php lua dart java kotlin scala csharp swift ktnative assemblyscript shell golden
+
+  polyglot-matrix:
+    # The C-8 release gate. Every language job must pass; one red language job
+    # fails this aggregate gate, and with it phase C-8.
+    if: always()
+    needs:
+      - abi
+      - wasm
+      - polyglot-native
+      - polyglot-go
+      - polyglot-ts
+      - polyglot-scripting
+      - polyglot-dotnet
+      - polyglot-jvm
+      - polyglot-swift
+      - polyglot-kotlin-native
+      - polyglot-assemblyscript
+      - polyglot-shell
+      - polyglot-rpc
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every language job to pass
+        run: |
+          failed=0
+          for result in ${{ join(needs.*.result, ' ') }}; do
+            if [ "$result" != "success" ]; then
+              echo "language job result: $result" >&2
+              failed=1
+            fi
+          done
+          exit "$failed"
 
   msrv:
     runs-on: ubuntu-latest

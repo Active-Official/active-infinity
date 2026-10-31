@@ -34,7 +34,16 @@ fail=0
 failed=()
 
 for client in "${CLIENTS[@]}"; do
-  client_available "$client" || continue
+  if ! client_available "$client"; then
+    # CI runs with ACTIVE_RPC_STRICT=1: a missing runtime is a red row, never a
+    # silent skip, so the matrix cannot go green by dropping a language.
+    if [ "${ACTIVE_RPC_STRICT:-0}" = "1" ]; then
+      echo "encoder $client: FAIL (runtime not installed)" >&2
+      failed+=("$client")
+      fail=$((fail + 1))
+    fi
+    continue
+  fi
   captured="/tmp/rpc-request-$client.hex"
   recorder_log="/tmp/rpc-recorder-$client.out"
   rm -f "$captured" "$recorder_log"

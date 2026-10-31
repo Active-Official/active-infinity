@@ -48,6 +48,7 @@ if [ ${#requested[@]} -eq 0 ]; then
   requested=("${CLIENTS[@]}" golden)
 fi
 
+missing=0
 for client in "${requested[@]}"; do
   if [ "$client" = golden ]; then
     command -v node >/dev/null || continue
@@ -55,7 +56,18 @@ for client in "${requested[@]}"; do
     bash polyglot/rpc/encoder_check.sh "$RPC" "$INFINITY"
     continue
   fi
-  client_available "$client" || continue
+  if ! client_available "$client"; then
+    if [ "${ACTIVE_RPC_STRICT:-0}" = "1" ]; then
+      echo "client $client: FAIL (runtime not installed)" >&2
+      missing=$((missing + 1))
+    fi
+    continue
+  fi
   echo "--- $client"
   "run_$client"
 done
+
+if [ "$missing" -ne 0 ]; then
+  echo "thin RPC matrix: $missing required runtime(s) missing" >&2
+  exit 1
+fi

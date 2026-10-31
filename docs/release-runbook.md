@@ -69,3 +69,12 @@ Install verification: `cargo install active-infinity-cli --version 0.3.0
 
 A CLI-only patch release is recorded here with its commit and does not move the
 library tag: the tag names the library version, and the CLI has its own.
+
+| 2026-10-31 | 2.3.0 | 0.3.1 | `5755064` | CLI-only patch; the library tag stays `v2.3.0` | `active-infinity-cli` 0.3.1 |
+
+Registry verification: `cargo install active-infinity-cli --version 0.3.1
+--locked` replaced 0.3.0, `active-infinity-cli --version` prints
+`active-infinity-cli 0.3.1 (active-infinity 2.3.0)`, and `conformance run`
+passes all 49 cases from the registry build. A consumer crate with
+`active-infinity = "2.3.0"` encodes, validates, hashes and decodes a module and
+reproduces the same bytes. The SBOM lists 161 components.

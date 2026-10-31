@@ -174,7 +174,7 @@ impl<'a> Validated<'a> {
         Ok(validated)
     }
 
-    /// Whether [`Validated::content_hash`] was recomputed and checked.
+    /// Whether the stored content hash was recomputed and checked.
     ///
     /// With `DecodeOpts { verify_hash: false }` the header's hash is a claim
     /// the reader never checked; a consumer that uses the hash as identity must

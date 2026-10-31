@@ -1,6 +1,10 @@
 # Changelog - Active Infinity
 
-## Unreleased
+## 2.3.0 - 2026-10-31
+
+Maturity release for the Active Maturity Program: proof sidecars and the
+three-way merge land on top of the 2.2.0 polyglot matrix. The AINF wire format
+is unchanged.
 
 ### Added
 

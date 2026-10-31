@@ -7,12 +7,12 @@ project. Module facade sources live in `facades/` and are excluded from the main
 
 | Crate | Version | Purpose |
 |---|---|---|
-| [`active-infinity`](https://crates.io/crates/active-infinity) | 2.2.0 | Canonical binary, graph-native, secret-safe module codec |
+| [`active-infinity`](https://crates.io/crates/active-infinity) | 2.3.0 | Canonical binary, graph-native, secret-safe module codec |
 | [`active-infinity-core`](https://crates.io/crates/active-infinity-core) | 0.1.1 | Encode, decode, validate and content-hash surface |
 | [`active-infinity-stream`](https://crates.io/crates/active-infinity-stream) | 0.1.1 | Bounded streaming frames and canonical reassembly |
 | [`active-infinity-interop`](https://crates.io/crates/active-infinity-interop) | 0.1.1 | Active IR, redacted JSON and Protobuf projections |
 | [`active-infinity-wasm`](https://crates.io/crates/active-infinity-wasm) | 0.1.1 | Reserved WebAssembly binding namespace |
-| [`active-infinity-cli`](https://crates.io/crates/active-infinity-cli) | 0.2.0 | `encode`, `validate`, `hash`, `decode`, `stream`, `store`, `dict`, `bench` and `conformance` |
+| [`active-infinity-cli`](https://crates.io/crates/active-infinity-cli) | 0.3.0 | `encode`, `validate`, `hash`, `decode`, `stream`, `store`, `dict`, `proof`, `bench` and `conformance` |
 
 Each facade is a thin, versioned re-export of the shipped module. The main
 crate remains the implementation and the source of truth.

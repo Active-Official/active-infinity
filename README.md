@@ -44,6 +44,16 @@ with the `infinity/...` code), `2` usage. The manual page is
 reference, including `store`, `stream` and `bench`, is
 [`cli/active-infinity-cli/README.md`](cli/active-infinity-cli/README.md).
 
+### Measured performance and polyglot status
+
+- [`docs/spec/performance.md`](docs/spec/performance.md): measured
+  encode/validate/decode tables, the competitor bakeoff and the CI regression
+  gate (`perf-gate`).
+- [`polyglot/STATUS.md`](polyglot/STATUS.md): pass/fail for every language in
+  the polyglot matrix, with the encoder conformance gate.
+- [`docs/adr/`](docs/adr/README.md): every structural decision, including the
+  proof sidecar and the three-way merge.
+
 ---
 
 ## The thirty-second version

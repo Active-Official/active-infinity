@@ -229,8 +229,12 @@ impl Section {
 }
 
 /// Round `value` up to the next multiple of 8.
+///
+/// Saturating: `u64::MAX` stays at the top of the range instead of wrapping to
+/// a small number (or panicking in a debug build). A size that large is then
+/// refused by the caller's bound check, which is the fail-closed direction.
 pub const fn align8(value: u64) -> u64 {
-    (value + 7) & !7
+    value.saturating_add(7) & !7
 }
 
 /// Canonical form of a float: `-0.0` becomes `+0.0`; every NaN becomes the
@@ -310,7 +314,7 @@ impl Header {
             return Err(Error::VersionMinor(minor));
         }
         if header_size as usize != HEADER_SIZE {
-            return Err(Error::HeaderSize(header_size as u8));
+            return Err(Error::HeaderSize(header_size));
         }
         if flags & !FLAG_KNOWN_MASK != 0 {
             return Err(Error::UnknownFlags(flags & !FLAG_KNOWN_MASK));
@@ -387,15 +391,19 @@ impl Header {
             out[base..base + 4].copy_from_slice(&span.offset.to_le_bytes());
             out[base + 4..base + 8].copy_from_slice(&span.count.to_le_bytes());
         }
+        // The reserved tail is part of the image and `parse` refuses a non-zero
+        // byte there, so it is written, not inherited from the caller's buffer
+        // (which may hold anything, including bytes from a previous secret).
+        out[64 + SECTION_COUNT * 8..HEADER_SIZE].fill(0);
     }
 }
 
 /// Decode limits applied to every untrusted buffer.
 ///
 /// Defaults are generous for real modules (millions of nodes) and tight
-/// enough that a hostile 160-byte buffer cannot make a reader allocate
-/// gigabytes. Every field is a hard ceiling; `0` is rejected at construction
-/// (there is no unlimited mode).
+/// enough that a hostile [`HEADER_SIZE`]-byte buffer cannot make a reader
+/// allocate gigabytes. Every field is a hard ceiling; `0` is rejected by
+/// [`Limits::check`] (there is no unlimited mode).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Limits {
     pub max_nodes: u32,
@@ -416,6 +424,10 @@ pub struct Limits {
     pub max_secret_bytes: u32,
     pub max_extensions: u32,
     pub max_prov_entries: u32,
+    /// Provenance hash-table entries.
+    pub max_hashes: u32,
+    /// Binding entries (the table carries a root word, then name/node pairs).
+    pub max_bindings: u32,
     pub max_total_bytes: u64,
     pub max_depth: u32,
 }
@@ -441,6 +453,8 @@ impl Default for Limits {
             max_secret_bytes: 16 << 20,
             max_extensions: 1 << 16,
             max_prov_entries: 1 << 16,
+            max_hashes: 1 << 20,
+            max_bindings: 1 << 20,
             max_total_bytes: 1 << 30,
             max_depth: 4096,
         }
@@ -469,26 +483,67 @@ impl Limits {
             max_secret_bytes: 1 << 16,
             max_extensions: 64,
             max_prov_entries: 256,
+            max_hashes: 4096,
+            max_bindings: 4096,
             max_total_bytes: 8 << 20,
             max_depth: 128,
         }
     }
 
-    /// Reject a limits value that would disable every ceiling.
+    /// Reject a limits value whose ceiling would disable it.
+    ///
+    /// Every field is covered: a zero anywhere is an argument error, not a
+    /// "limit" the reader discovers later as `infinity/limit` on the first
+    /// hostile input. The message names the field so a caller can fix it.
     pub fn check(&self) -> Result<()> {
-        for (name, value) in [
-            ("max_nodes", self.max_nodes),
-            ("max_string_bytes", self.max_string_bytes),
-            ("max_blob_bytes", self.max_blob_bytes),
-            ("max_units", self.max_units),
-            ("max_depth", self.max_depth),
-        ] {
+        let ceilings: [(&'static str, u64); 22] = [
+            ("max_nodes", self.max_nodes as u64),
+            ("max_edges", self.max_edges as u64),
+            ("max_children", self.max_children as u64),
+            ("max_fields", self.max_fields as u64),
+            ("max_parts", self.max_parts as u64),
+            ("max_strings", self.max_strings as u64),
+            ("max_string_bytes", self.max_string_bytes as u64),
+            ("max_blobs", self.max_blobs as u64),
+            ("max_blob_bytes", self.max_blob_bytes as u64),
+            ("max_annotations", self.max_annotations as u64),
+            ("max_units", self.max_units as u64),
+            ("max_types", self.max_types as u64),
+            ("max_aux", self.max_aux as u64),
+            ("max_numbers", self.max_numbers as u64),
+            ("max_secrets", self.max_secrets as u64),
+            ("max_secret_bytes", self.max_secret_bytes as u64),
+            ("max_extensions", self.max_extensions as u64),
+            ("max_prov_entries", self.max_prov_entries as u64),
+            ("max_hashes", self.max_hashes as u64),
+            ("max_bindings", self.max_bindings as u64),
+            ("max_total_bytes", self.max_total_bytes),
+            ("max_depth", self.max_depth as u64),
+        ];
+        for (name, value) in ceilings {
             if value == 0 {
                 return Err(Error::InvalidArgument(match name {
                     "max_nodes" => "max_nodes must be non-zero",
+                    "max_edges" => "max_edges must be non-zero",
+                    "max_children" => "max_children must be non-zero",
+                    "max_fields" => "max_fields must be non-zero",
+                    "max_parts" => "max_parts must be non-zero",
+                    "max_strings" => "max_strings must be non-zero",
                     "max_string_bytes" => "max_string_bytes must be non-zero",
+                    "max_blobs" => "max_blobs must be non-zero",
                     "max_blob_bytes" => "max_blob_bytes must be non-zero",
+                    "max_annotations" => "max_annotations must be non-zero",
                     "max_units" => "max_units must be non-zero",
+                    "max_types" => "max_types must be non-zero",
+                    "max_aux" => "max_aux must be non-zero",
+                    "max_numbers" => "max_numbers must be non-zero",
+                    "max_secrets" => "max_secrets must be non-zero",
+                    "max_secret_bytes" => "max_secret_bytes must be non-zero",
+                    "max_extensions" => "max_extensions must be non-zero",
+                    "max_prov_entries" => "max_prov_entries must be non-zero",
+                    "max_hashes" => "max_hashes must be non-zero",
+                    "max_bindings" => "max_bindings must be non-zero",
+                    "max_total_bytes" => "max_total_bytes must be non-zero",
                     _ => "max_depth must be non-zero",
                 }));
             }
@@ -586,7 +641,12 @@ impl Meta {
 
 /// Read a little-endian `u32`, mapping short input to a truncation error.
 pub fn read_u32(buf: &[u8], offset: usize) -> Result<u32> {
-    let end = offset + 4;
+    // A caller-supplied offset can be `usize::MAX`; `offset + 4` would wrap (or
+    // panic in a debug build) instead of reporting a truncated buffer.
+    let end = offset.checked_add(4).ok_or(Error::Truncated {
+        needed: u64::MAX,
+        found: buf.len() as u64,
+    })?;
     if end > buf.len() {
         return Err(Error::Truncated {
             needed: end as u64,
@@ -603,7 +663,10 @@ pub fn read_u32(buf: &[u8], offset: usize) -> Result<u32> {
 
 /// Read a little-endian `u64`, mapping short input to a truncation error.
 pub fn read_u64(buf: &[u8], offset: usize) -> Result<u64> {
-    let end = offset + 8;
+    let end = offset.checked_add(8).ok_or(Error::Truncated {
+        needed: u64::MAX,
+        found: buf.len() as u64,
+    })?;
     if end > buf.len() {
         return Err(Error::Truncated {
             needed: end as u64,
@@ -636,17 +699,46 @@ pub fn pad8(out: &mut Vec<u8>) {
 }
 
 /// The dialect this build implements: a hash over the format version and the
-/// semantic tables (unit discriminants, node kinds, aux tags). Stored in every
-/// header so a peer can refuse a module produced by an incompatible build
-/// before parsing a single record.
+/// Highest node kind this dialect defines.
+///
+/// A new kind is a dialect change: bump this, the preimage text below and the
+/// golden hash together, and treat the wire format as a new minor version.
+pub const NODE_KIND_MAX: u8 = 24;
+
+/// Aux tag values the dialect defines, in the order the preimage lists them.
+///
+/// The decoder validates every aux tag against this vocabulary; the preimage
+/// text and the golden hash are pinned to it by
+/// `tests/marathon_layout_tests.rs`, so adding a tag without updating the
+/// dialect fails the build's test gate instead of shipping quietly.
+pub const AUX_TAGS: &[u32] = &[
+    0, 1, 2, 3, 4, 10, 11, 12, 20, 21, 22, 23, 24, 25, 26, 30, 31,
+];
+
+/// The node-kind fragment of the dialect preimage.
+pub const DIALECT_KINDS_TEXT: &str = "node-kinds:0..=24";
+
+/// The aux-tag fragment of the dialect preimage.
+pub const DIALECT_AUX_TAGS_TEXT: &str = "aux-tags:0,1,2,3,4,10,11,12,20,21,22,23,24,25,26,30,31";
+
+/// The dialect hash every image carries at this format version.
+///
+/// Pinned by a test: changing the value changes every image, so it is a format
+/// decision with a version bump, never a side effect of an edit.
+pub const DIALECT_HASH_GOLDEN: u64 = 0x7782_d0ea_5e28_b75d;
+
+/// Dialect identity: format version plus the semantic tables (unit
+/// discriminants, node kinds, aux tags). Stored in every header so a peer can
+/// refuse a module produced by an incompatible build before parsing a single
+/// record.
 pub fn dialect_hash() -> u64 {
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"active-infinity/dialect");
     hasher.update(&FORMAT_MAJOR.to_le_bytes());
     hasher.update(&FORMAT_MINOR.to_le_bytes());
     hasher.update(&crate::unit::UNIT_MAX_BUILTIN.to_le_bytes());
-    hasher.update(b"node-kinds:0..=24");
-    hasher.update(b"aux-tags:0,1,2,3,4,10,11,12,20,21,22,23,24,25,26,30,31");
+    hasher.update(DIALECT_KINDS_TEXT.as_bytes());
+    hasher.update(DIALECT_AUX_TAGS_TEXT.as_bytes());
     let digest = hasher.finalize();
     let mut bytes = [0u8; 8];
     bytes.copy_from_slice(&digest.as_bytes()[..8]);

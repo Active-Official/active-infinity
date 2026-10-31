@@ -27,10 +27,10 @@ pub enum Error {
     VersionMajor(u16),
     /// Unsupported minor format version (readers never guess forward).
     VersionMinor(u16),
-    /// Header is shorter than the fixed 160-byte prefix.
+    /// Header is shorter than the fixed 224-byte header.
     HeaderTruncated,
     /// Header `header_size` field is not the supported fixed size.
-    HeaderSize(u8),
+    HeaderSize(u16),
     /// Header flags set bits this reader does not understand.
     UnknownFlags(u16),
     /// A reserved header or record field was non-zero.

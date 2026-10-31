@@ -64,6 +64,22 @@ without its section, is `infinity/annotation`, `infinity/provenance`,
 `dialect_hash = first 8 bytes of Blake3("active-infinity/dialect" || major ||
 minor || unit-table-limit || node-kind-range || aux-tag-set)`.
 
+The preimage is byte-exact and independent of host endianness or language:
+`major` and `minor` are 2-byte little-endian, `unit-table-limit` is 4-byte
+little-endian (`max(UNIT_MAX_BUILTIN)`, currently 8), and the two fragments are
+ASCII with no terminator:
+
+```text
+node-kinds:0..=24
+aux-tags:0,1,2,3,4,10,11,12,20,21,22,23,24,25,26,30,31
+```
+
+The tag list is in ascending order, comma-separated, with no spaces. The
+constants that produce it (`NODE_KIND_MAX`, `AUX_TAGS`, `DIALECT_KINDS_TEXT`,
+`DIALECT_AUX_TAGS_TEXT`) and the golden value `0x7782_d0ea_5e28_b75d` are pinned
+by `tests/marathon_layout_tests.rs`, which fails if a tag or kind is added
+without updating the preimage.
+
 A reader refuses a different dialect with `infinity/dialect` before parsing any
 record. The dialect changes only when the meaning of an existing id changes,
 which the versioning rules forbid (§10).
@@ -156,8 +172,24 @@ flag on a kind that defines none is `infinity/node`: nothing can hide in slack.
 Kinds above 24 are refused with `infinity/node`.
 
 `Secret` is a **kind**, not a bit: taint cannot be stripped by re-encoding.
-Two secret values never compare equal; the secret table is never enumerated by
-any projection.
+Two secret **payloads** never compare equal (`SecretBytes::eq` is always false);
+module equality blinds the payload and compares structure, which is what lets a
+re-encoded module equal its source without revealing whether two secrets match.
+`SecretBytes` overwrites its buffer on drop. The secret table is never
+enumerated by any projection.
+
+### 3.1a Reachability
+
+An image is a rooted graph: every node must be reachable from the module root,
+a binding, an annotation subject or a constraint expression. The wire validator
+enforces that (`infinity/node`, reason `unreachable node`).
+
+Canonicalization renumbers from those roots and **drops** unreachable nodes,
+because in-place stream deltas replace a subtree and leave the previous one
+orphaned on purpose: compacting the arena on every patch would turn a linear
+patch into a full rebuild. An in-memory module may therefore hold orphaned
+nodes; `InfinityModule::check_reachable` reports them for callers that need the
+wire rule, and `encode` produces the image without them.
 
 ### 3.2 Operator codes
 

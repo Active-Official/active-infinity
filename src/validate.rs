@@ -865,10 +865,10 @@ impl<'a> Validated<'a> {
 
     fn check_hashes(&self) -> Result<()> {
         let count = self.header.span(Section::Hashes).count;
-        if count as u64 > self.limits.max_nodes as u64 {
+        if count > self.limits.max_hashes {
             return Err(Error::Limit {
                 kind: "hashes",
-                limit: self.limits.max_nodes as u64,
+                limit: self.limits.max_hashes as u64,
             });
         }
         let base = self.header.span(Section::Hashes).offset as usize;
@@ -2070,7 +2070,7 @@ fn validate_counts(header: &Header, limits: Limits) -> Result<()> {
         (
             Section::Hashes,
             header.span(Section::Hashes).count,
-            u32::MAX,
+            limits.max_hashes,
         ),
         (
             Section::Extensions,
@@ -2080,7 +2080,7 @@ fn validate_counts(header: &Header, limits: Limits) -> Result<()> {
         (
             Section::Bindings,
             header.span(Section::Bindings).count,
-            u32::MAX,
+            limits.max_bindings,
         ),
     ];
     for (section, count, limit) in checks {

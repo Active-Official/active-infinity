@@ -107,6 +107,19 @@ impl From<&str> for SecretBytes {
     }
 }
 
+impl Drop for SecretBytes {
+    /// Overwrite the backing buffer before it is freed.
+    ///
+    /// The allocator hands a freed block to the next allocation, so without this
+    /// a secret survives in the heap (and in a core dump) after the module that
+    /// held it is dropped. This is best-effort by nature — a `clone` that was
+    /// already copied elsewhere is its own allocation and is zeroed when it is
+    /// dropped — and it is not a substitute for not copying secrets.
+    fn drop(&mut self) {
+        self.0.fill(0);
+    }
+}
+
 impl From<String> for SecretBytes {
     fn from(value: String) -> Self {
         SecretBytes(value.into_bytes())
@@ -1207,10 +1220,30 @@ impl InfinityModule {
     }
 
     /// Add a node, returning its id.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the arena already holds `u32::MAX` nodes, because a node id
+    /// is a `u32`. Use [`InfinityModule::try_push`] in code that accepts a
+    /// caller-controlled loop count.
     pub fn push(&mut self, node: Inode) -> NodeId {
-        let id = NodeId(u32::try_from(self.nodes.len()).expect("arena exceeds u32 ids"));
+        match self.try_push(node) {
+            Ok(id) => id,
+            Err(error) => panic!("{error}"),
+        }
+    }
+
+    /// Add a node, or report the arena is full.
+    pub fn try_push(&mut self, node: Inode) -> Result<NodeId, super::Error> {
+        if self.nodes.len() >= u32::MAX as usize {
+            return Err(super::Error::Limit {
+                kind: "nodes",
+                limit: u32::MAX as u64,
+            });
+        }
+        let id = NodeId(self.nodes.len() as u32);
         self.nodes.push(node);
-        id
+        Ok(id)
     }
 
     /// Alias for [`InfinityModule::push`], mirroring `Module::add_node`.
@@ -1417,7 +1450,21 @@ impl InfinityModule {
         map
     }
 
-    /// Check every structural invariant the wire format also enforces.
+    /// Check every structural invariant the wire format also enforces,
+    /// **except reachability**.
+    ///
+    /// References, table-field uniqueness, canonical numbers, constraint
+    /// coherence, bindings and acyclicity are checked here. Reachability is not,
+    /// for two reasons that are both part of the contract:
+    ///
+    /// - canonicalization renumbers from the roots and drops an unreachable node
+    ///   (`canonical.rs`), which is what lets `stream::apply_delta_in_place`
+    ///   replace a subtree without compacting the arena on every patch;
+    /// - a received image is checked by the wire validator
+    ///   (`validate::Validated`), which *does* refuse an unreachable node.
+    ///
+    /// Callers that hand-build a module and want the wire rule can call
+    /// [`Self::check_reachable`] explicitly.
     ///
     /// `max_nodes` and `max_depth` bound the work so a hostile module cannot
     /// make this function hang or recurse without limit.
@@ -1499,6 +1546,46 @@ impl InfinityModule {
         }
         self.check_acyclic(count)?;
         self.check_depth(max_depth)?;
+        Ok(())
+    }
+
+    /// Every node must be reachable from a root (module root, binding,
+    /// annotation subject or constraint expression).
+    ///
+    /// The wire validator refuses an unreachable node and canonicalization drops
+    /// one, so a module that passes every other check but hides a node would
+    /// encode to a *different* module — an orphan secret would vanish from the
+    /// image while `structurally_eq` reported the two as equal. This check is
+    /// linear and iterative.
+    pub fn check_reachable(&self) -> Result<(), super::Error> {
+        use super::Error;
+        let count = self.nodes.len();
+        if count == 0 {
+            return Ok(());
+        }
+        let mut seen = vec![false; count];
+        let mut stack: Vec<NodeId> = self
+            .roots()
+            .into_iter()
+            .filter(|id| !id.is_none() && id.index() < count)
+            .collect();
+        while let Some(id) = stack.pop() {
+            if seen[id.index()] {
+                continue;
+            }
+            seen[id.index()] = true;
+            for child in self.nodes[id.index()].children() {
+                if child.index() < count && !seen[child.index()] {
+                    stack.push(child);
+                }
+            }
+        }
+        if let Some(index) = seen.iter().position(|reached| !reached) {
+            return Err(Error::Node {
+                id: index as u32,
+                reason: "unreachable node",
+            });
+        }
         Ok(())
     }
 

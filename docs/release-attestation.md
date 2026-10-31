@@ -1,9 +1,9 @@
-# Release signing and attestation
+# Release attestation and the SBOM
 
 What protects an `active-infinity` release, and the result of the Sigstore/cosign
 spike run for the Absolute Max program (M-5.3). The procedure lives in
-`docs/release-runbook.md`; the RPC repository carries the same spike in
-`docs/release/signing.md` with its own artifacts.
+`docs/release-runbook.md`; the RPC repository carries the same spike in its own
+`docs/release-attestation.md`.
 
 ## What exists today
 
@@ -66,3 +66,5 @@ add a `publish` job with `permissions: { id-token: write, contents: read }`
 running `cargo publish`. Not enabled yet: the publisher must be registered on
 crates.io first, and the runbook publishes by hand with a token that is never
 stored in the repository.
+
+

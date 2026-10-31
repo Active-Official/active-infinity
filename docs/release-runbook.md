@@ -23,7 +23,7 @@ verifies it with `scripts/sbom.py --check`, creates the GitHub Release if it doe
 not exist, uploads the SBOM and asserts the asset is attached. The job can also
 be run for an existing tag with `workflow_dispatch`.
 
-Signing, attestation and the Sigstore spike: `docs/release/signing.md`.
+Signing, attestation and the Sigstore spike: `docs/release-attestation.md`.
 
 ## Order
 
@@ -99,3 +99,4 @@ Registry verification: `cargo install active-infinity-cli --version 0.3.1
 passes all 49 cases from the registry build. A consumer crate with
 `active-infinity = "2.3.0"` encodes, validates, hashes and decodes a module and
 reproduces the same bytes. The SBOM lists 161 components.
+

@@ -204,6 +204,21 @@ Agents read the same truth over MCP (`cp_metrics`, `cp_activity_state`,
 
 ---
 
+## Continuing work after compaction
+
+The maturity work is driven by `CHECKLIST.md` and `PROPOSAL.md`. When a long
+session is compacted, recover the working thread before editing:
+
+- `python scripts/recall.py --turns 20` prints the recent turns of the newest
+  Grok session for this workspace: user instructions, assistant notes and the
+  tools that ran. `--list` shows sessions, `--session <id>` selects one.
+- Durable release state lives in the workspace memory topic
+  (`~/.grok/memory-v2/workspaces/*/topics/active-infinity-rpc-release.md`).
+- The current phase and its acceptance criteria are in `CHECKLIST.md`, with the
+  reasoning in `PROPOSAL.md`.
+
+The script reads local session files only; it sends nothing anywhere.
+
 ## License
 
 MIT OR Apache-2.0

@@ -121,6 +121,11 @@ impl Frame {
     }
 
     /// Parse one frame, returning it and the number of bytes consumed.
+    ///
+    /// A buffer shorter than the magic is `infinity/stream-magic`: the first four
+    /// bytes identify the format, exactly as the file codec does. A buffer with
+    /// the magic but not the whole header is `infinity/truncated`, which is what
+    /// [`StreamDecoder::push_bytes`] uses to decide to wait for more input.
     pub fn parse(buf: &[u8]) -> Result<(Frame, usize)> {
         if buf.len() < 4 || buf[0..4] != STREAM_MAGIC {
             return Err(Error::StreamMagic);
@@ -430,21 +435,21 @@ impl DeltaOp {
                 out.push(1);
                 out.extend_from_slice(&target.0.to_le_bytes());
                 let image = encode_with(fragment, EncodeOpts::default())?;
-                out.extend_from_slice(&(image.len() as u32).to_le_bytes());
+                out.extend_from_slice(
+                    &u32::try_from(image.len())
+                        .map_err(|_| Error::TooLarge)?
+                        .to_le_bytes(),
+                );
                 out.extend_from_slice(&image);
             }
             DeltaOp::SetBinding { name, node } => {
                 out.push(3);
-                let bytes = name.as_bytes();
-                out.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
-                out.extend_from_slice(bytes);
+                write_delta_string(out, name)?;
                 out.extend_from_slice(&node.0.to_le_bytes());
             }
             DeltaOp::RemoveBinding { name } => {
                 out.push(4);
-                let bytes = name.as_bytes();
-                out.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
-                out.extend_from_slice(bytes);
+                write_delta_string(out, name)?;
             }
             DeltaOp::SetAnnotation { node, kind } => {
                 out.push(5);
@@ -567,6 +572,14 @@ impl DeltaOp {
                         Some(take_hash(buf, cursor)?)
                     };
                     let count = take_u32(buf, cursor)?;
+                    if count > limits.max_prov_entries {
+                        // A 64 MiB frame fits millions of tiny entries; the ceiling
+                        // has to fire before the loop, not after it.
+                        return Err(Error::Limit {
+                            kind: "delta provenance entries",
+                            limit: limits.max_prov_entries as u64,
+                        });
+                    }
                     let mut entries = Vec::with_capacity(count.min(4096) as usize);
                     for _ in 0..count {
                         let key = take_string(buf, cursor)?;
@@ -660,13 +673,26 @@ pub(crate) fn merge_fragment(
     fragment: &InfinityModule,
 ) -> Result<NodeId> {
     let base_count = base.node_count();
-    let map: Vec<NodeId> = (0..fragment.node_count())
-        .map(|index| NodeId(base_count as u32 + index as u32))
+    // A fragment can be as large as a frame allows, so the merged arena is the
+    // first place a hostile delta could wrap the u32 id space.
+    let merged = base_count
+        .checked_add(fragment.node_count())
+        .filter(|total| *total <= u32::MAX as usize)
+        .ok_or(Error::Limit {
+            kind: "nodes",
+            limit: u32::MAX as u64,
+        })?;
+    let map: Vec<NodeId> = (base_count..merged)
+        .map(|index| NodeId(index as u32))
         .collect();
     for node in fragment.nodes() {
-        base.push(remap_node(node, &map)?);
+        let remapped = remap_node(node, &map)?;
+        base.try_push(remapped)?;
     }
-    Ok(map[fragment.root().unwrap_or(NodeId(0)).index()])
+    let root = fragment
+        .root()
+        .and_then(|root| map.get(root.index()).copied());
+    root.ok_or(Error::StreamDelta("fragment has no root"))
 }
 
 /// A reassembled stream generation.
@@ -754,6 +780,11 @@ impl StreamDecoder {
     }
 
     /// Feed one parsed frame.
+    ///
+    /// A frame that fails semantic validation leaves the decoder exactly as it
+    /// was: the sequence counter, the frame counter and any partially decoded
+    /// deltas are restored, so the caller can fix the input and retry instead of
+    /// being wedged at a sequence error.
     pub fn push(&mut self, frame: &Frame) -> Result<()> {
         if frame.sequence != self.expected {
             return Err(Error::StreamSequence {
@@ -761,8 +792,25 @@ impl StreamDecoder {
                 found: frame.sequence,
             });
         }
+        let deltas_before = self.pending_deltas.len();
+        let bytes_before = self.pending_delta_bytes;
+        let expected_before = self.expected;
+        let frames_before = self.frames;
         self.expected += 1;
         self.frames += 1;
+        match self.push_inner(frame) {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                self.expected = expected_before;
+                self.frames = frames_before;
+                self.pending_deltas.truncate(deltas_before);
+                self.pending_delta_bytes = bytes_before;
+                Err(error)
+            }
+        }
+    }
+
+    fn push_inner(&mut self, frame: &Frame) -> Result<()> {
         match frame.kind {
             FrameKind::Begin => {
                 if self.begun {
@@ -831,7 +879,14 @@ impl StreamDecoder {
                         available: (frame.payload.len() - 9) as u64,
                     });
                 }
-                if section != self.cursor && section != self.cursor + 1 {
+                let any_seen = self.seen.iter().any(|seen| *seen);
+                if !any_seen {
+                    // A generation starts at section 0; starting later would leave
+                    // a hole that only fails at `End`, with a worse code.
+                    if section != 0 {
+                        return Err(Error::StreamState("sections out of order"));
+                    }
+                } else if section != self.cursor && section != self.cursor + 1 {
                     return Err(Error::StreamState("sections out of order"));
                 }
                 if section == self.cursor + 1 {
@@ -840,29 +895,34 @@ impl StreamDecoder {
                 if self.seen[section] && self.counts[section] != count {
                     return Err(Error::StreamState("section count changed mid-stream"));
                 }
-                self.seen[section] = true;
-                self.counts[section] = count;
-                self.sections[section].extend_from_slice(&frame.payload[9..]);
-                // A generation cannot occupy more than it declared. Without
-                // this bound, an endless run of batches for one section would
-                // allocate until the process dies before `End` is seen.
-                let accumulated: usize = self.sections.iter().map(|section| section.len()).sum();
+                // A generation cannot occupy more than it declared. Without this
+                // bound, an endless run of batches for one section would allocate
+                // until the process dies before `End` is seen. The check runs
+                // before the append, and the sums saturate instead of wrapping.
+                let accumulated = self
+                    .sections
+                    .iter()
+                    .fold(0usize, |total, section| total.saturating_add(section.len()));
                 let declared = self
                     .total_size
                     .map(|size| size.min(usize::MAX as u64) as usize)
                     .unwrap_or(usize::MAX);
-                if accumulated > declared {
+                let prospective = accumulated.saturating_add(frame.payload.len() - 9);
+                if prospective > declared {
                     return Err(Error::Limit {
                         kind: "stream bytes",
                         limit: declared as u64,
                     });
                 }
-                if accumulated as u64 > self.limits.max_total_bytes {
+                if prospective as u64 > self.limits.max_total_bytes {
                     return Err(Error::Limit {
                         kind: "stream bytes",
                         limit: self.limits.max_total_bytes,
                     });
                 }
+                self.seen[section] = true;
+                self.counts[section] = count;
+                self.sections[section].extend_from_slice(&frame.payload[9..]);
             }
             FrameKind::Delta => {
                 if !self.ended {
@@ -923,6 +983,9 @@ impl StreamDecoder {
                         .ok_or(Error::StreamState("no module to patch"))?;
                     let updated = apply_delta(base, &self.pending_deltas)?;
                     self.pending_deltas.clear();
+                    // The budget covers one generation's pending deltas; a
+                    // long-lived session must not accumulate across generations.
+                    self.pending_delta_bytes = 0;
                     let image = encode_with(&updated, EncodeOpts::default())?;
                     if image.len() as u64 != size {
                         return Err(Error::StreamDelta("delta changed the declared size"));
@@ -1085,9 +1148,19 @@ impl StreamEncoder {
         let updated = apply_delta(base, ops)?;
         let image = encode_with(&updated, EncodeOpts::default())?;
         let mut payload = Vec::new();
-        payload.extend_from_slice(&(ops.len() as u32).to_le_bytes());
+        payload.extend_from_slice(
+            &u32::try_from(ops.len())
+                .map_err(|_| Error::TooLarge)?
+                .to_le_bytes(),
+        );
         for op in ops {
             op.encode(&mut payload)?;
+        }
+        if payload.len() > MAX_FRAME_PAYLOAD as usize {
+            // The decoder refuses a frame over the ceiling, so emitting one would
+            // produce a stream that cannot be read. Delta frames carry one op set;
+            // a caller with more work sends another generation.
+            return Err(Error::TooLarge);
         }
         self.frames
             .push_back(Frame::new(FrameKind::Delta, self.sequence, payload));
@@ -1178,6 +1251,15 @@ fn take_hash(buf: &[u8], cursor: &mut usize) -> Result<[u8; 32]> {
     hash.copy_from_slice(&buf[*cursor..*cursor + 32]);
     *cursor += 32;
     Ok(hash)
+}
+
+/// Write a delta string: `u16` length, then the bytes (spec §4).
+fn write_delta_string(out: &mut Vec<u8>, text: &str) -> Result<()> {
+    let len = u16::try_from(text.len())
+        .map_err(|_| Error::StreamDelta("delta string exceeds the u16 length space"))?;
+    out.extend_from_slice(&len.to_le_bytes());
+    out.extend_from_slice(text.as_bytes());
+    Ok(())
 }
 
 fn take_string(buf: &[u8], cursor: &mut usize) -> Result<String> {

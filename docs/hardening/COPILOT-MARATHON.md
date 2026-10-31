@@ -19,7 +19,7 @@ the code → regression test first → minimal fix → targeted tests + clippy �
 | I-03 | encode / canonical | `src/encode.rs`, `src/canonical.rs` | **CLEAN** (round 2 fixed two more) | 11 fixed, 3 rejected, 0 open | `aef1efd`, `43b1078` |
 | I-04 | decode / view | `src/decode.rs`, `src/view.rs` | CLEAN | 7 fixed, 3 rejected, 0 open | this commit |
 | I-05 | IR / units | `src/ir.rs`, `src/unit.rs` | CLEAN | 5 fixed, 2 rejected, 1 deferred | this commit |
-| I-06 | stream / delta | `src/stream.rs` | pending | — | — |
+| I-06 | stream and delta | `src/stream.rs` | CLEAN | 7 fixed, 2 rejected, 0 open | this commit |
 | I-07 | schema | `src/schema.rs` | pending | — | — |
 | I-08 | store | `src/store.rs` | pending | — | — |
 | I-09 | compress | `src/compress.rs` | pending | — | — |
@@ -80,6 +80,22 @@ Gate: clippy clean; `cargo test --all-features` 248 passed, 0 failed.
 
 Gate: clippy clean; `cargo test --all-features` 252 passed and
 `--no-default-features` 207 passed, 0 failed.
+
+### I-06 stream and delta — 2026-10-31
+
+| # | Severity | Finding | Disposition |
+|---|---|---|---|
+| 1 | critical | `SetBinding`/`RemoveBinding` wrote the name length as u32 while the decoder and the spec (§4) use u16, so every binding delta was misparsed | **fixed**: one `write_delta_string` writes `u16` with a length check; `binding_deltas_round_trip` |
+| 2 | high | `pending_delta_bytes` accumulated across generations, so an honest long-lived stream eventually failed with `infinity/limit` | **fixed**: the budget resets when a generation completes; `an_incremental_generation_resets_its_delta_budget` |
+| 3 | high | `push` bumped the sequence and frame counters before processing, so one bad frame wedged the decoder and the retry reported a sequence error | **fixed**: `push` is a wrapper that snapshots the counters and pending deltas, calls `push_inner`, and restores on failure; `a_failed_frame_does_not_consume_its_sequence_number` |
+| 4 | high | `merge_fragment` used a wrapping `as u32` add, a panicking `push`, an unchecked map lookup and no node bound | **fixed**: checked total against the u32 space (`infinity/limit`), `try_push`, and a rootless fragment is `infinity/stream-delta`; `a_fragment_without_a_root_is_refused` |
+| 5 | high | the delta decoder read a provenance entry count with no `max_prov_entries` check, so a 64 MiB frame could force millions of entries | **fixed**: the ceiling fires before the loop; `a_delta_provenance_block_is_bounded_by_its_entry_ceiling` |
+| 6 | medium | `push_delta` packed every op into one frame with no payload ceiling and `as u32` lengths, so the encoder could emit a stream its own decoder refuses | **fixed**: `u32::try_from` for the op count and fragment length, and a payload over `MAX_FRAME_PAYLOAD` is `infinity/too-large` |
+| 7 | medium | `Frame::parse` on a 1–3 byte buffer reports `infinity/stream-magic` | **rejected**: the first four bytes identify the format, exactly as the file codec does, and `push_bytes` never calls `parse` without a full header; the contract is now documented on the function |
+| 8 | medium | distinct `StreamDelta` messages (`root`/`target`/`binding`…) form a node-existence oracle | **rejected**: a delta is applied by the party that supplied it, against its own module; the message tells that party about its own data |
+| 9 | low | a batch could start at section 1, and the accumulated-size check used a wrapping `sum` after appending | **fixed**: the first batch must be section 0, the sum saturates, and the bound is checked before the append; `a_generation_must_start_at_section_zero` |
+
+Gate: clippy clean; `cargo test --all-features` 258 passed, 0 failed.
 
 ### I-01 layout / header — 2026-10-31 (rounds 1 and 2)
 

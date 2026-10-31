@@ -912,6 +912,7 @@ impl<'a> Validated<'a> {
                 });
             }
             let mut entries: Vec<(u32, u32)> = Vec::with_capacity(len as usize);
+            let mut previous_member: Option<&str> = None;
             for index in start..start + len {
                 let (tag, value) = self.aux(index)?;
                 if let Some(used) = aux_used.get_mut(index as usize) {
@@ -931,6 +932,19 @@ impl<'a> Validated<'a> {
                         if value >= self.header.span(Section::Strings).count {
                             return Err(Error::StringRef(value));
                         }
+                        // Canonicalization sorts an enum's members by their
+                        // text, so an unsorted pair would validate and then
+                        // re-encode to a different image.
+                        let member = self.string(value)?;
+                        if let Some(previous) = previous_member {
+                            if previous > member {
+                                return Err(Error::Type {
+                                    id,
+                                    reason: "enum members are not in canonical order",
+                                });
+                            }
+                        }
+                        previous_member = Some(member);
                     }
                     (7, crate::layout::AUX_TYPE_TABLE) => {
                         if value > 1 {
@@ -1104,6 +1118,11 @@ impl<'a> Validated<'a> {
             // Verify the payload once, here. The node check used to re-hash the
             // same payload for every node that referenced it, so N nodes sharing a
             // large blob forced N hashes of it.
+            // A materialised payload hashes to its bytes, including the empty
+            // payload: an entry with length zero and a wrong hash would pass a
+            // `if len != 0` guard and re-encode differently. A detached blob
+            // (no payload flag) may carry any declared hash, so this check
+            // cannot live here; the node arm verifies the empty case.
             if len != 0 {
                 let payload = &self.buf[(heap + off as u64) as usize..payload_end as usize];
                 let mut hasher = blake3::Hasher::new();
@@ -1449,6 +1468,7 @@ impl<'a> Validated<'a> {
                         });
                     }
                     let mut seen_kinds = Vec::new();
+                    let mut bounds: Option<(i64, i64)> = None;
                     for offset in rec.b..rec.b + rec.c {
                         if let Some(used) = aux_used.get_mut(offset as usize) {
                             if *used {
@@ -1470,6 +1490,14 @@ impl<'a> Validated<'a> {
                                         reason: "constraint bound out of range",
                                     });
                                 }
+                                let bound = self.number(value)?;
+                                if tag == crate::layout::AUX_CONSTRAINT_MIN {
+                                    let max = bounds.map(|(_, max)| max).unwrap_or(i64::MAX);
+                                    bounds = Some((bound, max));
+                                } else {
+                                    let min = bounds.map(|(min, _)| min).unwrap_or(i64::MIN);
+                                    bounds = Some((min, bound));
+                                }
                             }
                             crate::layout::AUX_CONSTRAINT_ENUM_ITEM
                             | crate::layout::AUX_CONSTRAINT_PATTERN
@@ -1479,6 +1507,19 @@ impl<'a> Validated<'a> {
                                     id: index,
                                     reason: "unknown constraint aux tag",
                                 })
+                            }
+                        }
+                    }
+                    if rec.aux == crate::layout::CONSTRAINT_KIND_MIN_MAX {
+                        // The tags are ordered MIN then MAX; the *values* must
+                        // also be. A reversed pair decodes to min > max, which
+                        // the IR rejects, so the wire must reject it too.
+                        if let Some((min, max)) = bounds {
+                            if min > max {
+                                return Err(Error::Node {
+                                    id: index,
+                                    reason: "min bound exceeds max",
+                                });
                             }
                         }
                     }
@@ -1687,12 +1728,17 @@ impl<'a> Validated<'a> {
                     }
                     // The payload's hash is verified once per entry in
                     // `check_blobs`; here only the node's view of it is checked.
-                    let _ = &hash;
                     if has_payload {
                         if len as u64 != size {
                             return Err(Error::Blob {
                                 id: rec.a as u32,
                                 reason: "payload length disagrees with size",
+                            });
+                        }
+                        if size == 0 && blake3::hash(&[]).as_bytes() != &hash {
+                            return Err(Error::Blob {
+                                id: rec.a as u32,
+                                reason: "empty payload hash mismatch",
                             });
                         }
                     } else if len != 0 {
@@ -1986,6 +2032,12 @@ impl<'a> Validated<'a> {
         if len == 0 {
             return Ok(());
         }
+        if len as u64 > u64::from(limits.max_prov_bytes) {
+            return Err(Error::Limit {
+                kind: "provenance bytes",
+                limit: u64::from(limits.max_prov_bytes),
+            });
+        }
         let start = self.header.span(Section::Provenance).offset as usize;
         if len < PROV_HEADER_SIZE {
             return Err(Error::Provenance("block shorter than its header"));
@@ -1997,8 +2049,9 @@ impl<'a> Validated<'a> {
                 limit: limits.max_prov_entries as u64,
             });
         }
-        if PROV_HEADER_SIZE
-            .checked_add(count as usize * PROV_ENTRY_SIZE)
+        if (count as usize)
+            .checked_mul(PROV_ENTRY_SIZE)
+            .and_then(|entries| PROV_HEADER_SIZE.checked_add(entries))
             .map(|needed| needed > len)
             .unwrap_or(true)
         {
@@ -2010,7 +2063,11 @@ impl<'a> Validated<'a> {
         // small image.
         let mut projected: u64 = 0;
         for index in 0..count as usize {
-            let entry = start + PROV_HEADER_SIZE + index * PROV_ENTRY_SIZE;
+            let entry = index
+                .checked_mul(PROV_ENTRY_SIZE)
+                .and_then(|offset| offset.checked_add(PROV_HEADER_SIZE))
+                .and_then(|offset| offset.checked_add(start))
+                .ok_or(Error::Provenance("entry offset overflows"))?;
             let kind = read_u32(self.buf, entry)?;
             let key = self
                 .string(read_u32(self.buf, entry + 4)?)
@@ -2027,7 +2084,7 @@ impl<'a> Validated<'a> {
                 .saturating_add(value_len);
             if projected > limits.max_total_bytes {
                 return Err(Error::Limit {
-                    kind: "provenance bytes",
+                    kind: "provenance projection bytes",
                     limit: limits.max_total_bytes,
                 });
             }
@@ -2369,7 +2426,7 @@ fn validate_counts(header: &Header, limits: Limits) -> Result<()> {
         (
             Section::Provenance,
             header.span(Section::Provenance).count,
-            u32::MAX,
+            limits.max_prov_bytes,
         ),
         (
             Section::Hashes,
@@ -2605,6 +2662,12 @@ fn section_end(
 }
 
 /// Validate a buffer with the default options.
+///
+/// This proves structural validity and the stored hash. It does **not** prove
+/// the canonical form: an image can carry a sorted but unreferenced string,
+/// blob or type entry, which the decoder drops and `validate_canonical` (or
+/// `DecodeOpts::paranoid()`) rejects by re-encoding. Use the canonical proof
+/// whenever the bytes themselves are evidence (dedup, signatures, caching).
 pub fn validate(buf: &[u8]) -> Result<Meta> {
     Validated::new(buf, crate::layout::DecodeOpts::default()).map(|validated| validated.meta())
 }

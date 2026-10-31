@@ -6,10 +6,12 @@
 //! against the code as it stood before the fix.
 
 use active_infinity::layout::{
-    align8, dialect_hash, Header, Limits, SectionSpan, FLAG_CANONICAL, FORMAT_MAJOR, FORMAT_MINOR,
-    HEADER_SIZE, SECTION_COUNT,
+    align8, dialect_hash, Header, Limits, Section, SectionSpan, FLAG_CANONICAL, FORMAT_MAJOR,
+    FORMAT_MINOR, HEADER_SIZE, SECTION_COUNT,
 };
-use active_infinity::{Error, InfinityModule, Inode, SecretBytes};
+use active_infinity::{
+    encode, validate_with, DecodeOpts, Error, InfinityModule, Inode, Provenance, SecretBytes,
+};
 
 fn header() -> Header {
     Header {
@@ -101,12 +103,13 @@ fn every_zero_ceiling_is_refused() {
     ceiling!(max_secrets);
     ceiling!(max_secret_bytes);
     ceiling!(max_extensions);
+    ceiling!(max_prov_bytes);
     ceiling!(max_prov_entries);
     ceiling!(max_hashes);
     ceiling!(max_bindings);
     ceiling!(max_total_bytes);
     ceiling!(max_depth);
-    assert_eq!(cases.len(), 22, "every field of Limits is covered");
+    assert_eq!(cases.len(), 23, "every field of Limits is covered");
 
     for (name, zero) in cases {
         let mut limits = Limits::default();
@@ -192,15 +195,15 @@ fn unreachable_nodes_are_reported_and_dropped_by_canonicalization() {
 }
 
 #[test]
-fn a_hostile_offset_is_reported_as_truncated_not_a_wrap() {
+fn a_hostile_offset_is_reported_as_an_offset_fault_not_a_wrap() {
     // `read_u32(buf, usize::MAX)` used to compute `offset + 4`, which wraps in
     // release and panics in debug. A hostile offset is a truncated buffer.
     let error = active_infinity::layout::read_u32(&[0u8; 8], usize::MAX)
         .expect_err("an impossible offset is out of bounds");
-    assert_eq!(error.code(), "infinity/truncated");
+    assert_eq!(error.code(), "infinity/offset");
     let error = active_infinity::layout::read_u64(&[0u8; 8], usize::MAX)
         .expect_err("an impossible offset is out of bounds");
-    assert_eq!(error.code(), "infinity/truncated");
+    assert_eq!(error.code(), "infinity/offset");
 }
 
 #[test]
@@ -231,4 +234,53 @@ fn a_reachable_module_still_validates() {
     module
         .validate_structure(u64::MAX, 4096)
         .expect("a tree rooted at the root node is fine");
+}
+
+#[test]
+fn the_wire_section_order_matches_its_discriminants() {
+    // `span()` indexes the header array with `as usize`; a reordered variant
+    // would silently read another section's descriptor.
+    for (index, section) in Section::ALL.iter().enumerate() {
+        assert_eq!(*section as usize, index, "section order drifted");
+    }
+    assert_eq!(Section::ALL.len(), SECTION_COUNT);
+}
+
+#[test]
+fn a_provenance_block_over_its_byte_ceiling_is_a_limit() {
+    // The block holds string ids, so its size grows with the entry count, not
+    // with the text. 1,100 entries are 17,600 bytes of block: inside the
+    // default 64 KiB ceiling and beyond the strict 16 KiB one.
+    let mut module = InfinityModule::new();
+    let root = module.push(Inode::Int(1));
+    module.set_root(Some(root));
+    let entries: Vec<active_infinity::ProvEntry> = (0..1_100)
+        .map(|index| active_infinity::ProvEntry {
+            key: format!("k{index:04}"),
+            value: active_infinity::ProvValue::Int(index),
+        })
+        .collect();
+    module.set_provenance(Some(Provenance {
+        entries,
+        ..Provenance::default()
+    }));
+    let image = encode(&module).expect("encode under the default limits");
+
+    // The strict default for entries would fire first; keep the entry ceiling
+    // permissive so the byte ceiling is the one under test. The block is a
+    // non-fatal limit, not a malformed provenance block.
+    let limits = Limits {
+        max_prov_entries: Limits::default().max_prov_entries,
+        ..Limits::strict()
+    };
+    let error = validate_with(
+        &image,
+        DecodeOpts {
+            limits,
+            ..DecodeOpts::default()
+        },
+    )
+    .expect_err("the strict provenance byte ceiling must refuse the block");
+    assert_eq!(error.code(), "infinity/limit", "{error}");
+    assert!(error.to_string().contains("provenance"), "{error}");
 }

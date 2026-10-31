@@ -647,6 +647,7 @@ fn limits_from(case: &serde_json::Value) -> Result<Limits, String> {
             "max_secrets" => limits.max_secrets = narrow()?,
             "max_secret_bytes" => limits.max_secret_bytes = narrow()?,
             "max_extensions" => limits.max_extensions = narrow()?,
+            "max_prov_bytes" => limits.max_prov_bytes = narrow()?,
             "max_prov_entries" => limits.max_prov_entries = narrow()?,
             "max_total_bytes" => limits.max_total_bytes = value,
             "max_depth" => limits.max_depth = narrow()?,

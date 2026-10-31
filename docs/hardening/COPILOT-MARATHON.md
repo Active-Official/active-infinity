@@ -575,3 +575,33 @@ Gate: `cargo check --manifest-path fuzz/Cargo.toml` clean; the nine-target Docke
 campaign runs without a crash (2,000 runs each, `fuzz_compressed_frame` also at
 3,000); `tests/fuzz_manifest_tests.rs` green and proved to fail when a target is
 removed from the Docker lane.
+
+### Re-audit loop, round 2 (I-01) and round 4 (I-02) - 2026-10-31
+
+The user requires repeated rounds until no new critical/high/medium remains.
+Each round re-reads the current tree, verifies the prior fixes and hunts deep
+nested defects.
+
+**I-01 round 2** (3 medium, 3 low):
+
+| # | Severity | Finding | Disposition |
+|---|---|---|---|
+| 1 | medium | `Header::write` panics on a short buffer | **rejected**: it is the documented panicking form of `try_write` (the same contract as slice indexing); a caller sizing from untrusted input uses `try_write`, which returns `infinity/invalid-argument` |
+| 2 | medium | `Section` had implicit discriminants while `span()` indexes by `as usize`; a future reorder would silently remap sections | **fixed**: explicit `= 0..=16` and a compile-time assertion that `Section::ALL[i] as usize == i`; `the_wire_section_order_matches_its_discriminants` |
+| 3 | medium | the provenance block had no byte ceiling (`max_prov_entries` bounds entries, not the section) | **fixed**: `Limits::max_prov_bytes` (64 KiB default, 16 KiB strict), checked before the block is walked and in the section-count table; a block over it is a non-fatal `infinity/limit`; `a_provenance_block_over_its_byte_ceiling_is_a_limit` |
+| 4 | low | `read_u32`/`read_u64` reported a wrapped offset as `Truncated { needed: u64::MAX }` | **fixed**: `infinity/offset` with the offending offset; the test that pinned the old code was updated |
+| 5 | low | the spec said `UNIT_MAX_BUILTIN` is 8; the code hashes 66 | **fixed in the spec** (`currently 66`) |
+| 6 | low | `Meta::has_annotations` checks the count, `has_provenance` the flag | **rejected as a false alarm**: `Validated::new` already rejects a flag/count disagreement in both directions (`validate.rs:79-115`), so the two are equivalent for a validated image |
+
+**I-02 round 4** (2 high, 2 medium, 1 low):
+
+| # | Severity | Finding | Disposition |
+|---|---|---|---|
+| 1 | high | an empty materialised blob skipped the payload hash (`if len != 0`) | **fixed**: the node arm requires `Blake3("")` for a zero-size payload with the payload flag; `an_empty_materialised_blob_with_a_wrong_hash_is_refused` (fails pre-fix) |
+| 2 | high | enum members were not required to be in canonical (text) order: an image validated and then re-encoded to different bytes | **fixed**: consecutive members must be non-decreasing by text; `unsorted_enum_members_are_refused` (fails pre-fix) |
+| 3 | medium | a `MIN`/`MAX` pair checked tag order but not values | **fixed**: resolve both bounds and refuse `min > max`; `a_reversed_min_max_constraint_is_refused` (fails pre-fix) |
+| 4 | medium | strings/blobs/secrets/types/units/numbers/hashes have no reference-coverage bitmap, so an unreferenced but sorted entry validates and only `validate_canonical` rejects it | **rejected as a documented level split**: `validate` proves structural validity; `validate_canonical` proves the bytes are the canonical encoding (decode + re-encode equality), which catches every orphan. Duplicating the canonical proof in `validate` would double the work on the hot path for no additional guarantee. The `validate` doc now says so |
+| 5 | low | the provenance pre-check multiplied `count * PROV_ENTRY_SIZE` unchecked | **fixed**: `checked_mul`/`checked_add` in both the pre-check and the entry walk |
+
+Gate: 316 all-features, clippy clean both feature sets; the four new behavioural
+tests fail against the pre-fix tree.

@@ -546,3 +546,100 @@ fn the_provenance_ceiling_is_checked_before_the_block_is_walked() {
         "the reported ceiling is the entry cap, got {error}"
     );
 }
+
+fn rehash_in_place(bytes: &mut [u8]) {
+    let hash = active_infinity::hash_image(bytes).expect("hash");
+    bytes[16..48].copy_from_slice(&hash);
+}
+
+fn aux_value_offset(bytes: &[u8], index: u32) -> usize {
+    let header = Header::parse(bytes).expect("header");
+    header.span(Section::Aux).offset as usize + index as usize * 8 + 4
+}
+
+fn swap_aux_values(bytes: &mut [u8], first: u32, second: u32) {
+    let a = aux_value_offset(bytes, first);
+    let b = aux_value_offset(bytes, second);
+    let first_value = u32::from_le_bytes(bytes[a..a + 4].try_into().expect("4 bytes"));
+    let second_value = u32::from_le_bytes(bytes[b..b + 4].try_into().expect("4 bytes"));
+    bytes[a..a + 4].copy_from_slice(&second_value.to_le_bytes());
+    bytes[b..b + 4].copy_from_slice(&first_value.to_le_bytes());
+}
+
+#[test]
+fn an_empty_materialised_blob_with_a_wrong_hash_is_refused() {
+    use active_infinity::Inode;
+
+    let mut module = InfinityModule::new();
+    let blob = module.push(Inode::Blob {
+        hash: *blake3::hash(b"").as_bytes(),
+        size: 0,
+        tainted: false,
+        media_type: "application/octet-stream".to_string(),
+        payload: Some(Vec::new()),
+    });
+    module.set_root(Some(blob));
+    let mut bytes = encode(&module).expect("encode");
+    let header = Header::parse(&bytes).expect("header");
+    let table = header.span(Section::Blobs).offset as usize;
+    // A zero-length payload skips the payload hash loop; the node arm must
+    // still hold the entry to Blake3 of the empty string.
+    bytes[table] ^= 0x01;
+    rehash_in_place(&mut bytes);
+    let error = validate(&bytes).expect_err("the empty payload hash must be checked");
+    assert_eq!(error.code(), "infinity/blob", "{error}");
+    assert!(error.to_string().contains("empty payload"), "{error}");
+}
+
+#[test]
+fn unsorted_enum_members_are_refused() {
+    use active_infinity::{Inode, SchemaFieldSpec, TypeSpec};
+
+    let mut module = InfinityModule::new();
+    let field = module.push(Inode::SchemaField(SchemaFieldSpec {
+        typ: TypeSpec::Enum(vec!["alpha".to_string(), "beta".to_string()]),
+        min: None,
+        max: None,
+        min_len: None,
+        max_len: None,
+        pattern: None,
+        default: None,
+        deprecated: None,
+    }));
+    let root = module.push(Inode::Table {
+        fields: vec![("kind".to_string(), field)],
+    });
+    module.set_root(Some(root));
+    let mut bytes = encode(&module).expect("encode");
+    // The two enum members are the only aux entries, in text order. Swapping
+    // their string ids makes the members [beta, alpha].
+    swap_aux_values(&mut bytes, 0, 1);
+    rehash_in_place(&mut bytes);
+    let error = validate(&bytes).expect_err("an unsorted enum is not canonical");
+    assert_eq!(error.code(), "infinity/type", "{error}");
+    assert!(error.to_string().contains("canonical order"), "{error}");
+}
+
+#[test]
+fn a_reversed_min_max_constraint_is_refused() {
+    use active_infinity::{Constraint, Inode};
+
+    let mut module = InfinityModule::new();
+    let value = module.push(Inode::Int(5));
+    let constrained = module.push(Inode::Constrained {
+        target: value,
+        constraint: Constraint::MinMax {
+            min: Some(1),
+            max: Some(9),
+        },
+    });
+    module.set_root(Some(constrained));
+    let mut bytes = encode(&module).expect("encode");
+    // The encoder writes MIN then MAX with the number-table ids. Swapping the
+    // values keeps the tags ascending but makes min resolve to 9 and max to 1.
+    swap_aux_values(&mut bytes, 0, 1);
+    rehash_in_place(&mut bytes);
+    let error = validate(&bytes).expect_err("min > max is not a legal constraint");
+    assert_eq!(error.code(), "infinity/node", "{error}");
+    assert!(error.to_string().contains("min bound"), "{error}");
+}

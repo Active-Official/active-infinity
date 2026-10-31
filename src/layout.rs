@@ -164,25 +164,36 @@ pub const SECTION_COUNT: usize = 17;
 /// order, each starting at an 8-byte aligned offset with no gaps.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Section {
-    Nodes,
-    Children,
-    Fields,
-    Parts,
-    Edges,
-    Strings,
-    Blobs,
-    Annotations,
-    Provenance,
-    Extensions,
-    Units,
-    Types,
-    Aux,
-    Numbers,
-    Secrets,
-    Hashes,
+    Nodes = 0,
+    Children = 1,
+    Fields = 2,
+    Parts = 3,
+    Edges = 4,
+    Strings = 5,
+    Blobs = 6,
+    Annotations = 7,
+    Provenance = 8,
+    Extensions = 9,
+    Units = 10,
+    Types = 11,
+    Aux = 12,
+    Numbers = 13,
+    Secrets = 14,
+    Hashes = 15,
     /// Module index (root id) and name bindings.
-    Bindings,
+    Bindings = 16,
 }
+
+// The wire order is the discriminant order: `span()` indexes `Header::spans`
+// with `as usize`, so a reordered or inserted variant would silently map one
+// section's descriptor onto another. This assertion makes that a build failure.
+const _: () = {
+    let mut index = 0;
+    while index < SECTION_COUNT {
+        assert!(Section::ALL[index] as usize == index);
+        index += 1;
+    }
+};
 
 impl Section {
     pub const ALL: [Section; SECTION_COUNT] = [
@@ -437,6 +448,9 @@ pub struct Limits {
     pub max_secrets: u32,
     pub max_secret_bytes: u32,
     pub max_extensions: u32,
+    /// Provenance block bytes (the section count is a byte length, not an
+    /// entry count).
+    pub max_prov_bytes: u32,
     pub max_prov_entries: u32,
     /// Provenance hash-table entries.
     pub max_hashes: u32,
@@ -466,6 +480,7 @@ impl Default for Limits {
             max_secrets: 1 << 20,
             max_secret_bytes: 16 << 20,
             max_extensions: 1 << 16,
+            max_prov_bytes: 64 << 10,
             max_prov_entries: 1 << 16,
             max_hashes: 1 << 20,
             max_bindings: 1 << 20,
@@ -496,6 +511,7 @@ impl Limits {
             max_secrets: 256,
             max_secret_bytes: 1 << 16,
             max_extensions: 64,
+            max_prov_bytes: 16 << 10,
             max_prov_entries: 256,
             max_hashes: 4096,
             max_bindings: 4096,
@@ -510,7 +526,7 @@ impl Limits {
     /// "limit" the reader discovers later as `infinity/limit` on the first
     /// hostile input. The message names the field so a caller can fix it.
     pub fn check(&self) -> Result<()> {
-        let ceilings: [(&'static str, u64); 22] = [
+        let ceilings: [(&'static str, u64); 23] = [
             ("max_nodes", self.max_nodes as u64),
             ("max_edges", self.max_edges as u64),
             ("max_children", self.max_children as u64),
@@ -528,6 +544,7 @@ impl Limits {
             ("max_secrets", self.max_secrets as u64),
             ("max_secret_bytes", self.max_secret_bytes as u64),
             ("max_extensions", self.max_extensions as u64),
+            ("max_prov_bytes", self.max_prov_bytes as u64),
             ("max_prov_entries", self.max_prov_entries as u64),
             ("max_hashes", self.max_hashes as u64),
             ("max_bindings", self.max_bindings as u64),
@@ -554,6 +571,7 @@ impl Limits {
                     "max_secrets" => "max_secrets must be non-zero",
                     "max_secret_bytes" => "max_secret_bytes must be non-zero",
                     "max_extensions" => "max_extensions must be non-zero",
+                    "max_prov_bytes" => "max_prov_bytes must be non-zero",
                     "max_prov_entries" => "max_prov_entries must be non-zero",
                     "max_hashes" => "max_hashes must be non-zero",
                     "max_bindings" => "max_bindings must be non-zero",
@@ -657,9 +675,9 @@ impl Meta {
 pub fn read_u32(buf: &[u8], offset: usize) -> Result<u32> {
     // A caller-supplied offset can be `usize::MAX`; `offset + 4` would wrap (or
     // panic in a debug build) instead of reporting a truncated buffer.
-    let end = offset.checked_add(4).ok_or(Error::Truncated {
-        needed: u64::MAX,
-        found: buf.len() as u64,
+    let end = offset.checked_add(4).ok_or(Error::Offset {
+        section: "read",
+        offset: offset as u64,
     })?;
     if end > buf.len() {
         return Err(Error::Truncated {
@@ -677,9 +695,9 @@ pub fn read_u32(buf: &[u8], offset: usize) -> Result<u32> {
 
 /// Read a little-endian `u64`, mapping short input to a truncation error.
 pub fn read_u64(buf: &[u8], offset: usize) -> Result<u64> {
-    let end = offset.checked_add(8).ok_or(Error::Truncated {
-        needed: u64::MAX,
-        found: buf.len() as u64,
+    let end = offset.checked_add(8).ok_or(Error::Offset {
+        section: "read",
+        offset: offset as u64,
     })?;
     if end > buf.len() {
         return Err(Error::Truncated {

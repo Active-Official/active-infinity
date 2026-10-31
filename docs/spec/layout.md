@@ -66,7 +66,7 @@ minor || unit-table-limit || node-kind-range || aux-tag-set)`.
 
 The preimage is byte-exact and independent of host endianness or language:
 `major` and `minor` are 2-byte little-endian, `unit-table-limit` is 4-byte
-little-endian (`max(UNIT_MAX_BUILTIN)`, currently 8), and the two fragments are
+little-endian (`max(UNIT_MAX_BUILTIN)`, currently 66), and the two fragments are
 ASCII with no terminator:
 
 ```text

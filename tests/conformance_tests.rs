@@ -47,6 +47,14 @@ const NON_IMAGE_CLASSES: &[(&str, &str)] = &[
         "optional zstd transport/storage failure; not a byte-image class",
     ),
     (
+        "infinity/store",
+        "local content-addressed store failure; not a byte-image class",
+    ),
+    (
+        "infinity/signature",
+        "detached signature envelope failure; not a byte-image class",
+    ),
+    (
         "infinity/encode",
         "encoder-side refusal; the bytes it would have produced do not exist",
     ),

@@ -28,9 +28,11 @@ dependencies = [
  "active-core",
  "blake3",
  "criterion",
+ "ed25519-dalek",
  "proptest",
  "serde_json",
  "sha2",
+ "tempfile",
  "thiserror",
  "zstd",
 ]

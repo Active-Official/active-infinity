@@ -520,6 +520,8 @@ messages. Every code below is part of the contract.
 | `infinity/invalid-argument` | caller-supplied argument outside its range |
 | `infinity/schema` | companion schema rejected the instance shape |
 | `infinity/compression` | optional zstd compression failed or exceeded its bound |
+| `infinity/store` | local content-addressed store failed |
+| `infinity/signature` | detached signature envelope is malformed or invalid |
 | `infinity/encode` | module cannot be encoded (dangling reference, tainted blob with payload, ...) |
 | `infinity/encode-dangling` | encoding referenced a missing node |
 | `infinity/too-large` | image exceeds the 4 GiB address space |

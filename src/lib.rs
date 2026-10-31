@@ -68,6 +68,9 @@ pub mod ir;
 pub mod layout;
 pub mod protobuf;
 pub mod schema;
+#[cfg(feature = "signatures")]
+pub mod signature;
+pub mod store;
 pub mod stream;
 pub mod unit;
 pub mod validate;
@@ -87,6 +90,9 @@ pub use layout::{
 };
 pub use protobuf::to_protobuf;
 pub use schema::Schema;
+#[cfg(feature = "signatures")]
+pub use signature::SignedImage;
+pub use store::Store;
 pub use stream::{Frame, FrameKind, StreamDecoder, StreamEncoder};
 pub use unit::UnitTag;
 pub use validate::{validate, validate_canonical, validate_with, Validated};

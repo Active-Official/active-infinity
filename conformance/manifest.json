@@ -1,0 +1,456 @@
+{
+  "format": "active-conformance/1",
+  "version": "2026-10-29",
+  "generated": "2026-10-31T01:29:29Z",
+  "cases": [
+    {
+      "kind": "valid",
+      "name": "empty",
+      "path": "tests/vectors/valid/empty.ainf",
+      "options": {},
+      "content_hash": "c88757d688a39ad85bc3e0c6a034adf472e92690e4d8ddaaf946e530a6e92b01",
+      "sha256": "7dd252faa856722f6b5135e885dbbfa06bb0ef94cc674694c3398201176ce0dd",
+      "size": 232
+    },
+    {
+      "kind": "valid",
+      "name": "extensions",
+      "path": "tests/vectors/valid/extensions.ainf",
+      "options": {},
+      "content_hash": "012b468eb96caef323707af7f40bce65ebed4c7467628b77902fea5387c0908b",
+      "sha256": "bf958c8f09d7c32a45e026332e2221b89f1441204dcba6557196ab96e55ceae6",
+      "size": 488
+    },
+    {
+      "kind": "valid",
+      "name": "full",
+      "path": "tests/vectors/valid/full.ainf",
+      "options": {},
+      "content_hash": "83ccd859c5612acb087826eea302dc8c2f04218b13ee306cd1d5c7af8302aad0",
+      "sha256": "2e226c50178b642c8ac0a55f7ee7063da9d8ff8c5c939d6719119bfa7dea7622",
+      "size": 1248
+    },
+    {
+      "kind": "valid",
+      "name": "simple",
+      "path": "tests/vectors/valid/simple.ainf",
+      "options": {},
+      "content_hash": "38f031c72022c7907a694ddab7903083be882afa0418f046d1723dea7b2ed2f7",
+      "sha256": "0ae01e9215048ee89b099d882fad49708cc56a7275543f9c367e5f6c1dc12bfe",
+      "size": 416
+    },
+    {
+      "kind": "valid",
+      "name": "non_canonical",
+      "path": "tests/vectors/valid/non_canonical.ainf",
+      "options": {
+        "canonical": "no"
+      },
+      "content_hash": "8d311d44597e9663027285d916194c8c890436ccb75fef1981ca73f0c70065e8",
+      "sha256": "5dc697814fed10e6893c3a0cd948ae54b303e22866959ce3767ddb00abafbb79",
+      "size": 424
+    },
+    {
+      "kind": "invalid",
+      "name": "bad_magic",
+      "path": "tests/vectors/invalid/bad_magic.ainf",
+      "options": {},
+      "expected_code": "infinity/magic",
+      "sha256": "1b3c18d7439cc9a0a3c4db24c60ce3c855aaa2ea1fec6ec6ec03e525b45c6b4e",
+      "size": 1248
+    },
+    {
+      "kind": "invalid",
+      "name": "bad_major",
+      "path": "tests/vectors/invalid/bad_major.ainf",
+      "options": {},
+      "expected_code": "infinity/version-major",
+      "sha256": "443c795206af08ef59bc5aa9a1c1ef7a02fb6977825e899a23dad550e8689d87",
+      "size": 1248
+    },
+    {
+      "kind": "invalid",
+      "name": "bad_minor",
+      "path": "tests/vectors/invalid/bad_minor.ainf",
+      "options": {},
+      "expected_code": "infinity/version-minor",
+      "sha256": "652393074ec08ff06c2f4c1b5cb0b700c31a472c2f46679a8b3c57fb4216c1c6",
+      "size": 1248
+    },
+    {
+      "kind": "invalid",
+      "name": "header_truncated",
+      "path": "tests/vectors/invalid/header_truncated.ainf",
+      "options": {},
+      "expected_code": "infinity/header-truncated",
+      "sha256": "e13afde4e13cf7000d6136cf6f49845f3afd9310d4283978a319c16c5714e312",
+      "size": 100
+    },
+    {
+      "kind": "invalid",
+      "name": "bad_header_size",
+      "path": "tests/vectors/invalid/bad_header_size.ainf",
+      "options": {},
+      "expected_code": "infinity/header-size",
+      "sha256": "ce0eda9e78d298701269e8a541cb1d5034c5af381f55744fc934d58028523c77",
+      "size": 1248
+    },
+    {
+      "kind": "invalid",
+      "name": "bad_flags",
+      "path": "tests/vectors/invalid/bad_flags.ainf",
+      "options": {},
+      "expected_code": "infinity/flags",
+      "sha256": "a62b5b8d0f58b8ce415956ef11509b78460c8565853075f4119bc64a892cba66",
+      "size": 1248
+    },
+    {
+      "kind": "invalid",
+      "name": "reserved",
+      "path": "tests/vectors/invalid/reserved.ainf",
+      "options": {},
+      "expected_code": "infinity/reserved",
+      "sha256": "d7eb7a4fa19e05d4e1e6a6fff2171db6346a9ae211a1c7ff064fce8625f8385c",
+      "size": 1248
+    },
+    {
+      "kind": "invalid",
+      "name": "bad_dialect",
+      "path": "tests/vectors/invalid/bad_dialect.ainf",
+      "options": {},
+      "expected_code": "infinity/dialect",
+      "sha256": "68daef15ba09d718dfd2cef5b945c2918d034e245914bae18a7cde1612ca4c42",
+      "size": 1248
+    },
+    {
+      "kind": "invalid",
+      "name": "truncated",
+      "path": "tests/vectors/invalid/truncated.ainf",
+      "options": {},
+      "expected_code": "infinity/truncated",
+      "sha256": "a1d97a96238ec1242c2b2f806ca2b67633568b4465cd400a9b706e6a5c9d31b9",
+      "size": 1240
+    },
+    {
+      "kind": "invalid",
+      "name": "trailing",
+      "path": "tests/vectors/invalid/trailing.ainf",
+      "options": {},
+      "expected_code": "infinity/trailing-bytes",
+      "sha256": "b2cbcec32a66d81e74c3af7a9d06a003143ca536932d3e54bae78d65de4025e1",
+      "size": 1256
+    },
+    {
+      "kind": "invalid",
+      "name": "bad_hash",
+      "path": "tests/vectors/invalid/bad_hash.ainf",
+      "options": {},
+      "expected_code": "infinity/hash-mismatch",
+      "sha256": "95094ce312a62139615b9e9a664d6b512f5080880a073387db1ae907a956a82b",
+      "size": 1248
+    },
+    {
+      "kind": "invalid",
+      "name": "count_bomb",
+      "path": "tests/vectors/invalid/count_bomb.ainf",
+      "options": {},
+      "expected_code": "infinity/count",
+      "sha256": "30c8f9ce835ae71fc844ed3c038e6ea6e02b408e6132a829d016a672ac046bcb",
+      "size": 1248
+    },
+    {
+      "kind": "invalid",
+      "name": "short_count",
+      "path": "tests/vectors/invalid/short_count.ainf",
+      "options": {},
+      "expected_code": "infinity/count",
+      "sha256": "8eacf5b4a972d09d3894a20d7488f87ac6e232fdd3431870ed49d5bcacf15c85",
+      "size": 1248
+    },
+    {
+      "kind": "invalid",
+      "name": "bad_offset",
+      "path": "tests/vectors/invalid/bad_offset.ainf",
+      "options": {},
+      "expected_code": "infinity/offset",
+      "sha256": "4e8839f45908038d6b235ead92b8b8284ffa811bfb75a7b0e648e050533e3300",
+      "size": 1248
+    },
+    {
+      "kind": "invalid",
+      "name": "limit",
+      "path": "tests/vectors/invalid/limit.ainf",
+      "options": {
+        "limits": "max_nodes:1"
+      },
+      "expected_code": "infinity/limit",
+      "sha256": "0ae01e9215048ee89b099d882fad49708cc56a7275543f9c367e5f6c1dc12bfe",
+      "size": 416
+    },
+    {
+      "kind": "invalid",
+      "name": "bad_padding",
+      "path": "tests/vectors/invalid/bad_padding.ainf",
+      "options": {},
+      "expected_code": "infinity/padding",
+      "sha256": "20e0df5878620f93a4855d0c1aa9172fc5866063db0194784216642259a3f40a",
+      "size": 1248
+    },
+    {
+      "kind": "invalid",
+      "name": "bad_unit",
+      "path": "tests/vectors/invalid/bad_unit.ainf",
+      "options": {},
+      "expected_code": "infinity/unknown-unit",
+      "sha256": "a3151e345322515733ac72ebc44c1fab1f81a05a44af549fa6583de8a1d46bb0",
+      "size": 1248
+    },
+    {
+      "kind": "invalid",
+      "name": "unit_ref",
+      "path": "tests/vectors/invalid/unit_ref.ainf",
+      "options": {},
+      "expected_code": "infinity/unit-ref",
+      "sha256": "27033f3a49a2965b6b244a9af62823946c905488f9cd11ead8d8e7b2bace55a5",
+      "size": 1248
+    },
+    {
+      "kind": "invalid",
+      "name": "bad_type",
+      "path": "tests/vectors/invalid/bad_type.ainf",
+      "options": {},
+      "expected_code": "infinity/type",
+      "sha256": "732fbc38fbe45a5c9128088b1a8acb15bd79cee87b7cba0e8f98dba1bda4e7c4",
+      "size": 1248
+    },
+    {
+      "kind": "invalid",
+      "name": "secret_entry",
+      "path": "tests/vectors/invalid/secret_entry.ainf",
+      "options": {},
+      "expected_code": "infinity/secret-entry",
+      "sha256": "6d23ad98ead0dcbeadf3024bc98d3015c0e076b62f27d2a5c525e09da88379b6",
+      "size": 1248
+    },
+    {
+      "kind": "invalid",
+      "name": "string_ref",
+      "path": "tests/vectors/invalid/string_ref.ainf",
+      "options": {},
+      "expected_code": "infinity/string-ref",
+      "sha256": "e2dde0daaf6aff76dfadf3558714e0117c403fbd94976ef3b30283a3a6aef74a",
+      "size": 1248
+    },
+    {
+      "kind": "invalid",
+      "name": "node_ref",
+      "path": "tests/vectors/invalid/node_ref.ainf",
+      "options": {},
+      "expected_code": "infinity/node-ref",
+      "sha256": "229a6a4c868fb5f5756f21124f4ce65c525d1acfb8d0e1b0010238a4cce3b949",
+      "size": 304
+    },
+    {
+      "kind": "invalid",
+      "name": "bad_node",
+      "path": "tests/vectors/invalid/bad_node.ainf",
+      "options": {},
+      "expected_code": "infinity/node",
+      "sha256": "c2626813c291249c6809e7adf3d33a17c3f1031e4de210cc8a5c21c790ae8c37",
+      "size": 1248
+    },
+    {
+      "kind": "invalid",
+      "name": "bad_utf8",
+      "path": "tests/vectors/invalid/bad_utf8.ainf",
+      "options": {},
+      "expected_code": "infinity/utf8",
+      "sha256": "2c7fa0ba10705797179f86c5ec39b7c8ba9546b3dba9ff790a74376e64a2d00d",
+      "size": 432
+    },
+    {
+      "kind": "invalid",
+      "name": "bad_edge",
+      "path": "tests/vectors/invalid/bad_edge.ainf",
+      "options": {},
+      "expected_code": "infinity/edge",
+      "sha256": "1ce5b645478ad340efae52d5c2538cb331bdff3b2ab15f3372a5dcc91ac08dd8",
+      "size": 1248
+    },
+    {
+      "kind": "invalid",
+      "name": "cycle",
+      "path": "tests/vectors/invalid/cycle.ainf",
+      "options": {},
+      "expected_code": "infinity/cycle",
+      "sha256": "368e1b49921296464aaf3651a1b344982ffb328721e9f9482137d20be097e9f7",
+      "size": 312
+    },
+    {
+      "kind": "invalid",
+      "name": "duplicate_field",
+      "path": "tests/vectors/invalid/duplicate_field.ainf",
+      "options": {},
+      "expected_code": "infinity/duplicate-field",
+      "sha256": "3187751b263f9516b52982b09e94e245aaedb1c44fa49a0069de4ec906268d1f",
+      "size": 416
+    },
+    {
+      "kind": "invalid",
+      "name": "duplicate_binding",
+      "path": "tests/vectors/invalid/duplicate_binding.ainf",
+      "options": {},
+      "expected_code": "infinity/duplicate-binding",
+      "sha256": "60fa8032e8a6f012bf98ef7aef1c2ce1d96df9ab86ff3c46554df4bc31f98eb9",
+      "size": 480
+    },
+    {
+      "kind": "invalid",
+      "name": "bad_annotation",
+      "path": "tests/vectors/invalid/bad_annotation.ainf",
+      "options": {},
+      "expected_code": "infinity/annotation",
+      "sha256": "df19824643613f7b3387a64d86d785421b1ac535127102a4d110c55aba2183a2",
+      "size": 1248
+    },
+    {
+      "kind": "invalid",
+      "name": "bad_provenance",
+      "path": "tests/vectors/invalid/bad_provenance.ainf",
+      "options": {},
+      "expected_code": "infinity/provenance",
+      "sha256": "91167731dd8ce1c3187a1104fb17cb5514d24a3293355b037518c5bf5a2b8b34",
+      "size": 1248
+    },
+    {
+      "kind": "invalid",
+      "name": "bad_extension",
+      "path": "tests/vectors/invalid/bad_extension.ainf",
+      "options": {},
+      "expected_code": "infinity/extension",
+      "sha256": "5b253e9d0e4fadf10675368e2581220f49df17a57662168639781e9271977d7c",
+      "size": 488
+    },
+    {
+      "kind": "invalid",
+      "name": "bad_extension_gap",
+      "path": "tests/vectors/invalid/bad_extension_gap.ainf",
+      "options": {},
+      "expected_code": "infinity/extension",
+      "sha256": "3e0fe6396326fb406021900f43199c33bf1ea1b220ee8aae496c08b04f631633",
+      "size": 488
+    },
+    {
+      "kind": "invalid",
+      "name": "too_deep",
+      "path": "tests/vectors/invalid/too_deep.ainf",
+      "options": {
+        "limits": "max_depth:8"
+      },
+      "expected_code": "infinity/depth",
+      "sha256": "8ae8b7287d41b891b6c90049c83eab499a05972121eee5e4181e9c5c7eb365e3",
+      "size": 2824
+    },
+    {
+      "kind": "invalid",
+      "name": "bad_blob",
+      "path": "tests/vectors/invalid/bad_blob.ainf",
+      "options": {},
+      "expected_code": "infinity/blob",
+      "sha256": "2c90e80e2c928392dad7e6862fd62eff2cafe78994c4e77b6ba948462902c22c",
+      "size": 344
+    },
+    {
+      "kind": "invalid",
+      "name": "not_canonical",
+      "path": "tests/vectors/invalid/not_canonical.ainf",
+      "options": {
+        "verify": "canonical"
+      },
+      "expected_code": "infinity/not-canonical",
+      "sha256": "5dc697814fed10e6893c3a0cd948ae54b303e22866959ce3767ddb00abafbb79",
+      "size": 424
+    },
+    {
+      "kind": "invalid_stream",
+      "name": "frame_magic",
+      "path": "tests/vectors/invalid_stream/frame_magic.ainf",
+      "options": {},
+      "expected_code": "infinity/stream-magic",
+      "sha256": "23e02f350c8f71fb11ffe81cd5d00cd0c199365ce8f74ec700b3e20fe2266a25",
+      "size": 1012
+    },
+    {
+      "kind": "invalid_stream",
+      "name": "frame_version",
+      "path": "tests/vectors/invalid_stream/frame_version.ainf",
+      "options": {},
+      "expected_code": "infinity/stream-version",
+      "sha256": "61b752c583a60de4a854d98a4358a69fa51f3718504eff556877cf50871c52b1",
+      "size": 1012
+    },
+    {
+      "kind": "invalid_stream",
+      "name": "frame_kind",
+      "path": "tests/vectors/invalid_stream/frame_kind.ainf",
+      "options": {},
+      "expected_code": "infinity/stream-frame-kind",
+      "sha256": "b6b1c4198eff3c2646f88abe8a99e2042ba4860a167ec8f3b65a58365893101f",
+      "size": 1012
+    },
+    {
+      "kind": "invalid_stream",
+      "name": "frame_len",
+      "path": "tests/vectors/invalid_stream/frame_len.ainf",
+      "options": {},
+      "expected_code": "infinity/stream-frame-len",
+      "sha256": "f73e5eab1e7999677933855ab9cba4b223d38e9bb7e6dea40ce205c9b8cf70da",
+      "size": 1012
+    },
+    {
+      "kind": "invalid_stream",
+      "name": "sequence",
+      "path": "tests/vectors/invalid_stream/sequence.ainf",
+      "options": {},
+      "expected_code": "infinity/stream-sequence",
+      "sha256": "decebfba37fdee7c172cdfb7d5f2f72cd6d380f1cfb1e04e0d3802292651dc44",
+      "size": 1012
+    },
+    {
+      "kind": "invalid_stream",
+      "name": "state",
+      "path": "tests/vectors/invalid_stream/state.ainf",
+      "options": {},
+      "expected_code": "infinity/stream-state",
+      "sha256": "91644967fa9b47f6784dd19eb4d136bdf8e4caaa27c6c6458afe253b7289701b",
+      "size": 72
+    },
+    {
+      "kind": "invalid_stream",
+      "name": "hash",
+      "path": "tests/vectors/invalid_stream/hash.ainf",
+      "options": {},
+      "expected_code": "infinity/stream-hash",
+      "sha256": "ca6e1fa09c1bbdb8ee48576229fb8c6f0cbe6b58332a7dea28a79f152c62bb7b",
+      "size": 1012
+    },
+    {
+      "kind": "invalid_stream",
+      "name": "delta",
+      "path": "tests/vectors/invalid_stream/delta.ainf",
+      "options": {},
+      "expected_code": "infinity/stream-delta",
+      "sha256": "5717eb8393c4e042c2a98f87a3739af69e77201cf6bc763ba6fbc6921bea64e7",
+      "size": 1049
+    },
+    {
+      "kind": "invalid_stream",
+      "name": "unterminated",
+      "path": "tests/vectors/invalid_stream/unterminated.ainf",
+      "options": {},
+      "expected_code": "infinity/stream-unterminated",
+      "sha256": "cfed6fc40c5de5e7410d204c36999b7ffa4964901a17d3ae715563090ae1e92f",
+      "size": 940
+    }
+  ]
+}

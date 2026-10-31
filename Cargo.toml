@@ -13,6 +13,7 @@ readme = "README.md"
 keywords = ["active", "binary", "serialization", "zero-copy", "agents"]
 categories = ["encoding", "config", "data-structures"]
 exclude = [
+    "cli/**",
     "facades/**",
     "target/**",
     ".scratch/**",
@@ -30,6 +31,8 @@ active-core = ["dep:active-core"]
 json = ["dep:serde_json"]
 # Optional frame/payload compression. Content hashes stay over uncompressed bytes.
 zstd = ["dep:zstd"]
+# Detached Ed25519 signature envelope (store/AIR supply chain).
+signatures = ["dep:ed25519-dalek"]
 
 [dependencies]
 blake3 = "1.5"
@@ -37,8 +40,10 @@ thiserror = "1.0"
 active-core = { version = "1.4.0", optional = true }
 serde_json = { version = "1.0", optional = true }
 zstd = { version = "0.13", optional = true, default-features = false, features = ["zdict_builder"] }
+ed25519-dalek = { version = "2", optional = true, default-features = false, features = ["std"] }
 
 [dev-dependencies]
+tempfile = "3"
 proptest = "1"
 sha2 = "0.10"
 criterion = "0.5"

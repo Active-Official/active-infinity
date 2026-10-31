@@ -75,6 +75,11 @@ that would violate one stops and needs an ADR.
   transport or distribution concern (`active-rpc` and the release process).
 - **Denial of service by sheer size within the limits.** An operator sets
   `Limits` to what its process can afford; defaults are a starting point.
+- **Compression length disclosure.** Compressing an image whose secret-bearing
+  fields sit next to attacker-influenced values, and exposing the compressed
+  length, is a CRIME-style oracle. When an adversary can observe lengths,
+  compress the redacted projection (`interop`) instead of an image that carries
+  secrets; the `zstd` helper cannot decide that for the caller.
 - **Side channels.** Constant-time comparison of secrets is meaningless when
   equality is always false; timing of the *validator* is proportional to input
   size by design.

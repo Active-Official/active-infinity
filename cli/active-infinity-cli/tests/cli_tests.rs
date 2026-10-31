@@ -453,3 +453,91 @@ fn store_signs_and_refuses_unsigned_or_foreign_objects() {
         stderr(&tampered)
     );
 }
+
+#[test]
+fn dict_train_refuses_a_size_whose_bound_would_wrap() {
+    let dir = sandbox("dict-overflow");
+    let mut samples = Vec::new();
+    for seed in 0..2 {
+        let path = dir.join(format!("sample-{seed}.ainf"));
+        write(&path, &image(seed));
+        samples.push(path.to_string_lossy().into_owned());
+    }
+    // 4 * this value is zero modulo 2^64, so an unchecked multiply lets the
+    // corpus guard pass and hands zstd an impossible allocation.
+    let mut args = vec![
+        "dict".to_string(),
+        "train".to_string(),
+        "--output".to_string(),
+        dir.join("overflow.dict").to_string_lossy().into_owned(),
+        "--size".to_string(),
+        "4611686018427387904".to_string(),
+    ];
+    args.extend(samples);
+    let reference: Vec<&str> = args.iter().map(String::as_str).collect();
+    let output = run(&reference);
+    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+    assert!(stderr(&output).contains("usage:"), "{}", stderr(&output));
+}
+
+#[test]
+fn dict_apply_refuses_an_impossible_level_and_ceiling() {
+    let dir = sandbox("dict-flags");
+    let input = dir.join("input.bin");
+    write(&input, b"payload bytes");
+    let dictionary = dir.join("corpus.dict");
+    write(&dictionary, &image(0));
+
+    // 2^40 truncates to 0 as an i32; a silent truncation would accept it.
+    let output = run(&[
+        "dict",
+        "apply",
+        "--dictionary",
+        dictionary.to_str().expect("utf8"),
+        "--level",
+        "1099511627776",
+        input.to_str().expect("utf8"),
+    ]);
+    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+    assert!(stderr(&output).contains("usage:"), "{}", stderr(&output));
+
+    // A decode ceiling above the codec ceiling asks zstd for an allocation no
+    // valid image could justify.
+    let output = run(&[
+        "dict",
+        "apply",
+        "--decompress",
+        "--dictionary",
+        dictionary.to_str().expect("utf8"),
+        "--max-bytes",
+        "18446744073709551615",
+        input.to_str().expect("utf8"),
+    ]);
+    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+    assert!(stderr(&output).contains("usage:"), "{}", stderr(&output));
+}
+
+#[test]
+fn an_input_above_the_ceiling_is_refused_before_it_is_read() {
+    let dir = sandbox("input-ceiling");
+    let huge = dir.join("huge.bin");
+    let file = fs::File::create(&huge).expect("create");
+    file.set_len((1u64 << 30) + 8192).expect("set len");
+    drop(file);
+    let dictionary = dir.join("corpus.dict");
+    write(&dictionary, &image(0));
+
+    let output = run(&[
+        "dict",
+        "apply",
+        "--dictionary",
+        dictionary.to_str().expect("utf8"),
+        huge.to_str().expect("utf8"),
+    ]);
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("input ceiling"),
+        "{}",
+        stderr(&output)
+    );
+}

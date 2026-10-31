@@ -35,6 +35,18 @@
 - **Secrets**: `SecretBytes` zeroes its buffer with `zeroize` on drop (a volatile
   write the optimizer cannot elide), `has_secret()` recognises `SecretRef`, and
   `TypeSpec::name()` no longer echoes enum members.
+- **Compression** (`compress.rs`): an empty input is refused instead of decoding
+  to empty bytes; a level outside the build's zstd range is
+  `infinity/invalid-argument` instead of being silently clamped; dictionary
+  training refuses a zero ceiling or an empty sample set. The module docs and
+  `docs/spec/streaming.md` §6 pin the output ceiling, the dictionary-is-a-hint
+  rule (a plain frame decompresses with any dictionary) and the CRIME-style
+  length warning now recorded in `docs/spec/security.md`.
+- **CLI**: every input file is read under a size ceiling (the codec's image
+  ceiling plus envelope slack) before allocation; `dict train --size` uses a
+  checked bound instead of a wrapping multiply; `dict apply --level` is narrowed
+  with `try_from` and range-checked (a large value used to truncate to `0`), and
+  `--max-bytes` must be between 1 and the codec ceiling.
 - **Store**: `Store::put` now enforces the canonical form it documents instead of
   accepting any structurally valid image.
 - **Store** (`store.rs`): reads are bounded by the codec ceiling *before*

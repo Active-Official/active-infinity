@@ -22,7 +22,7 @@ the code → regression test first → minimal fix → targeted tests + clippy �
 | I-06 | stream and delta | `src/stream.rs` | CLEAN | 7 fixed, 2 rejected, 0 open | this commit |
 | I-07 | schema class | `src/schema.rs` | CLEAN | 6 fixed, 1 rejected | this commit |
 | I-08 | store | `src/store.rs` | **CLEAN** | 7 fixed, 1 rejected | this commit |
-| I-09 | compress | `src/compress.rs` | pending | — | — |
+| I-09 | compress | `src/compress.rs`, CLI `dict` | **CLEAN** | 6 fixed, 4 rejected/documented | this commit |
 | I-10 | signature / proof | `src/signature.rs`, `src/proof.rs` | pending | — | — |
 | I-11 | merge | `src/merge.rs` | pending | — | — |
 | I-12 | interop / protobuf | `src/interop.rs`, `src/protobuf.rs` | pending | — | — |
@@ -379,3 +379,31 @@ Two efficiency fixes came with the same change, with no numbers claimed: `put`
 and `get` now take the content hash from the validation result instead of
 calling `content_hash`, which re-validated the whole image a second time, and
 `get` no longer validates twice on the canonical path.
+
+### I-09 compress - 2026-10-31
+
+Reviewer probed the surface directly (level clamping, empty input, dictionary
+acceptance, magic confusion) before reporting.
+
+| # | Severity | Finding | Disposition |
+|---|---|---|---|
+| 1 | high | `decompress_with_dictionary` accepts a frame that never used the dictionary, so a caller could mistake "dictionary decode succeeded" for proof of the producer | **rejected as a code change, closed in the contract**: a dictionary is a compression hint in zstd; enforcing a frame dictionary id would change the wire contract and break plain frames. The module docs and `docs/spec/streaming.md` §6 state the rule, and `a_dictionary_is_a_hint_not_a_gate` pins it so nobody "fixes" it into a trust boundary later |
+| 2 | high | CLI `dict train` computed `size * 4`, which panics in debug and wraps in release; `--size 2^62` wraps to zero and bypasses the corpus guard, handing zstd an impossible allocation | **fixed**: `checked_mul` with a usage error; `dict_train_refuses_a_size_whose_bound_would_wrap` (pre-fix exit 101, now 2) |
+| 3 | medium | CLI `--level` was `usize as i32`, so `2^40` silently became level `0` | **fixed**: `i32::try_from` plus the library's level range, usage error; covered by `dict_apply_refuses_an_impossible_level_and_ceiling` |
+| 4 | medium | CLI `read` was an unbounded `read_to_end`, so a multi-GiB path (including `store put --sign`) allocated before any check | **fixed**: every input file is size-checked and read through `take(ceiling + 1)`; `an_input_above_the_ceiling_is_refused_before_it_is_read` |
+| 5 | medium | library caps absent: `max_output`, `max_size` and dictionaries pass through to zstd allocations | **partly fixed**: `train_dictionary` refuses a zero ceiling and an empty sample set; `max_output` and the dictionary are documented as caller-chosen allocation ceilings with the codec ceiling as the image value. No arbitrary cap was invented for a parameter the caller owns |
+| 6 | medium | compressing secret-bearing images with attacker-influenced neighbours and observable length is a CRIME-style oracle; the security spec was silent | **fixed in docs**: `docs/spec/security.md` §4 records the oracle and directs callers to compress the redacted projection |
+| 7 | medium | empty input decoded to empty output, and the CLI wrote an empty file with exit 0 | **fixed**: both decompressors refuse empty input with `infinity/compression`; `empty_input_is_not_a_frame` |
+| 8 | medium | CLI `dict apply --decompress` writes plaintext without `validate` | **rejected**: `dict apply` is a byte-level compression helper for arbitrary payloads (its help says hashes stay over uncompressed bytes); validating would break non-image use. `validate` remains a separate command |
+| 9 | low | compression levels were silently clamped | **fixed**: `level_range()` exposes the build's zstd range, out-of-range values are `infinity/invalid-argument`; `an_out_of_range_level_is_refused` |
+| 10 | low | `docs/spec/streaming.md` had no compression section | **fixed**: §6 states identity over uncompressed bytes, the mandatory output ceiling, empty-input refusal, level range, the dictionary hint rule and the oracle warning |
+
+Residuals: a caller that passes an enormous `max_output` still asks zstd for
+that allocation (documented as the caller's ceiling); the CLI read ceiling is
+the codec image ceiling plus envelope slack, so a legitimate non-image payload
+larger than 1 GiB cannot be passed through `dict apply`.
+
+Gate: clippy clean on both feature sets; Infinity 278 passed all-features /
+227 no-default; CLI 15 passed; the three refusal tests fail against the pre-fix
+tree (library probe with a documented `level_range` shim, CLI with `main.rs`
+stashed).

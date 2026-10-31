@@ -8,7 +8,7 @@ use std::process::ExitCode;
 use std::time::Instant;
 
 use active_infinity::compress::{
-    compress_with_dictionary, decompress_with_dictionary, train_dictionary,
+    compress_with_dictionary, decompress_with_dictionary, level_range, train_dictionary,
 };
 use active_infinity::stream::StreamDecoder;
 use active_infinity::{
@@ -290,7 +290,9 @@ fn dict_command(args: &[String]) -> Result<(), String> {
             if samples.len() < 2 {
                 return Err("usage: dict train needs at least two sample files".to_string());
             }
-            let total: usize = samples.iter().map(Vec::len).sum();
+            let total = samples
+                .iter()
+                .fold(0usize, |sum, sample| sum.saturating_add(sample.len()));
             // zstd's trainer needs headroom between the corpus and the
             // dictionary; derive a workable default instead of failing opaquely.
             let default_size = (total / 8).clamp(256, 110 * 1024);
@@ -298,7 +300,12 @@ fn dict_command(args: &[String]) -> Result<(), String> {
             if size < 256 {
                 return Err("usage: --size must be at least 256 bytes".to_string());
             }
-            if size * 4 > total {
+            // Checked: a wrapped product would slip past the guard and hand zstd
+            // an allocation the samples cannot justify.
+            let bound = size.checked_mul(4).ok_or_else(|| {
+                format!("usage: --size {size} is too large for {total} bytes of samples")
+            })?;
+            if bound > total {
                 return Err(format!(
                     "usage: --size {size} is too large for {total} bytes of samples; use at most {}",
                     total / 4
@@ -332,9 +339,23 @@ fn dict_command(args: &[String]) -> Result<(), String> {
             let bytes = read(input)?;
             let output = if flags.contains_key("--decompress") {
                 let ceiling = flag_number(&flags, "--max-bytes", 64 * 1024 * 1024)?;
+                let codec_ceiling = Limits::default().max_total_bytes;
+                if ceiling == 0 || ceiling as u64 > codec_ceiling {
+                    return Err(format!(
+                        "usage: --max-bytes must be between 1 and the {codec_ceiling} byte codec ceiling"
+                    ));
+                }
                 decompress_with_dictionary(&bytes, ceiling, &dictionary)
             } else {
-                let level = flag_number(&flags, "--level", 3)? as i32;
+                let level = flag_number(&flags, "--level", 3)?;
+                let level = i32::try_from(level)
+                    .map_err(|_| "usage: --level is outside the supported range".to_string())?;
+                let (minimum, maximum) = level_range();
+                if !(minimum..=maximum).contains(&level) {
+                    return Err(format!(
+                        "usage: --level must be between {minimum} and {maximum}"
+                    ));
+                }
                 compress_with_dictionary(&bytes, level, &dictionary)
             }
             .map_err(|error| error.code().to_string())?;
@@ -557,11 +578,38 @@ fn check_case(kind: &str, bytes: &[u8], case: &serde_json::Value) -> Result<(), 
     }
 }
 
+/// Largest file the CLI reads: the codec's image ceiling plus envelope slack.
+///
+/// A larger file cannot be a valid input for this tool, and reading it first
+/// would let a hostile path force an allocation before any check runs.
+fn input_ceiling() -> u64 {
+    Limits::default().max_total_bytes.saturating_add(4096)
+}
+
 fn read(path: impl AsRef<Path>) -> Result<Vec<u8>, String> {
-    let mut file = fs::File::open(path.as_ref()).map_err(|error| error.to_string())?;
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)
+    let path = path.as_ref();
+    let file = fs::File::open(path).map_err(|error| error.to_string())?;
+    let meta = file.metadata().map_err(|error| error.to_string())?;
+    if !meta.is_file() {
+        return Err(format!("{}: not a regular file", path.display()));
+    }
+    let limit = input_ceiling();
+    if meta.len() > limit {
+        return Err(format!(
+            "{}: file is larger than the {limit} byte input ceiling",
+            path.display()
+        ));
+    }
+    let mut bytes = Vec::with_capacity(meta.len() as usize);
+    file.take(limit.saturating_add(1))
+        .read_to_end(&mut bytes)
         .map_err(|error| error.to_string())?;
+    if bytes.len() as u64 > limit {
+        return Err(format!(
+            "{}: file grew past the {limit} byte input ceiling",
+            path.display()
+        ));
+    }
     Ok(bytes)
 }
 

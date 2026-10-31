@@ -116,3 +116,24 @@ crate, and a stream cannot drift from it: if the canonical form changes, both
 change together and the bytes still match. Semantic deltas exist for the case
 that matters — an agent has module *M* and receives a small update — and they
 re-canonicalize, so they cannot introduce a second canonical form either.
+
+## 6. Compression (transport profile, not a frame kind)
+
+The zstd feature ships helpers that compress and decompress image or frame
+payloads. Compression is storage and transport; it is **not** part of the AINS
+frame grammar and it does not move identity:
+
+- The content hash is always over the uncompressed canonical image. A compressed
+  object is an encoding of transport bytes, not a second canonical form.
+- Decompression takes an explicit output ceiling (for an image, at most
+  Limits::max_total_bytes). The ceiling bounds the allocation, and a frame
+  that expands past it is infinity/compression.
+- An empty input is refused: an empty file is not a zstd frame, and returning an
+  empty buffer for it would read as a successful decode.
+- Compression levels outside the build's zstd range (-131072..=22 for current
+  zstd) are infinity/invalid-argument; they are never silently clamped.
+- A trained dictionary is a **hint**. zstd decompresses a frame that does not
+  use the supplied dictionary, so a successful dictionary decode says nothing
+  about the producer or the dictionary. Authenticity comes only from a
+  SignedImage envelope or the content hash.
+- Dictionary training takes an allocation ceiling (max_size); zero is refused.

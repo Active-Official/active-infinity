@@ -244,7 +244,10 @@ pub(crate) fn prepare(module: &InfinityModule) -> Result<Prepared> {
     let mut types = Vec::with_capacity(type_payloads.len());
     let mut type_index = HashMap::new();
     for (index, (code, aux)) in type_payloads.iter().enumerate() {
-        let spec = type_from_prepared(*code, aux, &strings)?;
+        // The prepared payload came from this module, so a miss here is an
+        // encoder fault (a dangling reference), not a reader's string-ref fault.
+        let spec = type_from_prepared(*code, aux, &strings)
+            .map_err(|_| Error::Encode("schema type references an uninterned string"))?;
         types.push(PreparedType {
             spec,
             aux: aux.clone(),
@@ -265,6 +268,17 @@ pub(crate) fn prepare(module: &InfinityModule) -> Result<Prepared> {
         {
             if *tainted && payload.is_some() {
                 return Err(Error::Encode("a tainted blob must not carry a payload"));
+            }
+            if let Some(bytes) = payload {
+                // The image is validated on the way in, so an inconsistent blob
+                // has to fail here: emitting it would produce bytes the crate
+                // refuses to read back.
+                if bytes.len() as u64 != *size {
+                    return Err(Error::Encode("blob payload length disagrees with size"));
+                }
+                if blake3::hash(bytes).as_bytes() != hash {
+                    return Err(Error::Encode("blob payload hash mismatch"));
+                }
             }
             blobs.push(BlobPayload {
                 hash: *hash,

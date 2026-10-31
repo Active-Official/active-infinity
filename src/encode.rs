@@ -170,7 +170,7 @@ pub(crate) fn encode_prepared_into(
         image.as_slice(),
         Section::Children,
         tables.children.len(),
-    );
+    )?;
     for child in &tables.children {
         image.extend_from_slice(&child.to_le_bytes());
     }
@@ -182,7 +182,7 @@ pub(crate) fn encode_prepared_into(
         image.as_slice(),
         Section::Fields,
         tables.fields.len(),
-    );
+    )?;
     for (name, node) in &tables.fields {
         image.extend_from_slice(&name.to_le_bytes());
         image.extend_from_slice(&0u32.to_le_bytes());
@@ -197,7 +197,7 @@ pub(crate) fn encode_prepared_into(
         image.as_slice(),
         Section::Parts,
         tables.parts.len(),
-    );
+    )?;
     for (tag, value) in &tables.parts {
         image.extend_from_slice(&tag.to_le_bytes());
         image.extend_from_slice(&value.to_le_bytes());
@@ -206,7 +206,7 @@ pub(crate) fn encode_prepared_into(
 
     // --- edges (derived) ----------------------------------------------
     let edges = derive_edges(prepared);
-    set_span(&mut header, image.as_slice(), Section::Edges, edges.len());
+    set_span(&mut header, image.as_slice(), Section::Edges, edges.len())?;
     for (from, to) in &edges {
         image.extend_from_slice(&from.to_le_bytes());
         image.extend_from_slice(&to.to_le_bytes());
@@ -255,7 +255,7 @@ pub(crate) fn encode_prepared_into(
         image.as_slice(),
         Section::Annotations,
         prepared.annotations.len(),
-    );
+    )?;
     for annotation in &prepared.annotations {
         let (kind, a, b) = match &annotation.kind {
             AnnotationKind::Intent(text) => (
@@ -306,7 +306,7 @@ pub(crate) fn encode_prepared_into(
         image.as_slice(),
         Section::Units,
         prepared.units.len(),
-    );
+    )?;
     for unit in &prepared.units {
         image.extend_from_slice(&unit.discriminant().to_le_bytes());
         let name = if unit.is_builtin() {
@@ -327,7 +327,7 @@ pub(crate) fn encode_prepared_into(
         image.as_slice(),
         Section::Types,
         prepared.types.len(),
-    );
+    )?;
     let mut type_aux_start = vec![0u32; prepared.types.len()];
     let mut type_aux_count = vec![0u32; prepared.types.len()];
     {
@@ -351,7 +351,7 @@ pub(crate) fn encode_prepared_into(
 
     // --- aux -----------------------------------------------------------
     let aux_count = tables.aux.len() + prepared.types.iter().map(|t| t.aux.len()).sum::<usize>();
-    set_span(&mut header, image.as_slice(), Section::Aux, aux_count);
+    set_span(&mut header, image.as_slice(), Section::Aux, aux_count)?;
     for (tag, value) in &tables.aux {
         image.extend_from_slice(&tag.to_le_bytes());
         image.extend_from_slice(&value.to_le_bytes());
@@ -370,7 +370,7 @@ pub(crate) fn encode_prepared_into(
         image.as_slice(),
         Section::Numbers,
         prepared.numbers.len(),
-    );
+    )?;
     for value in &prepared.numbers {
         image.extend_from_slice(&value.to_le_bytes());
     }
@@ -398,7 +398,7 @@ pub(crate) fn encode_prepared_into(
         image.as_slice(),
         Section::Hashes,
         prepared.hashes.len(),
-    );
+    )?;
     for hash in &prepared.hashes {
         image.extend_from_slice(hash);
     }
@@ -436,9 +436,14 @@ pub(crate) fn encode_prepared_into(
     Ok(())
 }
 
-fn set_span(header: &mut Header, image: &[u8], section: Section, count: usize) {
-    header.span_mut(section).offset = image.len() as u32;
-    header.span_mut(section).count = count as u32;
+fn set_span(header: &mut Header, image: &[u8], section: Section, count: usize) -> Result<()> {
+    // An image past the u32 offset space cannot be described by the header; it
+    // used to wrap and produce overlapping sections that still hashed.
+    let offset = u32::try_from(image.len()).map_err(|_| Error::TooLarge)?;
+    let count = u32::try_from(count).map_err(|_| Error::TooLarge)?;
+    header.span_mut(section).offset = offset;
+    header.span_mut(section).count = count;
+    Ok(())
 }
 
 fn pad(image: &mut Vec<u8>) {
@@ -540,7 +545,7 @@ fn build_node_tables(prepared: &Prepared) -> Result<NodeTables> {
             }
             Inode::Secret(_) => {
                 let index = secret_cursor;
-                secret_cursor += 1;
+                secret_cursor = secret_cursor.checked_add(1).ok_or(Error::TooLarge)?;
                 NodeRec {
                     kind: 9,
                     a: u64::from(index),
@@ -894,8 +899,16 @@ fn encode_extensions(
     let mut directory = Vec::with_capacity(dir_size);
     for (tag, payload) in extensions {
         directory.extend_from_slice(&tag.to_le_bytes());
-        directory.extend_from_slice(&(payload_offset as u32).to_le_bytes());
-        directory.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        directory.extend_from_slice(
+            &u32::try_from(payload_offset)
+                .map_err(|_| Error::TooLarge)?
+                .to_le_bytes(),
+        );
+        directory.extend_from_slice(
+            &u32::try_from(payload.len())
+                .map_err(|_| Error::TooLarge)?
+                .to_le_bytes(),
+        );
         payload_offset = align8(payload_offset as u64 + payload.len() as u64) as usize;
     }
     image.extend_from_slice(&directory);

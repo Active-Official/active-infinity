@@ -1499,14 +1499,11 @@ impl InfinityModule {
                         }
                     }
                 }
-                Inode::Float(value)
-                    if value.is_nan() && !crate::canonical::is_canonical_nan(*value) =>
-                {
-                    return Err(Error::Node {
-                        id: id.0,
-                        reason: "non-canonical NaN",
-                    });
-                }
+                // A NaN's bit pattern is not checked here: canonicalization maps
+                // every NaN to the one permitted quiet NaN (`layout::canonical_f64`),
+                // so an in-memory module may carry any NaN and still encode. The
+                // wire validator refuses an image whose NaN is not canonical.
+                Inode::Float(_) => {}
                 Inode::Constrained { constraint, .. } => match constraint {
                     Constraint::MinMax {
                         min: Some(min),

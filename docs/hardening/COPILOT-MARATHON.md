@@ -16,7 +16,7 @@ the code → regression test first → minimal fix → targeted tests + clippy �
 |----|---------|-------|-------|------------------------------------|---------|
 | I-01 | layout / header | `src/layout.rs` | CLEAN (round 2 open items fixed) | 10 fixed, 1 rejected, 0 open | this commit |
 | I-02 | validate | `src/validate.rs` | **CLEAN** (round 3: 3 high fixed, 10 triaged) | 24 fixed, 10 rejected, 0 open | this commit |
-| I-03 | encode / canonical | `src/encode.rs`, `src/canonical.rs` | in progress (findings 2, 3 and 4 fixed; rest pending) | 3 fixed, 0 rejected, 0 open | this commit |
+| I-03 | encode / canonical | `src/encode.rs`, `src/canonical.rs` | in progress (findings 1–6, 9, 11, 12 addressed; 7, 8, 10 dispositioned) | 9 fixed, 3 rejected, 0 open | this commit |
 | I-04 | decode / view | `src/decode.rs`, `src/view.rs` | pending | — | — |
 | I-05 | IR / units | `src/ir.rs`, `src/unit.rs` | pending | — | — |
 | I-06 | stream / delta | `src/stream.rs` | pending | — | — |
@@ -239,7 +239,23 @@ failure output):
   no-text case, and the provenance key-collision test uses an ordinary secret so
   it still exercises the key-collision rule. The proptest now accepts the refusal
   and asserts that a successful encode never let a marker-colliding secret reach
-  redacted text. (`tests/marathon_canonical_tests.rs`): the claim
+  redacted text.
+
+### I-03 round 1, remaining findings — 2026-10-31
+
+| # | Severity | Finding | Disposition |
+|---|---|---|---|
+| 1 | high | `as u32` truncation for offsets/counts; an image past 4 GiB would wrap into overlapping sections that still hash | **fixed at the boundary**: `set_span` (the only place a section offset/count enters the header) and the extension payload offset/length use `u32::try_from` → `infinity/too-large`. Casts of values that are `u32`-bounded by construction (node index, secret cursor) stay as casts; the cursor add is checked |
+| 5 | medium | no payload/size/hash check at encode, so a hand-built blob could produce an image the validator refuses | **fixed in `prepare`**: payload length must equal `size` and `Blake3(payload)` must equal the hash, both `infinity/encode`; `an_inconsistent_blob_is_refused_at_encode` |
+| 6 | medium | `validate_structure` rejected a non-canonical NaN before normalization, so such a module could not be encoded at all | **fixed**: the IR-level NaN arm is gone; canonicalization maps every NaN to the permitted quiet NaN, and a received image with a foreign NaN is still refused by the wire validator. `every_nan_normalizes_to_the_canonical_bit_pattern` |
+| 7 | medium | binding/field/`Env`/`Ident`/patch/type/unit names are not redacted while annotations and provenance are | **rejected with a documented rule**: structural names are schema, not free text. `docs/spec/layout.md` §3.1 now states which surfaces redaction covers and that a name is carried verbatim |
+| 8 | medium | no `Limits` on the encode side | **rejected**: the module is the caller's own data, and the image size is now bounded by the u32 guard; a separate encode limit would duplicate what `validate` already does for untrusted input |
+| 9 | medium | `type_from_prepared` could surface `infinity/string-ref` from the encode path | **fixed**: mapped to `infinity/encode` |
+| 10 | low | reserved extension tag 1 accepted; `payload.len() as u32` unchecked | **casts fixed** (see 1); the tag reservation is **rejected for now** with the same reasoning as I-02 (a wire-format decision, not a validation fix) |
+| 11 | low | unchecked counters (`secret_cursor += 1`, …) | **fixed for the secret cursor** via `checked_add`; the remaining `+1` is on the binding count, bounded by the u32 node space |
+| 12 | low | spec §6 listed the type sort key as `(code, flags, aux start, count)` and the promotion rule as "referenced only by secret nodes" | **fixed**: the prose now says content `(code, flags, aux entries)` and "reachable only through a secret", which is what the code does |
+
+Gate: clippy clean; `cargo test --all-features` 242 passed, 0 failed. (`tests/marathon_canonical_tests.rs`): the claim
 was correct. `canonical_order` built its roots from the root node, the binding
 targets **sorted by numeric id**, the annotation subjects and the constraint
 expressions; the spec and `InfinityModule::roots` order bindings by **name**.

@@ -178,6 +178,13 @@ re-encoded module equal its source without revealing whether two secrets match.
 `SecretBytes` overwrites its buffer on drop. The secret table is never
 enumerated by any projection.
 
+Redaction covers free text: annotation text and provenance keys, values,
+producer, model and tool. Structural names — table field names, binding names,
+unit names, an env variable's name and an interpolation's literal parts — are
+schema, not free text, and are carried verbatim; a module that puts secret
+material into a name publishes that name, just as the secret table carries the
+secret itself.
+
 ### 3.1a Reachability
 
 An image is a rooted graph: every node must be reachable from the module root,
@@ -418,16 +425,18 @@ canonical image reproduces it byte for byte:
 1. **Normalize nodes.** Table fields and schema-table fields are sorted by key.
    `-0.0` becomes `+0.0`; every NaN becomes the quiet NaN
    `0x7ff8_0000_0000_0000`.
-2. **Promote secret locators.** A string literal that is referenced only by
-   secret nodes and is not a root is re-encoded as a `Secret` node, so the
-   literal moves out of the public string heap.
+2. **Promote secret locators.** A string that is reachable only through a secret
+   node (a secret is a barrier: its locator material is not public) and is not a
+   root is re-encoded as a `Secret` node, so the literal — an env fallback, an
+   interpolated part — moves out of the public string heap.
 3. **Number nodes.** Pre-order depth-first from the roots — the module root,
    then bindings in name order, then annotation subjects and their constraint
    expressions. Children are visited in node order (§3.1), which is itself
    canonical after step 1. Nodes unreachable from the roots are **dropped**; a
    canonical image never carries hidden data.
 4. **Sort tables.** Strings (byte order), units (`(discriminant, name)`), types
-   (`(code, flags, aux start, aux count)`), blobs (`(hash, size)`), hashes,
+   (`(code, flags, aux entries)` — content, never the allocator's start/count),
+   blobs (`(hash, size)`), hashes,
    numbers, annotations, provenance entries, extensions (tag) and edges are
    sorted and deduplicated. Secrets are ordered by node order and not
    deduplicated.

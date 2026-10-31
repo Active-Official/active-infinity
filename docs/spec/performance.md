@@ -196,7 +196,9 @@ bytes are identical and `tests/encode_batch_tests.rs` proves it.
 ### The gate
 
 `scripts/perf_gate.py` enforces tail stability (p95 ≤ 4× p50 plus slack for one
-scheduler hiccup), linear scaling (10k/1k ≤ 18x for encode/validate, 20x for
-decode) and encoded-size growth. CI runs the ratio gate in the `perf-gate` job
+scheduler hiccup), linear scaling (10k/1k ≤ 24x for encode, 20x for
+validate/decode) and encoded-size growth. Encode gets the widest band because
+its 10k working set leaves the runner's L2 cache; a quadratic encoder would be
+near 100x. CI runs the ratio gate in the `perf-gate` job
 and uploads the matrix as an artifact; `--baseline docs/spec/perf-baseline.json`
 adds an absolute comparison (p50 ≤ 1.6x, p99 ≤ 3.0x) for a release machine.

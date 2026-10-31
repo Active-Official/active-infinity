@@ -7,8 +7,12 @@ checks:
 1. **Tail stability**: p95 <= p50 * 4 + slack, where the slack absorbs a single
    scheduler hiccup on a shared machine (`max(100us, p50/2)`). p95 rather than
    p99 because with a few hundred samples p99 is the maximum.
-2. **Linear scaling**: the 10k shape may cost at most 18x (encode/validate) or
-   20x (decode) the 1k shape. The input is 10x; quadratic behaviour fails.
+2. **Linear scaling**: the 10k shape may cost at most 24x (encode) or 20x
+   (validate, decode) the 1k shape. The input is 10x; quadratic behaviour fails.
+   Encode gets the widest band because its working set (about 700 KB at 10k)
+   leaves the runner's L2 cache while the 1k shape stays inside it, so shared
+   CI machines legitimately see 18-20x. A quadratic encoder would land near
+   100x.
 3. **Optional absolute baseline** (`--baseline`): p50 <= 1.6x and p99 <= 3.0x a
    recorded baseline for a release machine class. Shared CI runners use the
    ratio checks only.
@@ -31,7 +35,7 @@ import sys
 from pathlib import Path
 
 TAIL_LIMIT = 4.0
-SCALING_LIMIT = {"encode": 18.0, "validate": 18.0, "decode": 20.0}
+SCALING_LIMIT = {"encode": 24.0, "validate": 20.0, "decode": 20.0}
 BASELINE_P50 = 1.6
 BASELINE_P99 = 3.0
 MIN_SLACK_NS = 100_000

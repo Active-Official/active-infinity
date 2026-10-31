@@ -16,7 +16,7 @@ the code → regression test first → minimal fix → targeted tests + clippy �
 |----|---------|-------|-------|------------------------------------|---------|
 | I-01 | layout / header | `src/layout.rs` | CLEAN (round 2 open items fixed) | 10 fixed, 1 rejected, 0 open | this commit |
 | I-02 | validate | `src/validate.rs` | **CLEAN** (round 3: 3 high fixed, 10 triaged) | 24 fixed, 10 rejected, 0 open | this commit |
-| I-03 | encode / canonical | `src/encode.rs`, `src/canonical.rs` | pending | — | — |
+| I-03 | encode / canonical | `src/encode.rs`, `src/canonical.rs` | round 1 received, triage in progress | — | — |
 | I-04 | decode / view | `src/decode.rs`, `src/view.rs` | pending | — | — |
 | I-05 | IR / units | `src/ir.rs`, `src/unit.rs` | pending | — | — |
 | I-06 | stream / delta | `src/stream.rs` | pending | — | — |
@@ -172,3 +172,25 @@ Gate: clippy clean; `cargo test --all-features` 231 passed, 0 failed.
 
 Gate: clippy clean; `cargo test --all-features` 232 passed, 0 failed. Section
 I-02 is CLEAN with the deferred items recorded.
+
+### I-03 encode / canonical — round 1 findings (received 2026-10-31, triage next)
+
+The review ran against `encode.rs`, `canonical.rs` and `layout.md` §2, §5, §6.
+Findings recorded verbatim in scope; each is to be verified against the tree
+before any change, as with every other section.
+
+| # | Severity | Claim | First read |
+|---|---|---|---|
+| 1 | high | `as u32` truncations for offsets/counts/lengths all over `encode.rs`; an image over 4 GiB wraps into overlapping sections | check which casts a hostile in-memory module can reach; the wire path has `too-large` |
+| 2 | high | canonical node numbering visits roots sorted by numeric `NodeId`, while the spec and `roots()` order bindings by name; arena order then leaks into the hash | likely real and identity-critical: same module, different bytes |
+| 3 | high | `promote_secret_locators` only promotes direct `Str` children, so a `SecretRef` through `Env`/interpolation/shared locator leaves secret bytes in the public string heap | likely real, security-critical |
+| 4 | high | a secret that is a substring of the `***SECRET***` marker is embedded by the redaction path | verify against `redact_text` before changing |
+| 5 | medium | no payload/size/hash check at encode time, so the encoder can emit an image its own validator refuses | cheap to fix in `prepare` |
+| 6 | medium | non-canonical NaN is rejected by `validate_structure` before normalization, so the NaN arm never converges | check the encode order |
+| 7 | medium | binding/field/`Env`/`Ident`/patch/type/unit names are not redacted while annotations and provenance are | overlaps the deferred I-02 item; decide with the interning contract |
+| 8 | medium | no `Limits` on the encode side | check reachability from a public API |
+| 9 | medium | `type_from_prepared` can surface `infinity/string-ref` from the encode path | cheap mapping |
+| 10–12 | low | reserved extension tag 1, unchecked counters (`+1`, `len-start`), spec §6 sort-key prose drift | fix with the corresponding section |
+
+Resume here: verify each claim against the current tree, then follow the usual
+loop (regression test first, fix, full gates, log the disposition).

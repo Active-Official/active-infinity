@@ -201,10 +201,12 @@ impl Proof {
     }
 }
 
+#[cfg(feature = "json")]
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
+#[cfg(feature = "json")]
 fn parse_hex32(text: &str) -> Result<[u8; 32]> {
     if text.len() != 64 {
         return Err(Error::Proof("hash must be 64 hex characters"));

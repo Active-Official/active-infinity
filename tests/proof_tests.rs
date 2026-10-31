@@ -128,6 +128,7 @@ fn a_schema_that_rejects_the_instance_fails_at_issue() {
     assert_eq!(error.code(), "infinity/schema");
 }
 
+#[cfg(feature = "json")]
 #[test]
 fn the_sidecar_round_trips_through_json() {
     let image = vector("simple.ainf");
@@ -149,6 +150,7 @@ fn the_sidecar_round_trips_through_json() {
     assert_eq!(error.code(), "infinity/proof");
 }
 
+#[cfg(feature = "json")]
 #[test]
 fn an_unknown_sidecar_format_is_refused() {
     let image = vector("simple.ainf");

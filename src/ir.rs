@@ -112,11 +112,13 @@ impl Drop for SecretBytes {
     ///
     /// The allocator hands a freed block to the next allocation, so without this
     /// a secret survives in the heap (and in a core dump) after the module that
-    /// held it is dropped. This is best-effort by nature — a `clone` that was
-    /// already copied elsewhere is its own allocation and is zeroed when it is
-    /// dropped — and it is not a substitute for not copying secrets.
+    /// held it is dropped. `zeroize` writes through a volatile fence, so the
+    /// store cannot be elided the way a plain `fill(0)` can. A clone that was
+    /// copied elsewhere is its own allocation and is zeroed when it is dropped;
+    /// this is not a substitute for not copying secrets.
     fn drop(&mut self) {
-        self.0.fill(0);
+        use zeroize::Zeroize;
+        self.0.zeroize();
     }
 }
 
@@ -367,7 +369,9 @@ impl TypeSpec {
                     "Table".into()
                 }
             }
-            TypeSpec::Enum(values) => format!("Enum({})", values.join(", ")),
+            // Members are not echoed: a type may carry a copy of a secret, and
+            // `name()` is a diagnostics string.
+            TypeSpec::Enum(values) => format!("Enum(<{} values>)", values.len()),
             TypeSpec::Secret => "Secret".into(),
             TypeSpec::Any => "Any".into(),
             TypeSpec::Blob => "Blob".into(),
@@ -955,13 +959,17 @@ impl ProvKind {
         }
     }
 
+    /// Parse a provenance value kind.
+    ///
+    /// Code 4 (`Input`) is reserved: the wire validator refuses an entry with it,
+    /// so the reader returns `None` rather than producing a value the encoder
+    /// would have to refuse later.
     pub const fn from_code(code: u32) -> Option<Self> {
         match code {
             0 => Some(ProvKind::Text),
             1 => Some(ProvKind::Int),
             2 => Some(ProvKind::Flag),
             3 => Some(ProvKind::Hash),
-            4 => Some(ProvKind::Input),
             _ => None,
         }
     }
@@ -1327,11 +1335,11 @@ impl InfinityModule {
         self.provenance.as_ref()
     }
 
-    /// True when the module holds a structural secret literal.
+    /// True when the module holds any secret node: a literal or a locator
+    /// (`SecretRef`). A gate that only looked for the literal missed
+    /// `secret(env.TOKEN)` modules.
     pub fn has_secret(&self) -> bool {
-        self.nodes
-            .iter()
-            .any(|node| matches!(node, Inode::Secret(_)))
+        self.nodes.iter().any(Inode::is_secret)
     }
 
     /// Canonical structural equality, blinding secret payloads.
@@ -1346,6 +1354,7 @@ impl InfinityModule {
             return false;
         };
         left.root == right.root
+            && left.extensions == right.extensions
             && left.bindings == right.bindings
             && left.annotations == right.annotations
             && left.provenance == right.provenance
@@ -1450,8 +1459,8 @@ impl InfinityModule {
         map
     }
 
-    /// Check every structural invariant the wire format also enforces,
-    /// **except reachability**.
+    /// Check the structural invariants of the node graph, **except
+    /// reachability** and the cross-table coherence rules.
     ///
     /// References, table-field uniqueness, canonical numbers, constraint
     /// coherence, bindings and acyclicity are checked here. Reachability is not,
@@ -1465,6 +1474,12 @@ impl InfinityModule {
     ///
     /// Callers that hand-build a module and want the wire rule can call
     /// [`Self::check_reachable`] explicitly.
+    ///
+    /// Unit-table completeness, type-spec shape (an empty enum, a missing type),
+    /// blob payload/size/hash agreement and extension uniqueness are enforced by
+    /// the encoder (`prepare`) and by the wire validator, not here: this function
+    /// answers "is the node graph well formed", which is what the encoder needs
+    /// before it normalizes.
     ///
     /// `max_nodes` and `max_depth` bound the work so a hostile module cannot
     /// make this function hang or recurse without limit.

@@ -18,7 +18,7 @@ the code → regression test first → minimal fix → targeted tests + clippy �
 | I-02 | validate | `src/validate.rs` | **CLEAN** (round 3: 3 high fixed, 10 triaged) | 24 fixed, 10 rejected, 0 open | this commit |
 | I-03 | encode / canonical | `src/encode.rs`, `src/canonical.rs` | **CLEAN** (round 2 fixed two more) | 11 fixed, 3 rejected, 0 open | `aef1efd`, `43b1078` |
 | I-04 | decode / view | `src/decode.rs`, `src/view.rs` | CLEAN | 7 fixed, 3 rejected, 0 open | this commit |
-| I-05 | IR / units | `src/ir.rs`, `src/unit.rs` | pending | — | — |
+| I-05 | IR / units | `src/ir.rs`, `src/unit.rs` | CLEAN | 5 fixed, 2 rejected, 1 deferred | this commit |
 | I-06 | stream / delta | `src/stream.rs` | pending | — | — |
 | I-07 | schema | `src/schema.rs` | pending | — | — |
 | I-08 | store | `src/store.rs` | pending | — | — |
@@ -64,6 +64,22 @@ Entries are appended per section: date, reviewer path, findings, disposition.
 | 12 | low | `children()` hand-rolled four kinds | **rejected**: the four branches are the same traversal `node_children` performs; making them share one function is a refactor with no defect behind it |
 
 Gate: clippy clean; `cargo test --all-features` 248 passed, 0 failed.
+
+### I-05 IR, secrets and units — 2026-10-31
+
+| # | Severity | Finding | Disposition |
+|---|---|---|---|
+| 1 | high | `structurally_eq` never compared `extensions`, although canonicalization sorts and hashes them: two modules compared equal while their bytes differed | **fixed**: extensions are part of equality; `modules_with_different_extensions_are_not_equal` |
+| 2 | medium | `children()` allocates a fresh `Vec` on every traversal, and validation walks the graph several times | **deferred with a note**: a `children_into(&mut Vec)` accessor and its use in the hot loops is a performance refactor, scheduled with the cross-cutting performance pass; no correctness effect |
+| 3 | medium | `SecretBytes::drop` used `fill(0)`, a store the optimizer may remove | **fixed**: the crate forbids `unsafe`, so it now uses `zeroize` (one small dependency) whose volatile fence cannot be elided |
+| 4 | medium | `TypeSpec::name()` joined enum members, so a type carrying a secret copy printed it through a diagnostics string | **fixed**: `Enum(<N values>)`, matching `Debug`; `a_type_name_does_not_echo_its_members` |
+| 5 | medium | `validate_structure` omits unit/type/blob/extension coherence while its doc claimed wire parity | **fixed in docs**: the contract is now "the node graph", with the cross-table rules named as the encoder's and the wire validator's job |
+| 6 | medium | `ProvKind::from_code(4)` produced a kind the wire reserves and nothing can encode | **fixed**: code 4 has no reader; `the_reserved_provenance_kind_has_no_reader` |
+| 7 | low | `has_secret()` only matched a literal `Secret`, so `secret(env.TOKEN)` modules answered false | **fixed**: it matches every secret node (`Secret` and `SecretRef`); `a_secret_ref_module_reports_having_a_secret` |
+| 8 | low | `push()` panics at `u32::MAX` nodes | **rejected**: documented, with `try_push` as the fallible form (I-01) |
+
+Gate: clippy clean; `cargo test --all-features` 252 passed and
+`--no-default-features` 207 passed, 0 failed.
 
 ### I-01 layout / header — 2026-10-31 (rounds 1 and 2)
 

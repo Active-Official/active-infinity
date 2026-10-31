@@ -43,6 +43,8 @@ active-core = { version = "1.4.0", optional = true }
 serde_json = { version = "1.0", optional = true }
 zstd = { version = "0.14", optional = true, default-features = false, features = ["zdict_builder"] }
 ed25519-dalek = { version = "2", optional = true, default-features = false, features = ["std"] }
+# Volatile zeroing of secret buffers (the codec forbids `unsafe` in-tree).
+zeroize = { version = "1", default-features = false }
 
 [dev-dependencies]
 tempfile = "3"

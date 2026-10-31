@@ -29,6 +29,12 @@
   `total_size` is bounded at parse; secret/blob/provenance arithmetic is checked;
   bindings use `max_bindings`; a streamed or reassembled image is proved
   canonical.
+- **Equality**: `InfinityModule` equality compares extension blocks, which
+  canonicalization sorts and hashes; two modules with different extensions are no
+  longer equal.
+- **Secrets**: `SecretBytes` zeroes its buffer with `zeroize` on drop (a volatile
+  write the optimizer cannot elide), `has_secret()` recognises `SecretRef`, and
+  `TypeSpec::name()` no longer echoes enum members.
 - **Store**: `Store::put` now enforces the canonical form it documents instead of
   accepting any structurally valid image.
 - **Secrets**: the promotion rule now treats a secret node as a barrier, so a

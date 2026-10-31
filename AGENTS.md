@@ -38,3 +38,13 @@ come before speed; every claim must be backed by a test on the shipped path.
 
 A stub is allowed only when a later checklist item completes it, and it must carry
 a `TODO(CHECKLIST <id>)` marker with the reason. An undocumented stub is a bug.
+
+## Do not disable invariant tests
+
+The canary/authority gate (`tests/invariant_gate.rs`), attenuation monotonicity,
+revoke-at-dispatch and every redaction test are release gates. Do not delete
+them, mark them `#[ignore]`, weaken their assertions, skip them with `cfg`, or
+move the behavior past the test boundary. If a test cannot run on a platform,
+make it fail closed with an explicit documented reason and keep an equivalent
+gate in CI.
+

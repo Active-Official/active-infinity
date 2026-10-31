@@ -216,3 +216,110 @@ fn a_conflict_returns_no_module() {
     assert!(result.module().is_none());
     assert_eq!(result.conflicts().len(), 1);
 }
+
+/// Module metadata is not combined by the field merge. A difference between the
+/// two sides is a conflict named after the component, so no side's change is
+/// dropped silently.
+#[test]
+fn a_binding_difference_is_a_conflict_not_a_silent_choice() {
+    let base = int_fields(&[("a", 1)]);
+    let left = int_fields(&[("a", 1)]);
+    let mut right = int_fields(&[("a", 1)]);
+    let root = right.root().expect("root");
+    right.bind("extra", root);
+
+    match merge(&base, &left, &right).expect("merge") {
+        Merge::Conflicts(conflicts) => {
+            assert_eq!(conflicts.len(), 1, "{conflicts:?}");
+            assert_eq!(conflicts[0].field, "<bindings>");
+            assert_eq!(conflicts[0].kind, ConflictKind::KindMismatch);
+        }
+        Merge::Clean(_) => panic!("a binding difference must not merge cleanly"),
+    }
+}
+
+#[test]
+fn a_provenance_difference_is_a_conflict() {
+    use active_infinity::Provenance;
+
+    let base = int_fields(&[("a", 1)]);
+    let left = int_fields(&[("a", 1)]);
+    let mut right = int_fields(&[("a", 1)]);
+    right.set_provenance(Some(Provenance {
+        producer: Some("agent-b".into()),
+        ..Provenance::default()
+    }));
+
+    match merge(&base, &left, &right).expect("merge") {
+        Merge::Conflicts(conflicts) => assert_eq!(conflicts[0].field, "<provenance>"),
+        Merge::Clean(_) => panic!("a provenance difference must not merge cleanly"),
+    }
+    // Both sides agreeing on the metadata is not a conflict.
+    let mut twin = int_fields(&[("a", 1)]);
+    twin.set_provenance(right.provenance().cloned());
+    assert!(merge(&base, &twin, &right)
+        .expect("merge")
+        .module()
+        .is_some());
+}
+
+/// Equality of secrets is an oracle (`SECURITY.md` I-2). A field whose subtree
+/// reaches a secret conflicts even when both sides are byte-identical, so the
+/// outcome never reveals whether two secrets match.
+#[test]
+fn a_secret_field_never_merges_cleanly_even_when_both_sides_agree() {
+    use active_infinity::SecretBytes;
+
+    let base = table(&[("s", Inode::Str("plain".into()))]);
+    let left = table(&[("s", Inode::Secret(SecretBytes::new(b"hunter2".to_vec())))]);
+    let right = table(&[("s", Inode::Secret(SecretBytes::new(b"hunter2".to_vec())))]);
+
+    match merge(&base, &left, &right).expect("merge") {
+        Merge::Conflicts(conflicts) => {
+            assert_eq!(conflicts[0].field, "s");
+            assert_eq!(conflicts[0].kind, ConflictKind::ModifyModify);
+        }
+        Merge::Clean(_) => panic!("a secret field must not merge cleanly"),
+    }
+
+    // A secret on only one side is also a conflict.
+    let plain = table(&[("s", Inode::Str("plain".into()))]);
+    match merge(&base, &left, &plain).expect("merge") {
+        Merge::Conflicts(conflicts) => assert_eq!(conflicts[0].kind, ConflictKind::ModifyModify),
+        Merge::Clean(_) => panic!("a one-sided secret must not merge cleanly"),
+    }
+
+    // An unrelated field still merges while another field holds a secret: the
+    // walk is over the compared subtree, not the whole module.
+    let base = table(&[("s", Inode::Str("plain".into())), ("n", Inode::Int(1))]);
+    let left = table(&[
+        ("s", Inode::Secret(SecretBytes::new(b"a".to_vec()))),
+        ("n", Inode::Int(2)),
+    ]);
+    let right = table(&[
+        ("s", Inode::Secret(SecretBytes::new(b"a".to_vec()))),
+        ("n", Inode::Int(1)),
+    ]);
+    // The secret field conflicts; the merge still reports only that field.
+    let conflicts = match merge(&base, &left, &right).expect("merge") {
+        Merge::Conflicts(conflicts) => conflicts,
+        Merge::Clean(_) => panic!("the secret field must conflict"),
+    };
+    assert_eq!(conflicts.len(), 1);
+    assert_eq!(conflicts[0].field, "s");
+}
+
+/// The merge bounds its own work: a module past the node ceiling is refused
+/// before any canonical form is computed.
+#[test]
+fn a_module_over_the_merge_ceiling_is_refused() {
+    use active_infinity::merge::MAX_MERGE_NODES;
+
+    let mut big = InfinityModule::new();
+    for _ in 0..=MAX_MERGE_NODES {
+        big.push(Inode::Int(0));
+    }
+    let error = merge(&big, &big, &big).expect_err("the node ceiling must refuse");
+    assert_eq!(error.code(), "infinity/limit");
+    assert!(error.to_string().contains("merge node count"), "{error}");
+}

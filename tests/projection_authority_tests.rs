@@ -83,3 +83,43 @@ fn a_redacted_projection_is_stable_for_the_same_image() {
     let module = decode(&image).expect("decode");
     assert_eq!(encode(&module).expect("encode"), image);
 }
+
+/// A secret is structural, not a flag on a value: a secret that is bound to a
+/// name or annotated must not reach a projection through that metadata either.
+#[test]
+fn a_secret_reached_through_metadata_is_still_redacted() {
+    use active_infinity::AnnotationKind;
+
+    const CANARY: &str = "CANARY_SECRET_METADATA_PATH";
+    let mut module = InfinityModule::new();
+    let secret = module.push(Inode::Secret(SecretBytes::new(CANARY)));
+    let count = module.push(Inode::Int(1));
+    let root = module.push(Inode::Table {
+        fields: vec![("n".to_string(), count)],
+    });
+    module.set_root(Some(root));
+    module.bind("token", secret);
+    module.annotate(secret, AnnotationKind::Intent("bound secret".to_string()));
+
+    let image = encode(&module).expect("encode");
+    let decoded = decode(&image).expect("decode");
+    let json = to_redacted_json(&decoded).expect("json");
+    let protobuf = to_protobuf(&module).expect("protobuf");
+    for (name, bytes) in [("json", json.as_bytes()), ("protobuf", &protobuf[..])] {
+        let leaked = bytes
+            .windows(CANARY.len())
+            .any(|window| window == CANARY.as_bytes());
+        assert!(!leaked, "{name} leaked a bound secret");
+    }
+    // The bound secret is not part of the rendered root, so the projection
+    // omits it entirely; what matters is that its bytes never appear.
+    assert!(!json.contains("token"), "{json}");
+    // The address still comes from the image, and the projection is not one.
+    assert!(validate(&image).is_ok());
+    assert!(validate(json.as_bytes()).is_err());
+    assert!(validate(&protobuf).is_err());
+    assert_eq!(
+        content_hash(&image).expect("hash"),
+        content_hash(&image).expect("hash")
+    );
+}

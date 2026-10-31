@@ -6,17 +6,33 @@
 //! incompatible ways. Subtrees are compared by their canonical encoding, so a
 //! field that merely moved inside a module still compares equal.
 //!
-//! This is a deliberate sketch: it merges the root table recursively one level
-//! at a time through the field set, keeps the left value for a conflicting
-//! field, and returns no module at all when any conflict exists. A caller that
-//! wants to resolve conflicts can merge each side against the base with the
-//! same API.
+//! Two things never merge automatically, because a "clean" answer would be a
+//! lie or an oracle:
+//!
+//! - **Module metadata** (bindings, annotations, provenance, extensions) is not
+//!   combined field by field. If the two sides disagree on any component, the
+//!   merge reports a conflict named after that component rather than keeping
+//!   one side and dropping the other's change.
+//! - **Secret material** is never compared. A field whose subtree reaches a
+//!   secret conflicts even when both sides are byte-identical, so the outcome
+//!   says nothing about whether two secrets match (`SECURITY.md` I-2).
+//!
+//! A caller that wants to resolve conflicts can merge each side against the
+//! base with the same API, or strip the metadata it does not need.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::ir::{InfinityModule, Inode, NodeId};
 use crate::stream::merge_fragment;
 use crate::{decode, encode, Result};
+
+/// Largest module this merge accepts, in nodes.
+///
+/// Each field comparison re-encodes a subtree, so the work is proportional to
+/// the node count times the field count. The ceiling keeps one hostile or
+/// accidental input from turning a local merge into an unbounded job; it is
+/// far above any module an agent edits by hand.
+pub const MAX_MERGE_NODES: usize = 262_144;
 
 /// Why a field could not be merged automatically.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -27,7 +43,10 @@ pub enum ConflictKind {
     ModifyModify,
     /// One side deleted the field while the other changed it.
     DeleteModify,
-    /// The roots (or a compared node) are not tables of the same shape.
+    /// The roots are not tables of the same shape, or a module-level metadata
+    /// component (bindings, annotations, provenance, extensions) differs
+    /// between the two sides. The merge never descends into a non-table field
+    /// to classify a mismatch: a nested shape change is `ModifyModify`.
     KindMismatch,
 }
 
@@ -81,6 +100,23 @@ pub fn merge(
     left: &InfinityModule,
     right: &InfinityModule,
 ) -> Result<Merge> {
+    // Bound the work before touching canonical forms: `prepare` is linear in
+    // the node count and the per-field comparison multiplies it by the field
+    // count.
+    for module in [base, left, right] {
+        if module.node_count() > MAX_MERGE_NODES {
+            return Err(crate::Error::Limit {
+                kind: "merge node count",
+                limit: MAX_MERGE_NODES as u64,
+            });
+        }
+    }
+    // Module-level metadata is not combined field by field. Refuse rather than
+    // keep the left copy and drop the right side's change.
+    let metadata = metadata_conflicts(left, right)?;
+    if !metadata.is_empty() {
+        return Ok(Merge::Conflicts(metadata));
+    }
     let Some(base_fields) = root_fields(base) else {
         return Ok(Merge::Conflicts(vec![Conflict {
             field: String::new(),
@@ -200,6 +236,18 @@ fn decide(
     l: Option<NodeId>,
     r: Option<NodeId>,
 ) -> Result<Decision> {
+    // Secret material is never compared. Equality is an oracle (`SECURITY.md`
+    // I-2), so a field that holds a secret on either side is a conflict even
+    // when the two subtrees are byte-identical: `Conflict` then says nothing
+    // about whether the secrets match. Only a field that both sides deleted is
+    // still a clean deletion.
+    if l.is_some() || r.is_some() {
+        let left_secret = l.is_some_and(|id| subtree_has_secret(left, id));
+        let right_secret = r.is_some_and(|id| subtree_has_secret(right, id));
+        if left_secret || right_secret {
+            return Ok(Decision::Conflict(ConflictKind::ModifyModify));
+        }
+    }
     let left_eq_base = equal(base, left, b, l)?;
     let right_eq_base = equal(base, right, b, r)?;
     let left_eq_right = equal(left, right, l, r)?;
@@ -247,6 +295,60 @@ fn equal(
         (Some(_), None) | (None, Some(_)) => Ok(false),
         (Some(a), Some(b)) => Ok(subtree_image(first, a)? == subtree_image(second, b)?),
     }
+}
+
+/// Whether a subtree reaches secret material.
+///
+/// Walks the node references rather than the whole module: a secret elsewhere
+/// in the module does not block merging an unrelated field, but a secret inside
+/// the compared subtree does.
+fn subtree_has_secret(module: &InfinityModule, id: NodeId) -> bool {
+    let mut seen = BTreeSet::new();
+    let mut stack = vec![id];
+    while let Some(current) = stack.pop() {
+        if !seen.insert(current) {
+            continue;
+        }
+        let Some(node) = module.get(current) else {
+            continue;
+        };
+        if node.is_secret() {
+            return true;
+        }
+        stack.extend(node.children());
+    }
+    false
+}
+
+/// Conflicts in the module-level metadata the field merge does not combine.
+///
+/// The canonical forms are compared, so node references are already renumbered
+/// and two structurally equal metadata sets compare equal across modules. Any
+/// difference between the two sides is a conflict: keeping the left copy would
+/// silently drop the right side's change.
+fn metadata_conflicts(left: &InfinityModule, right: &InfinityModule) -> Result<Vec<Conflict>> {
+    let left = crate::canonical::prepare(left)?;
+    let right = crate::canonical::prepare(right)?;
+    let mut conflicts = Vec::new();
+    let mut push = |field: &str| {
+        conflicts.push(Conflict {
+            field: field.to_string(),
+            kind: ConflictKind::KindMismatch,
+        })
+    };
+    if left.bindings != right.bindings {
+        push("<bindings>");
+    }
+    if left.annotations != right.annotations {
+        push("<annotations>");
+    }
+    if left.provenance != right.provenance {
+        push("<provenance>");
+    }
+    if left.extensions != right.extensions {
+        push("<extensions>");
+    }
+    Ok(conflicts)
 }
 
 fn subtree_image(module: &InfinityModule, id: NodeId) -> Result<Vec<u8>> {

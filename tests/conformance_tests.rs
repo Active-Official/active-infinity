@@ -55,6 +55,10 @@ const NON_IMAGE_CLASSES: &[(&str, &str)] = &[
         "detached signature envelope failure; not a byte-image class",
     ),
     (
+        "infinity/proof",
+        "proof-sidecar mismatch; the sidecar is not a byte image",
+    ),
+    (
         "infinity/encode",
         "encoder-side refusal; the bytes it would have produced do not exist",
     ),

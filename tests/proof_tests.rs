@@ -183,3 +183,35 @@ fn a_proof_for_one_image_does_not_verify_another() {
         .expect_err("different image");
     assert!(matches!(error, Error::Proof(_)), "{error:?}");
 }
+
+/// `validate_canonical` only accepts an image that re-encodes to itself, so a
+/// verified image is canonical. A sidecar that claims otherwise was edited; it
+/// must not verify just because its hash still matches.
+#[cfg(feature = "json")]
+#[test]
+fn a_sidecar_that_denies_canonical_form_is_refused() {
+    let image = vector("full.ainf");
+    let proof = Proof::issue(&image).expect("issue");
+    let json = proof.to_json();
+    assert!(json.contains("\"canonical\":true"), "{json}");
+    let edited = json.replace("\"canonical\":true", "\"canonical\":false");
+    let parsed = Proof::from_json(&edited).expect("parse");
+    assert!(!parsed.canonical);
+    let error = parsed
+        .verify(&image)
+        .expect_err("a false canonical flag must not verify");
+    assert_eq!(error.code(), "infinity/proof");
+    assert!(error.to_string().contains("canonical"), "{error}");
+}
+
+/// A sidecar is a fixed set of scalar fields; a megabyte of JSON is hostile and
+/// is refused before it is parsed.
+#[cfg(feature = "json")]
+#[test]
+fn an_oversized_sidecar_is_refused_before_parsing() {
+    let mut text = String::from("{\"format\":\"active-infinity/proof/1\"}");
+    text.push_str(&" ".repeat(active_infinity::proof::MAX_SIDECAR_BYTES));
+    let error = Proof::from_json(&text).expect_err("an oversized sidecar must be refused");
+    assert_eq!(error.code(), "infinity/proof");
+    assert!(error.to_string().contains("ceiling"), "{error}");
+}

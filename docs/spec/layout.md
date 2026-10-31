@@ -433,6 +433,24 @@ that uses the flag for deduplication, caching or signatures must prove it first;
 the content hash alone is computed over the bytes actually received and is
 therefore safe without the proof.
 
+### 6.2 Proof sidecars
+
+A proof sidecar (`active-infinity/proof/1`, ADR-0014) is a JSON document next to
+an image. It carries the content hash, size, node/edge/secret counts, the AINF
+version, the dialect hash, a canonical flag and an optional schema hash. Rules a
+verifier may rely on:
+
+- `Proof::verify` runs `validate_canonical`, so a verified image is canonical by
+  construction. A sidecar whose `canonical` flag is `false` is refused
+  (`infinity/proof`) even when every other field matches: the flag can only be
+  a lie about an image that already proved itself.
+- The sidecar is capped at 16 KiB. It is a fixed set of scalar fields, so the
+  ceiling bounds a hostile parse; nesting is bounded by the JSON parser.
+- `issue_with_schema` records the schema's own content hash, and
+  `verify_with_schema` requires those exact schema bytes and re-runs the schema
+  against the image.
+- A sidecar is a claim about an image, never an image: `validate` refuses it.
+
 ---
 
 ## 7. Validation classes
@@ -522,6 +540,7 @@ messages. Every code below is part of the contract.
 | `infinity/compression` | optional zstd compression failed or exceeded its bound |
 | `infinity/store` | local content-addressed store failed |
 | `infinity/signature` | detached signature envelope is malformed or invalid |
+| `infinity/proof` | a proof sidecar is malformed or does not match its image |
 | `infinity/encode` | module cannot be encoded (dangling reference, tainted blob with payload, ...) |
 | `infinity/encode-dangling` | encoding referenced a missing node |
 | `infinity/too-large` | image exceeds the 4 GiB address space |

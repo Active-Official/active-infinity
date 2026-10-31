@@ -16,6 +16,13 @@ use crate::{content_hash, validate_canonical, Error, Limits, Result};
 /// Format tag carried by the JSON sidecar.
 pub const PROOF_FORMAT: &str = "active-infinity/proof/1";
 
+/// Largest JSON sidecar accepted, in bytes.
+///
+/// A sidecar is a fixed set of scalar fields (a hash, six numbers, a boolean and
+/// an optional hash), so a few hundred bytes is the real size. This ceiling
+/// stops a hostile file from forcing an unbounded parse.
+pub const MAX_SIDECAR_BYTES: usize = 16 << 10;
+
 /// A proof sidecar for one canonical image.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Proof {
@@ -89,6 +96,14 @@ impl Proof {
         {
             return Err(Error::Proof("metadata differs"));
         }
+        // `validate_canonical` only accepts an image that re-encodes to itself,
+        // so a verified image is canonical by construction. A sidecar that
+        // claims otherwise was edited (or describes a different image).
+        if !self.canonical {
+            return Err(Error::Proof(
+                "the sidecar does not describe a canonical image",
+            ));
+        }
         match (self.schema_hash, schema) {
             (Some(expected), Some(bytes)) => {
                 let actual = content_hash(bytes)?;
@@ -140,8 +155,15 @@ impl Proof {
     }
 
     /// Parse a JSON sidecar.
+    ///
+    /// The text is bounded before parsing: a sidecar is a fixed set of scalar
+    /// fields, so anything beyond a few hundred bytes is hostile. serde_json's
+    /// own recursion limit bounds nesting.
     #[cfg(feature = "json")]
     pub fn from_json(text: &str) -> Result<Proof> {
+        if text.len() > MAX_SIDECAR_BYTES {
+            return Err(Error::Proof("sidecar is larger than its ceiling"));
+        }
         let value: serde_json::Value =
             serde_json::from_str(text).map_err(|_| Error::Proof("sidecar is not JSON"))?;
         if value.get("format").and_then(|v| v.as_str()) != Some(PROOF_FORMAT) {

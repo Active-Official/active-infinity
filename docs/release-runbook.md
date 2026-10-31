@@ -14,6 +14,17 @@ maturity release; the executed record lives in `STATUS.md`.
    library version is resolvable.
 4. `STATUS.md` reflects the candidate state and its residual risks.
 
+## The release workflow
+
+Pushing the tag runs `.github/workflows/release.yml`, which re-runs the format,
+clippy and test gates on the tagged commit, generates
+`dist/active-infinity-<version>.cdx.json` from `cargo metadata --locked`,
+verifies it with `scripts/sbom.py --check`, creates the GitHub Release if it does
+not exist, uploads the SBOM and asserts the asset is attached. The job can also
+be run for an existing tag with `workflow_dispatch`.
+
+Signing, attestation and the Sigstore spike: `docs/release/signing.md`.
+
 ## Order
 
 1. **Commit and push both remotes.**

@@ -1,0 +1,15 @@
+# `cargo audit` configuration.
+#
+# The advisory database is the source of truth for vulnerabilities; this file
+# records the one advisory this crate accepts and why, so a *new* advisory fails
+# the gate instead of being lost among warnings. The same entry lives in
+# `deny.toml` so `cargo audit --deny warnings` and `cargo deny check advisories`
+# agree.
+#
+# RUSTSEC-2024-0449: `unsafe-libyaml` is unmaintained. It arrives through
+# `serde_yaml` (deprecated) and `active-core`'s document parser. `active-infinity`
+# itself never parses YAML: its wire format is binary AINF, and the YAML path is
+# reachable only when a caller compiles an Active source document with the
+# `active-core` feature. Remove this entry when `active-core` drops `serde_yaml`.
+[advisories]
+ignore = ["RUSTSEC-2024-0449"]

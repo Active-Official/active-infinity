@@ -345,8 +345,23 @@ jobs:
           bash polyglot/rpc/run_clients.sh /tmp/rpc "$PWD" \
             python c cpp zig js go ruby php lua dart java kotlin scala csharp swift ktnative assemblyscript shell golden
 
-  polyglot-matrix:
-    # The C-8 release gate. Every language job must pass; one red language job
+  cli:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      # End-to-end CLI contract: help text, exit codes, validate/hash/decode,
+      # dictionary round trip, microbench shape and the content-addressed store.
+      - name: CLI tests
+        working-directory: cli/active-infinity-cli
+        run: cargo test --locked
+      - name: CLI lint
+        working-directory: cli/active-infinity-cli
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+  polyglot-matrix:    # The C-8 release gate. Every language job must pass; one red language job
     # fails this aggregate gate, and with it phase C-8.
     if: always()
     needs:

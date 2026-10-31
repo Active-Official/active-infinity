@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+### Fixed
+
+- **Canonical form**: enum members (in a schema type and in an `Enum`
+  constraint) are sorted before interning, so two modules that differ only in
+  member order encode to the same bytes and share one content hash. Images
+  produced before this change with unsorted members still `validate` but fail
+  `validate_canonical`; re-encode them to migrate.
+- **Validation** (`validate.rs`): node reserved bytes must be zero; the
+  `children`/`fields`/`parts` tables must be packed sequentially in node order;
+  every aux entry must be referenced exactly once; a table type's flag must agree
+  with its aux entry; the type table is ordered by content; constraint and
+  schema aux tags must be strictly ascending; a self-referential edge is
+  `infinity/cycle`; count faults in variable sections are `infinity/count`;
+  `total_size` is bounded at parse; secret/blob/provenance arithmetic is checked;
+  bindings use `max_bindings`; a streamed or reassembled image is proved
+  canonical.
+- **Store**: `Store::put` now enforces the canonical form it documents instead of
+  accepting any structurally valid image.
+
 ### Added
 
 - `canonical::remap_node` is public. Projecting a module into a smaller arena

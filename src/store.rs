@@ -31,8 +31,12 @@ impl Store {
     }
 
     /// Put a validated canonical image. Returns its content hash.
+    ///
+    /// Canonical is enforced, not assumed: a structurally valid image that
+    /// re-encodes differently would otherwise get a second key for one logical
+    /// module, and a signature over it would bind bytes nobody can reproduce.
     pub fn put(&self, image: &[u8]) -> Result<[u8; 32]> {
-        validate(image)?;
+        crate::validate::validate_canonical(image, crate::layout::Limits::default())?;
         let hash = content_hash(image)?;
         let path = self.path_for(&hash);
         if let Ok(existing) = fs::read(&path) {

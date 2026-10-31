@@ -15,7 +15,7 @@ the code → regression test first → minimal fix → targeted tests + clippy �
 | ID | Section | Paths | State | Findings (fixed / rejected / open) | Commits |
 |----|---------|-------|-------|------------------------------------|---------|
 | I-01 | layout / header | `src/layout.rs` | CLEAN (round 2 open items fixed) | 10 fixed, 1 rejected, 0 open | this commit |
-| I-02 | validate | `src/validate.rs` | in progress (slices A–D fixed; E pending) | 17 fixed, 4 rejected, 0 open | this commit |
+| I-02 | validate | `src/validate.rs` | in progress (slices A–E fixed; final re-audit) | 21 fixed, 6 rejected, 0 open | this commit |
 | I-03 | encode / canonical | `src/encode.rs`, `src/canonical.rs` | pending | — | — |
 | I-04 | decode / view | `src/decode.rs`, `src/view.rs` | pending | — | — |
 | I-05 | IR / units | `src/ir.rs`, `src/unit.rs` | pending | — | — |
@@ -143,3 +143,17 @@ Gate: clippy clean; `cargo test --all-features` 223 passed, 0 failed.
 
 Gate after slices C and D: clippy clean; `cargo test --all-features` 229 passed,
 0 failed.
+
+### I-02 validate, slice E (canonical proof, store, stream) — 2026-10-31
+
+| # | Severity | Finding | Disposition |
+|---|---|---|---|
+| 1 | high | `verify_canonical` re-encodes with `streamed:` taken from the image, so a streamed image validates; two byte images for one module | **rejected with reasoning**: `streamed` is a header flag the spec §1.1 defines as part of the image ("reassembled from a stream"), like provenance: it is metadata the identity covers. The re-encode must preserve it or a legitimate streamed image could never pass. Documented in the log rather than silently overridden |
+| 2 | high | `Store::put` documented "validated canonical" but validated structurally only | **fixed**: `put` calls `validate_canonical`, so a non-canonical image is not stored under a second key; `the_store_refuses_a_non_canonical_image` |
+| 3 | medium | stream reassembly validated with `verify_canonical: false` and trusted the `Begin` flags | **fixed**: all three reassembly validation points prove the canonical form |
+| 4 | medium | enum members were not canonicalized: `[a,b]` and `[b,a]` were two images for one set | **fixed**: schema-type and constraint enums are sorted before interning; `enum_member_order_does_not_change_the_identity`. This is a canonical-form change: images with unsorted members still validate but fail `validate_canonical` (recorded in the changelog) |
+| 5 | medium | the proof re-encodes a whole module with no extra bound | **rejected**: the re-encode is proportional to the input and bounded by the same limits; `paranoid()` is the untrusted-input profile and already documents the doubling. A hard cap would need a new limit, not a check |
+| 6 | low | `check_bindings` compared against `max_nodes` | **fixed in slice D** (the section count includes the root word, consistently with `validate_counts`) |
+| 7 | low | decode/encode failures inside the proof propagated as encoder codes | **fixed**: any failure to reproduce the image is `infinity/not-canonical` |
+
+Gate: clippy clean; `cargo test --all-features` 231 passed, 0 failed.

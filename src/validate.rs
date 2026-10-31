@@ -134,7 +134,11 @@ impl<'a> Validated<'a> {
             }
         }
         if opts.verify_canonical {
-            let module = crate::decode::decode_validated(&validated)?;
+            // Any failure to reproduce the image is a canonical-form fault, not an
+            // encoder fault: the caller asked "is this the canonical encoding of
+            // its own content", and the answer is no.
+            let module =
+                crate::decode::decode_validated(&validated).map_err(|_| Error::NotCanonical)?;
             let image = crate::encode::encode_with(
                 &module,
                 crate::layout::EncodeOpts {
@@ -142,7 +146,8 @@ impl<'a> Validated<'a> {
                     mark_canonical: true,
                     streamed: header.flags & crate::layout::FLAG_STREAMED != 0,
                 },
-            )?;
+            )
+            .map_err(|_| Error::NotCanonical)?;
             if image != buf {
                 return Err(Error::NotCanonical);
             }

@@ -389,6 +389,77 @@ fn an_empty_module_with_a_dangling_root_is_refused() {
 }
 
 #[test]
+fn enum_member_order_does_not_change_the_identity() {
+    // An enum is a set of members. Before canonicalization sorted them, two
+    // modules that differed only in member order had two byte images and two
+    // content hashes.
+    let build = |first: &str, second: &str| {
+        let mut module = InfinityModule::new();
+        let field = module.push(schema_field(active_infinity::ir::TypeSpec::Enum(vec![
+            first.to_string(),
+            second.to_string(),
+        ])));
+        let root = module.push(Inode::SchemaTable {
+            fields: vec![("a".to_string(), field)],
+            closed: false,
+        });
+        module.set_root(Some(root));
+        encode(&module).expect("encode")
+    };
+    let forward = build("a", "b");
+    let reverse = build("b", "a");
+    assert_eq!(forward, reverse, "member order is not part of the identity");
+    validate_with(
+        &reverse,
+        DecodeOpts {
+            limits: Limits::default(),
+            verify_hash: true,
+            verify_canonical: true,
+        },
+    )
+    .expect("the sorted form is canonical");
+}
+
+#[test]
+fn the_store_refuses_a_non_canonical_image() {
+    // `Store::put` promises a canonical image; a structurally valid image that
+    // re-encodes differently would get a second key for one logical module.
+    let mut module = InfinityModule::new();
+    let root = module.push(Inode::Int(1));
+    module.set_root(Some(root));
+    let canonical = encode(&module).expect("encode");
+    let unmarked = active_infinity::encode::encode_with(
+        &module,
+        active_infinity::layout::EncodeOpts {
+            write_hash: true,
+            mark_canonical: false,
+            streamed: false,
+        },
+    )
+    .expect("encode without the canonical flag");
+    assert_ne!(canonical, unmarked);
+    validate(&unmarked).expect("the unmarked image is structurally valid");
+
+    let root = std::env::temp_dir().join(format!(
+        "inf-store-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    let store = active_infinity::store::Store::open(&root).expect("store");
+    let error = store
+        .put(&unmarked)
+        .expect_err("a non-canonical image is not stored");
+    assert_eq!(error.code(), "infinity/not-canonical", "{error:?}");
+    store
+        .put(&canonical)
+        .expect("the canonical image is stored");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
 fn a_canonical_image_still_validates_under_strict_limits() {
     let opts = DecodeOpts {
         limits: Limits::strict(),

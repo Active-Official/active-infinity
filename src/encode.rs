@@ -625,7 +625,11 @@ fn build_node_tables(prepared: &Prepared) -> Result<NodeTables> {
                         CONSTRAINT_KIND_MIN_MAX
                     }
                     Constraint::Enum(items) => {
-                        for item in items {
+                        // Sorted, so an enum constraint has one canonical encoding
+                        // regardless of the order the author listed its values.
+                        let mut ordered: Vec<&String> = items.iter().collect();
+                        ordered.sort();
+                        for item in ordered {
                             tables.aux.push((AUX_CONSTRAINT_ENUM_ITEM, string(item)?));
                         }
                         CONSTRAINT_KIND_ENUM
@@ -782,7 +786,9 @@ fn type_payload(spec: &TypeSpec, prepared: &Prepared) -> Result<(u32, Vec<(u32, 
     let mut aux = Vec::new();
     match spec {
         TypeSpec::Enum(items) => {
-            for item in items {
+            let mut ordered: Vec<&String> = items.iter().collect();
+            ordered.sort();
+            for item in ordered {
                 aux.push((AUX_TYPE_ENUM_ITEM, string(item)?));
             }
         }

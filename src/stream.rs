@@ -921,7 +921,7 @@ impl StreamDecoder {
                         crate::layout::DecodeOpts {
                             limits: self.limits,
                             verify_hash: true,
-                            verify_canonical: false,
+                            verify_canonical: true,
                         },
                     )?;
                     let module = crate::decode::decode_validated(&validated)?;
@@ -938,7 +938,7 @@ impl StreamDecoder {
                     crate::layout::DecodeOpts {
                         limits: self.limits,
                         verify_hash: true,
-                        verify_canonical: false,
+                        verify_canonical: true,
                     },
                 )?;
                 let module = crate::decode::decode_validated(&validated)?;
@@ -1204,7 +1204,7 @@ fn decode_fragment(
         crate::layout::DecodeOpts {
             limits,
             verify_hash: true,
-            verify_canonical: false,
+            verify_canonical: true,
         },
     )
 }

@@ -773,7 +773,13 @@ fn type_payload(
     let mut aux = Vec::new();
     match &spec.typ {
         TypeSpec::Enum(items) => {
-            for item in items {
+            // An enum is a set of members: sort before interning so two modules
+            // that differ only in member order produce one type table (and one
+            // content hash). The IR keeps the author's order; the canonical form
+            // does not.
+            let mut ordered: Vec<&String> = items.iter().collect();
+            ordered.sort();
+            for item in ordered {
                 aux.push((crate::layout::AUX_TYPE_ENUM_ITEM, lookup(item)?));
             }
         }

@@ -1,0 +1,21 @@
+{
+  "name": "active-infinity-js",
+  "version": "0.1.0",
+  "description": "Active Infinity for JavaScript: validate, content hash, canonical encode and redacted JSON through the shared WASM module",
+  "license": "MIT OR Apache-2.0",
+  "main": "active-infinity.js",
+  "types": "index.d.ts",
+  "files": [
+    "active-infinity.js",
+    "index.d.ts",
+    "active_infinity_ffi.wasm",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node test.js"
+  },
+  "keywords": ["active", "infinity", "wasm", "serialization", "canonical"],
+  "engines": {
+    "node": ">=18"
+  }
+}

@@ -1,0 +1,21 @@
+[package]
+name = "active-infinity-ffi"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+authors = ["Active Language Team"]
+license = "MIT OR Apache-2.0"
+description = "C ABI and WASM exports for Active Infinity: validate, hash, canonical re-encode, Active source ingest and redacted JSON"
+repository = "https://github.com/Active-Official/active-infinity"
+homepage = "https://github.com/Active-Official/active-infinity"
+publish = false
+
+[lib]
+name = "active_infinity_ffi"
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[dependencies]
+active-infinity = { path = "../..", version = "2.1.0", features = ["active-core", "json"] }
+# `active-core` reaches getrandom 0.2. The custom backend keeps the WASM module
+# free of wasm-bindgen glue: the host supplies one `active_random_fill` import.
+getrandom = { version = "0.2", features = ["custom"] }

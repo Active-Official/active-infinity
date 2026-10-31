@@ -50,6 +50,107 @@ jobs:
           name: perf-matrix
           path: perf-matrix.json
 
+  abi:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: ABI tests (validate, hash, reencode, redaction)
+        working-directory: ffi/active-infinity-ffi
+        run: cargo test --locked --release
+      - name: Build the static library
+        working-directory: ffi/active-infinity-ffi
+        run: cargo build --locked --release
+      - name: Compile and run the C consumer
+        run: |
+          gcc -I ffi/active-infinity-ffi/include polyglot/c/consumer.c \
+            ffi/active-infinity-ffi/target/release/libactive_infinity_ffi.a \
+            -lpthread -ldl -lm -o /tmp/active-infinity-c
+          /tmp/active-infinity-c tests/vectors/valid/full.ainf
+
+  wasm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Add the wasm target
+        run: rustup target add wasm32-unknown-unknown
+      - name: Build the shared WASM module
+        working-directory: ffi/active-infinity-ffi
+        run: cargo build --locked --release --target wasm32-unknown-unknown
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: JavaScript conformance
+        run: node polyglot/js/test.js
+
+  polyglot-native:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build the shared library
+        working-directory: ffi/active-infinity-ffi
+        run: cargo build --locked --release
+      - name: C++ consumer
+        run: |
+          g++ -std=c++17 -I ffi/active-infinity-ffi/include -I polyglot/cpp \
+            polyglot/cpp/test.cpp \
+            ffi/active-infinity-ffi/target/release/libactive_infinity_ffi.a \
+            -lpthread -ldl -lm -o /tmp/active-infinity-cpp
+          /tmp/active-infinity-cpp tests/vectors/valid/full.ainf
+      - name: Python conformance
+        env:
+          ACTIVE_INFINITY_LIB: ${{ github.workspace }}/ffi/active-infinity-ffi/target/release/libactive_infinity_ffi.so
+        run: python3 polyglot/python/test_conformance.py
+      - name: Zig consumer
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - name: Build and run Zig
+        working-directory: polyglot/zig
+        run: |
+          zig build
+          LD_LIBRARY_PATH=${{ github.workspace }}/ffi/active-infinity-ffi/target/release \
+            ./zig-out/bin/active-infinity-zig ../../tests/vectors/valid/full.ainf
+
+  polyglot-go:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build the shared WASM module
+        working-directory: ffi/active-infinity-ffi
+        run: |
+          rustup target add wasm32-unknown-unknown
+          cargo build --locked --release --target wasm32-unknown-unknown
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+      - name: Go conformance
+        working-directory: polyglot/go
+        run: go test ./...
+
+  polyglot-ts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build the shared WASM module
+        working-directory: ffi/active-infinity-ffi
+        run: |
+          rustup target add wasm32-unknown-unknown
+          cargo build --locked --release --target wasm32-unknown-unknown
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: TypeScript conformance
+        run: |
+          npx --yes -p typescript@5.7.2 tsc -p polyglot/ts/tsconfig.json
+          node polyglot/ts-build/conformance.js
+      - name: JavaScript conformance
+        run: node polyglot/js/test.js
+
   msrv:
     runs-on: ubuntu-latest
     steps:

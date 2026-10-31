@@ -1,0 +1,6 @@
+# Polyglot build outputs (paths relative to this directory)
+ts-build/
+ts/out/
+zig/zig-out/
+zig/.zig-cache/
+*/node_modules/

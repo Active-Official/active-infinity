@@ -1,0 +1,6 @@
+target/
+*.wasm
+*.dll
+*.lib
+*.so
+*.dylib

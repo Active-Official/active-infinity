@@ -350,3 +350,38 @@ Mutation evidence: renaming `impl.items` exits 1. The clean surface still report
 
 **NO NEW FINDINGS.** The reviewer confirmed the schema-drift finding fires on a
 renamed `impl.items` and that inherent methods count toward the tripwire.
+
+## Round 27 - 2026-10-31 (C-11 delta: proof, merge, projection authority)
+
+Scope: `b434bd6..HEAD` (proof sidecars, three-way merge, projection authority)
+plus the working tree. Path: Copilot CLI via the Meta Muse proxy,
+`--reasoning-effort xhigh`.
+
+| Finding | Severity | Disposition |
+|---|---|---|
+| A clean merge kept the left bindings/annotations/provenance/extensions, silently dropping a right-side change | high | fixed: `metadata_conflicts` compares the components and reports `<bindings>`/`<annotations>`/`<provenance>`/`<extensions>`; two tests |
+| `Proof.canonical` was never compared, so a sidecar claiming `false` verified | high | fixed: `verify_with_schema` refuses a false flag; `a_sidecar_that_denies_canonical_form_is_refused` |
+| `Proof::from_json` parsed an unbounded string | high | fixed: `MAX_SIDECAR_BYTES` (16 KiB) before parsing; `an_oversized_sidecar_is_refused_before_parsing` |
+| Merge compared secret bytes, an equality oracle | medium | fixed: a field whose subtree reaches a secret conflicts even when both sides agree; `a_secret_field_never_merges_cleanly_even_when_both_sides_agree` |
+| Merge had no work bound | medium | fixed: `MAX_MERGE_NODES`; `a_module_over_the_merge_ceiling_is_refused` |
+| Projection authority tests covered only a root secret | medium | added: a secret reached through a binding and an annotation never appears in either projection |
+| `KindMismatch` documented as "root or compared node" while the code only classifies roots | low | doc corrected in the enum and in ADR-0015 |
+| CLI `proof` assumed the `json` feature | low | not an issue: the CLI declares no feature flags and enables `json` unconditionally |
+
+Also recorded: ADR-0015 now states the metadata and secret rules, the node
+ceiling and the value-based comparison.
+
+## Round 28 - 2026-10-31 (verification)
+
+| Finding | Severity | Disposition |
+|---|---|---|
+| Binding metadata was compared by prepared index, so a same-name retarget between two shape-identical nodes merged clean and the right value was lost | high | fixed: bindings compare by name and target subtree image; `a_binding_retarget_with_a_different_value_is_a_conflict` |
+| The same positional comparison reported a spurious `<bindings>` conflict whenever one side added a field | high | fixed by the same change; `an_unrelated_field_change_does_not_conflict_on_identical_bindings` |
+| ADR-0015 did not state the node ceiling | nit | fixed |
+
+The other round-27 dispositions were VERIFIED: canonical flag, sidecar ceiling,
+node ceiling, secret gate, projection test, enum doc. The CLI finding was
+confirmed as not an issue.
+
+Gates after the fixes: clippy both feature sets, 177 tests with all features,
+151 without, CLI 10, FFI 9.

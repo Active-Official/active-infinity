@@ -22,7 +22,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::ir::{InfinityModule, Inode, NodeId};
+use crate::ir::{AnnotationKind, InfinityModule, Inode, NodeId};
 use crate::stream::merge_fragment;
 use crate::{decode, encode, Result};
 
@@ -322,13 +322,13 @@ fn subtree_has_secret(module: &InfinityModule, id: NodeId) -> bool {
 
 /// Conflicts in the module-level metadata the field merge does not combine.
 ///
-/// The canonical forms are compared, so node references are already renumbered
-/// and two structurally equal metadata sets compare equal across modules. Any
-/// difference between the two sides is a conflict: keeping the left copy would
-/// silently drop the right side's change.
+/// Comparisons are by **value**, never by canonical position: two modules with
+/// the same shape renumber identically, so comparing prepared indices would
+/// miss a retargeted binding (silent loss) and would report a conflict whenever
+/// one side added a node (spurious). A target that reaches a secret is a
+/// conflict rather than a comparison, for the same anti-oracle reason the field
+/// merge refuses secret fields.
 fn metadata_conflicts(left: &InfinityModule, right: &InfinityModule) -> Result<Vec<Conflict>> {
-    let left = crate::canonical::prepare(left)?;
-    let right = crate::canonical::prepare(right)?;
     let mut conflicts = Vec::new();
     let mut push = |field: &str| {
         conflicts.push(Conflict {
@@ -336,19 +336,95 @@ fn metadata_conflicts(left: &InfinityModule, right: &InfinityModule) -> Result<V
             kind: ConflictKind::KindMismatch,
         })
     };
-    if left.bindings != right.bindings {
+    if bindings_differ(left, right)? {
         push("<bindings>");
     }
-    if left.annotations != right.annotations {
+    if annotations_differ(left, right)? {
         push("<annotations>");
     }
-    if left.provenance != right.provenance {
+    if left.provenance() != right.provenance() {
         push("<provenance>");
     }
-    if left.extensions != right.extensions {
+    if left.extensions() != right.extensions() {
         push("<extensions>");
     }
     Ok(conflicts)
+}
+
+fn bindings_differ(left: &InfinityModule, right: &InfinityModule) -> Result<bool> {
+    let left_bindings: BTreeMap<&str, NodeId> = left
+        .bindings()
+        .iter()
+        .map(|(name, id)| (name.as_str(), *id))
+        .collect();
+    let right_bindings: BTreeMap<&str, NodeId> = right
+        .bindings()
+        .iter()
+        .map(|(name, id)| (name.as_str(), *id))
+        .collect();
+    if left_bindings.len() != right_bindings.len() {
+        return Ok(true);
+    }
+    for (name, left_id) in left_bindings {
+        let Some(right_id) = right_bindings.get(name) else {
+            return Ok(true);
+        };
+        if nodes_differ(left, left_id, right, *right_id)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn annotations_differ(left: &InfinityModule, right: &InfinityModule) -> Result<bool> {
+    if left.annotations().len() != right.annotations().len() {
+        return Ok(true);
+    }
+    for (first, second) in left.annotations().iter().zip(right.annotations()) {
+        if kind_text(&first.kind) != kind_text(&second.kind) {
+            return Ok(true);
+        }
+        if nodes_differ(left, first.node, right, second.node)? {
+            return Ok(true);
+        }
+        if let (
+            AnnotationKind::Constraint {
+                expr: left_expr, ..
+            },
+            AnnotationKind::Constraint {
+                expr: right_expr, ..
+            },
+        ) = (&first.kind, &second.kind)
+        {
+            if nodes_differ(left, *left_expr, right, *right_expr)? {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
+/// Whether two subtrees differ. A secret on either side is "different" without
+/// being compared.
+fn nodes_differ(
+    first: &InfinityModule,
+    a: NodeId,
+    second: &InfinityModule,
+    b: NodeId,
+) -> Result<bool> {
+    if subtree_has_secret(first, a) || subtree_has_secret(second, b) {
+        return Ok(true);
+    }
+    Ok(subtree_image(first, a)? != subtree_image(second, b)?)
+}
+
+/// The annotation payload without its node references.
+fn kind_text(kind: &AnnotationKind) -> (u8, String) {
+    match kind {
+        AnnotationKind::Intent(text) => (0, text.clone()),
+        AnnotationKind::Constraint { source, .. } => (1, source.clone()),
+        AnnotationKind::AiImmutable(flag) => (2, flag.to_string()),
+    }
 }
 
 fn subtree_image(module: &InfinityModule, id: NodeId) -> Result<Vec<u8>> {

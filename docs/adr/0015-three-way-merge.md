@@ -52,7 +52,15 @@ would leak equality:
   function.
 - Complexity is O(fields × module size) because each comparison encodes the
   subtree; this is a correctness-first sketch, not the hot path. A future
-  revision can hash subtrees once per module.
+  revision can hash subtrees once per module. Inputs above `MAX_MERGE_NODES`
+  (262 144 nodes) are refused with `infinity/limit` before any canonical form
+  is computed, so one large or hostile module cannot turn a local merge into an
+  unbounded job.
+- Metadata components are compared by **value**: bindings by name and target
+  subtree, annotations by payload and target subtree, provenance and extensions
+  directly. Comparing prepared indices instead would miss a retarget between two
+  shape-identical nodes (silent loss) and would report a conflict whenever one
+  side added a node (spurious).
 - Nested conflicts are reported at the top-level field name in v1. A dotted
   path and recursive resolution are additive extensions.
 - A module with any metadata on one side only cannot be merged by this API. A

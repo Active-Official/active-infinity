@@ -323,3 +323,41 @@ fn a_module_over_the_merge_ceiling_is_refused() {
     assert_eq!(error.code(), "infinity/limit");
     assert!(error.to_string().contains("merge node count"), "{error}");
 }
+
+fn bound_module(root_fields: &[(&str, i64)], bound: i64) -> InfinityModule {
+    let mut module = int_fields(root_fields);
+    let target = module.push(Inode::Int(bound));
+    module.bind("b", target);
+    module
+}
+
+/// A binding retarget between two nodes with the same shape but different
+/// values used to compare equal by canonical position, so the merge kept the
+/// left binding and dropped the right side's change.
+#[test]
+fn a_binding_retarget_with_a_different_value_is_a_conflict() {
+    let base = int_fields(&[("a", 1)]);
+    let left = bound_module(&[("a", 1)], 100);
+    let right = bound_module(&[("a", 1)], 200);
+    match merge(&base, &left, &right).expect("merge") {
+        Merge::Conflicts(conflicts) => {
+            assert_eq!(conflicts[0].field, "<bindings>", "{conflicts:?}");
+        }
+        Merge::Clean(_) => panic!("a retargeted binding must not merge cleanly"),
+    }
+}
+
+/// Identical bindings must not conflict just because one side added a field:
+/// the added node shifts canonical numbering, which the positional comparison
+/// mistook for a metadata change.
+#[test]
+fn an_unrelated_field_change_does_not_conflict_on_identical_bindings() {
+    let base = bound_module(&[("a", 1)], 7);
+    let left = bound_module(&[("a", 2)], 7);
+    let right = bound_module(&[("a", 1), ("c", 3)], 7);
+    let merged = merge(&base, &left, &right).expect("merge");
+    let module = merged.module().expect("a clean merge");
+    let fields = ints(module);
+    assert_eq!(fields.get("a"), Some(&2));
+    assert_eq!(fields.get("c"), Some(&3));
+}

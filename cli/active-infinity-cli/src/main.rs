@@ -13,7 +13,7 @@ use active_infinity::compress::{
 use active_infinity::stream::StreamDecoder;
 use active_infinity::{
     content_hash_hex, decode, encode, interop::from_active_source, validate, validate_canonical,
-    Limits, Proof, Store, VERSION,
+    Limits, Proof, SignedImage, Store, VERSION,
 };
 use serde_json::json;
 
@@ -100,7 +100,7 @@ fn run(args: Vec<String>) -> Result<(), String> {
                 env!("CARGO_PKG_VERSION"),
                 VERSION
             );
-            println!("features: json active-core zstd");
+            println!("features: json active-core zstd signatures");
             println!("exit codes: 0 success, 1 failure, 2 usage");
             Ok(())
         }
@@ -127,24 +127,70 @@ fn stream_command(args: &[String]) -> Result<(), String> {
 }
 
 fn store_command(args: &[String]) -> Result<(), String> {
-    let action = args.get(1).ok_or_else(usage)?;
-    let root = arg_value(args, "--root").unwrap_or_else(|| ".active-store".to_string());
+    let usage = "usage: store put <image> [--root DIR] [--sign SEED_HEX]\n       store get <hash> [--root DIR] [--output PATH] [--verify] [--key PUBLIC_HEX]\n       store signature <hash> [--root DIR]";
+    let (positional, flags) = split_args(&args[1..]);
+    let action = positional.first().ok_or_else(|| usage.to_string())?;
+    let root = flags
+        .get("--root")
+        .filter(|value| !value.is_empty())
+        .cloned()
+        .unwrap_or_else(|| ".active-store".to_string());
     let store = Store::open(root).map_err(|error| error.to_string())?;
     match action.as_str() {
         "put" => {
-            let path = args.get(2).ok_or_else(usage)?;
+            let path = positional.get(1).ok_or_else(|| usage.to_string())?;
             let image = read(path)?;
-            let hash = store.put(&image).map_err(|error| error.to_string())?;
+            let hash = match flags.get("--sign").filter(|seed| !seed.is_empty()) {
+                Some(seed) => {
+                    let seed = parse_seed(seed)?;
+                    let signed = SignedImage::sign_with_seed(image, &seed)
+                        .map_err(|error| format!("{}: {error}", error.code()))?;
+                    store
+                        .put_signed(&signed)
+                        .map_err(|error| format!("{}: {error}", error.code()))?
+                }
+                None => store.put(&image).map_err(|error| error.to_string())?,
+            };
             println!("{}", hex(&hash));
             Ok(())
         }
         "get" => {
-            let hash = args.get(2).ok_or_else(usage)?;
-            let parsed = parse_hash(hash)?;
-            let image = store.get(&parsed).map_err(|error| error.to_string())?;
+            let hash = parse_hash(positional.get(1).ok_or_else(|| usage.to_string())?)?;
+            let trusted = flags.get("--key").filter(|key| !key.is_empty());
+            let verifying = flags.contains_key("--verify");
+            if trusted.is_some() && !verifying {
+                return Err("usage: --key needs --verify".to_string());
+            }
+            let image = if verifying {
+                match trusted {
+                    Some(public) => store
+                        .get_verified_with_key(&hash, &parse_public_key(public)?)
+                        .map_err(|error| format!("{}: {error}", error.code()))?,
+                    None => store
+                        .get_verified(&hash, None)
+                        .map_err(|error| format!("{}: {error}", error.code()))?,
+                }
+            } else {
+                store.get(&hash).map_err(|error| error.to_string())?
+            };
             write_output(args, &image)
         }
-        other => Err(format!("usage: unknown store action {other}\n{}", usage())),
+        "signature" => {
+            let hash = parse_hash(positional.get(1).ok_or_else(|| usage.to_string())?)?;
+            let signed = store
+                .get_signature(&hash)
+                .map_err(|error| format!("{}: {error}", error.code()))?
+                .ok_or_else(|| {
+                    format!("infinity/signature: no signature stored for {}", hex(&hash))
+                })?;
+            let content = signed
+                .content_hash()
+                .map_err(|error| format!("{}: {error}", error.code()))?;
+            println!("key {}", hex(&signed.public_key));
+            println!("hash {}", hex(&content));
+            Ok(())
+        }
+        other => Err(format!("usage: unknown store action {other}\n{usage}")),
     }
 }
 
@@ -160,7 +206,7 @@ fn split_args(args: &[String]) -> (Vec<String>, BTreeMap<String, String>) {
         let arg = &args[index];
         if let Some(name) = arg.strip_prefix("--") {
             let key = format!("--{name}");
-            let boolean = key == "--decompress";
+            let boolean = key == "--decompress" || key == "--verify";
             if !boolean {
                 if let Some(value) = args.get(index + 1) {
                     if !value.starts_with("--") {
@@ -536,6 +582,14 @@ fn arg_value(args: &[String], name: &str) -> Option<String> {
         .cloned()
 }
 
+fn parse_seed(text: &str) -> Result<[u8; 32], String> {
+    parse_hash(text).map_err(|_| "signing seed must be 64 hex characters".to_string())
+}
+
+fn parse_public_key(text: &str) -> Result<[u8; 32], String> {
+    parse_hash(text).map_err(|_| "public key must be 64 hex characters".to_string())
+}
+
 fn parse_hash(text: &str) -> Result<[u8; 32], String> {
     if text.len() != 64 {
         return Err("hash must be 64 hex characters".to_string());
@@ -573,9 +627,12 @@ usage: active-infinity-cli <command> [options]
       Print the Blake3 content hash over canonical bytes.
   stream <image.ainf>
       Reassemble an AINS stream and print its hash.
-  store put <image.ainf> [--root DIR]
-  store get <hash> [--root DIR] [--output PATH]
-      Content-addressed local store (default root .active-store).
+  store put <image.ainf> [--root DIR] [--sign SEED_HEX]
+  store get <hash> [--root DIR] [--output PATH] [--verify] [--key PUBLIC_HEX]
+  store signature <hash> [--root DIR]
+      Content-addressed local store (default root .active-store). --sign keeps a
+      detached Ed25519 envelope next to the object; --verify requires one and
+      --key pins the signer. `signature` prints the stored key and hash.
   dict train --output <dict> [--size N] <sample>...
   dict apply --dictionary <dict> [--decompress] [--level N] [--max-bytes N] <input>
       Train or apply a zstd dictionary. Hashes stay over uncompressed bytes.

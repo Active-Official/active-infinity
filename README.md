@@ -51,6 +51,9 @@ reference, including `store`, `stream` and `bench`, is
   gate (`perf-gate`).
 - [`polyglot/STATUS.md`](polyglot/STATUS.md): pass/fail for every language in
   the polyglot matrix, with the encoder conformance gate.
+- [`docs/spec/authenticity.md`](docs/spec/authenticity.md): what a content hash,
+  a proof sidecar and a signature envelope each do and do not prove, and the
+  verified store path.
 - [`docs/adr/`](docs/adr/README.md): every structural decision, including the
   proof sidecar and the three-way merge.
 

@@ -7,6 +7,8 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+#[cfg(feature = "signatures")]
+use crate::SignedImage;
 use crate::{content_hash, encode, validate, Error, InfinityModule, Result};
 
 /// A local directory store keyed by the canonical Blake3 hash.
@@ -89,6 +91,92 @@ impl Store {
         self.path_for(hash).is_file()
     }
 
+    #[cfg(feature = "signatures")]
+    /// Store a signed image and keep its detached envelope.
+    ///
+    /// The envelope is verified before anything is written, so a store never
+    /// holds a signature that does not match its object. The image is stored
+    /// through [`Store::put`], which validates it and deduplicates bytes.
+    pub fn put_signed(&self, signed: &SignedImage) -> Result<[u8; 32]> {
+        signed.verify()?;
+        let hash = signed.content_hash()?;
+        self.put(&signed.image)?;
+        let path = self.path_for_signature(&hash);
+        let temp = path.with_extension(format!(
+            "sig-tmp-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_nanos())
+                .unwrap_or(0)
+        ));
+        fs::write(&temp, signed.to_bytes()).map_err(|_| Error::Store("cannot write signature"))?;
+        fs::rename(&temp, &path).map_err(|_| {
+            let _ = fs::remove_file(&temp);
+            Error::Store("cannot commit signature")
+        })?;
+        Ok(hash)
+    }
+
+    #[cfg(feature = "signatures")]
+    /// The verified detached envelope for a stored object, if one exists.
+    ///
+    /// `None` means the object was stored without a signature; an envelope that
+    /// fails verification, or one that covers a different object, is an error.
+    pub fn get_signature(&self, hash: &[u8; 32]) -> Result<Option<SignedImage>> {
+        let path = self.path_for_signature(hash);
+        let bytes = match fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(_) => return Err(Error::Store("cannot read signature")),
+        };
+        let signed = SignedImage::from_bytes(&bytes)?;
+        if &signed.content_hash()? != hash {
+            return Err(Error::Signature(
+                "the signature covers a different object than the requested hash",
+            ));
+        }
+        Ok(Some(signed))
+    }
+
+    #[cfg(feature = "signatures")]
+    /// Get an object and require a verified signature over exactly those bytes.
+    ///
+    /// This is the authenticity path: [`Store::get`] proves integrity only.
+    /// `trusted` pins the signing key; without it the envelope proves that the
+    /// image and its key are self-consistent, which is not the same as
+    /// authorship.
+    pub fn get_verified(
+        &self,
+        hash: &[u8; 32],
+        trusted: Option<&ed25519_dalek::VerifyingKey>,
+    ) -> Result<Vec<u8>> {
+        let image = self.get(hash)?;
+        let signed = self
+            .get_signature(hash)?
+            .ok_or(Error::Signature("no signature for the object"))?;
+        if signed.image != image {
+            return Err(Error::Signature("the signature covers different bytes"));
+        }
+        if let Some(key) = trusted {
+            if key.to_bytes() != signed.public_key {
+                return Err(Error::Signature("the object was signed by another key"));
+            }
+        }
+        Ok(image)
+    }
+
+    /// [`Store::get_verified`] with the trusted key as raw bytes.
+    ///
+    /// A caller that keeps a public key as hex or bytes does not need the
+    /// signature crate's types to pin a signer.
+    #[cfg(feature = "signatures")]
+    pub fn get_verified_with_key(&self, hash: &[u8; 32], public_key: &[u8; 32]) -> Result<Vec<u8>> {
+        let key = ed25519_dalek::VerifyingKey::from_bytes(public_key)
+            .map_err(|_| Error::Signature("invalid public key"))?;
+        self.get_verified(hash, Some(&key))
+    }
+
     /// Number of stored objects.
     pub fn len(&self) -> usize {
         fs::read_dir(&self.root)
@@ -109,5 +197,11 @@ impl Store {
     fn path_for(&self, hash: &[u8; 32]) -> PathBuf {
         let name: String = hash.iter().map(|byte| format!("{byte:02x}")).collect();
         self.root.join(format!("{name}.ainf"))
+    }
+
+    #[cfg(feature = "signatures")]
+    fn path_for_signature(&self, hash: &[u8; 32]) -> PathBuf {
+        let name: String = hash.iter().map(|byte| format!("{byte:02x}")).collect();
+        self.root.join(format!("{name}.sig"))
     }
 }

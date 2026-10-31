@@ -279,3 +279,47 @@ fn security_policy_states_the_evidence_levels() {
     }
     assert!(security.contains("not") && security.contains("formally"));
 }
+
+/// The three integrity layers are documented together, and the README links the
+/// document. A consumer that reads only the README must be able to find out
+/// that a hash is not a signature.
+#[test]
+fn authenticity_layers_are_documented_and_linked() {
+    let authenticity =
+        fs::read_to_string(repo_path("docs/spec/authenticity.md")).expect("authenticity spec");
+    for phrase in [
+        "Content hash",
+        "Proof sidecar",
+        "Signature envelope",
+        "does not prove",
+        "store get --verify",
+        "Store::get_verified",
+    ] {
+        assert!(
+            authenticity.contains(phrase),
+            "authenticity must contain {phrase}"
+        );
+    }
+    let readme = fs::read_to_string(repo_path("README.md")).expect("readme");
+    assert!(
+        readme.contains("docs/spec/authenticity.md"),
+        "README must link the authenticity document"
+    );
+    // The store's own docs must point at both a hash-only and a verified path.
+    let store = fs::read_to_string(repo_path("src/store.rs")).expect("store source");
+    assert!(store.contains("integrity only"));
+    assert!(store.contains("authenticity path"));
+}
+
+/// A proof and a signature are separate files with separate jobs; the layout
+/// spec must say so where it defines the failure classes.
+#[test]
+fn proof_and_signature_are_distinct_in_the_specs() {
+    let layout = fs::read_to_string(repo_path("docs/spec/layout.md")).expect("layout");
+    assert!(layout.contains("Proof sidecars"));
+    assert!(layout.contains("never an image"));
+    let auth = fs::read_to_string(repo_path("docs/spec/authenticity.md")).expect("auth");
+    assert!(auth.contains("authorship"));
+    let signature = fs::read_to_string(repo_path("src/signature.rs")).expect("signature source");
+    assert!(signature.contains("supply-chain evidence"));
+}

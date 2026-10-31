@@ -13,6 +13,16 @@ has a test or a CI job behind it; residual risks are listed, not hidden.
 | CI | every job green on both `Active-Official` and `RatioArtificiosa` at the release commit |
 | Tag | signed `v2.3.0`, identical object on both orgs |
 | GitHub Release | [Active-Official](https://github.com/Active-Official/active-infinity/releases/tag/v2.3.0) and [RatioArtificiosa](https://github.com/RatioArtificiosa/active-infinity/releases/tag/v2.3.0), marked Latest, with `active-infinity-2.3.0.cdx.json` |
+| Authenticity | `SignedImage` envelope; `store put --sign`, `store get --verify [--key]`, `store signature`; `Store::put_signed` / `get_verified` / `get_verified_with_key` (feature `signatures`) |
+
+## Absolute Max program (AMAX-PROP-2026-10-31)
+
+| Phase | State | Evidence |
+|---|---|---|
+| M-0 baseline | complete | baseline SHAs and residual import in the program register |
+| M-1 capability/module maximum | complete | `docs/spec/security.md` §7, `tests/store_signature_tests.rs`, `tests/doc_gate.rs` |
+| M-2 authenticity and residuals | in progress | M-2.1 signature on store + CLI done (8 store tests, 1 CLI test); M-2.2 `docs/spec/authenticity.md` |
+| M-2.3..M-2.5 | pending | nested merge, multi-host methodology, vectors |
 
 ## Phase status
 
@@ -45,9 +55,12 @@ has a test or a CI job behind it; residual risks are listed, not hidden.
 
 ## Residual risks
 
-1. **Proof sidecars are integrity checks, not signatures.** The Blake3 checksum
+1. **Proof sidecars prove integrity, not authenticity.** The Blake3 checksum
    detects corruption and naive edits; a party that can rewrite the file can
-   recompute it. Authenticity needs the signature envelope (ADR-0013).
+   recompute it. Authenticity is the separate `SignedImage` envelope, now used
+   by `Store::put_signed`/`get_verified` and the CLI (`--sign`, `--verify`,
+   `--key`). `docs/spec/authenticity.md` states which layer answers which
+   question.
 2. **Projections are not authoritative.** JSON and Protobuf are views; a
    consumer must re-validate the AINF bytes to verify identity
    (`docs/spec/projection.md` §0).

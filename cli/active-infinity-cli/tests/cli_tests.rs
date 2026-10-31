@@ -341,3 +341,115 @@ fn version_prints_the_cli_and_library() {
         assert!(text.contains("(active-infinity "), "{text}");
     }
 }
+
+/// The store's authenticity path end to end: sign on put, verify on get, pin
+/// the key, and every refusal exits non-zero with `infinity/signature`.
+#[test]
+fn store_signs_and_refuses_unsigned_or_foreign_objects() {
+    let dir = sandbox("signed-store");
+    let image_path = dir.join("image.ainf");
+    let bytes = image(70);
+    write(&image_path, &bytes);
+    let store = dir.join("store");
+    let store_arg = store.to_str().expect("store path");
+    let seed = "01".repeat(32);
+
+    let output = run(&[
+        "store",
+        "put",
+        image_path.to_str().expect("image path"),
+        "--root",
+        store_arg,
+        "--sign",
+        &seed,
+    ]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let hash = stdout(&output).trim().to_string();
+    assert_eq!(hash.len(), 64);
+
+    let verified = run(&["store", "get", &hash, "--root", store_arg, "--verify"]);
+    assert!(verified.status.success(), "{}", stderr(&verified));
+    assert_eq!(verified.stdout.as_slice(), bytes.as_slice());
+
+    let signature = run(&["store", "signature", &hash, "--root", store_arg]);
+    assert!(signature.status.success(), "{}", stderr(&signature));
+    let text = stdout(&signature);
+    assert!(text.contains("key "), "{text}");
+    assert!(text.contains(&hash), "{text}");
+    let key = text
+        .lines()
+        .find_map(|line| line.strip_prefix("key "))
+        .expect("key line")
+        .to_string();
+
+    // The same key on the explicit path verifies.
+    let pinned = run(&[
+        "store", "get", &hash, "--root", store_arg, "--verify", "--key", &key,
+    ]);
+    assert!(pinned.status.success(), "{}", stderr(&pinned));
+
+    // An unsigned object is refused on the authenticity path and reports the
+    // signature class.
+    let plain_path = dir.join("plain.ainf");
+    write(&plain_path, &image(71));
+    let plain = run(&[
+        "store",
+        "put",
+        plain_path.to_str().expect("plain path"),
+        "--root",
+        store_arg,
+    ]);
+    assert!(plain.status.success(), "{}", stderr(&plain));
+    let plain_hash = stdout(&plain).trim().to_string();
+    let refused = run(&["store", "get", &plain_hash, "--root", store_arg, "--verify"]);
+    assert_eq!(refused.status.code(), Some(1));
+    assert!(
+        stderr(&refused).contains("infinity/signature"),
+        "{}",
+        stderr(&refused)
+    );
+
+    // A different key does not verify the first object.
+    let other_path = dir.join("other.ainf");
+    write(&other_path, &image(72));
+    let other = run(&[
+        "store",
+        "put",
+        other_path.to_str().expect("other path"),
+        "--root",
+        store_arg,
+        "--sign",
+        &"02".repeat(32),
+    ]);
+    assert!(other.status.success(), "{}", stderr(&other));
+    let other_hash = stdout(&other).trim().to_string();
+    let other_signature = run(&["store", "signature", &other_hash, "--root", store_arg]);
+    let other_key = stdout(&other_signature)
+        .lines()
+        .find_map(|line| line.strip_prefix("key "))
+        .expect("other key")
+        .to_string();
+    assert_ne!(key, other_key);
+    let wrong = run(&[
+        "store", "get", &hash, "--root", store_arg, "--verify", "--key", &other_key,
+    ]);
+    assert_eq!(wrong.status.code(), Some(1));
+    assert!(stderr(&wrong).contains("another key"), "{}", stderr(&wrong));
+
+    // --key without --verify is a usage error.
+    let usage = run(&["store", "get", &hash, "--root", store_arg, "--key", &key]);
+    assert_eq!(usage.status.code(), Some(2));
+
+    // A tampered envelope is refused rather than accepted.
+    let sig_path = store.join(format!("{hash}.sig"));
+    let mut envelope = fs::read(&sig_path).expect("read envelope");
+    envelope[40] ^= 0x01;
+    fs::write(&sig_path, &envelope).expect("tamper envelope");
+    let tampered = run(&["store", "get", &hash, "--root", store_arg, "--verify"]);
+    assert_eq!(tampered.status.code(), Some(1));
+    assert!(
+        stderr(&tampered).contains("infinity/signature"),
+        "{}",
+        stderr(&tampered)
+    );
+}

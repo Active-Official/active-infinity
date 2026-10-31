@@ -38,6 +38,15 @@ impl SignedImage {
         })
     }
 
+    /// Sign an image from a raw 32-byte Ed25519 seed.
+    ///
+    /// A CLI or a deployment that keeps its key as bytes does not have to take
+    /// a dependency on the signature crate to use the envelope.
+    pub fn sign_with_seed(image: Vec<u8>, seed: &[u8; 32]) -> Result<Self> {
+        let key = SigningKey::from_bytes(seed);
+        Self::sign(image, &key)
+    }
+
     /// Verify the image, public key and signature. Fail closed on any mismatch.
     pub fn verify(&self) -> Result<()> {
         validate(&self.image)?;

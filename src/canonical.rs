@@ -101,6 +101,16 @@ pub(crate) fn prepare(module: &InfinityModule) -> Result<Prepared> {
     // the bytes move to the secret heap, which no projection enumerates.
     let canonical_nodes = promote_secret_locators(canonical_nodes, module);
 
+    // Secret material that must not survive inside free text metadata. Read it
+    // before the nodes are consumed by the renumbering pass below.
+    let secret_literals: Vec<String> = canonical_nodes
+        .iter()
+        .filter_map(|node| match node {
+            Inode::Secret(secret) => Some(String::from_utf8_lossy(secret.expose()).into_owned()),
+            _ => None,
+        })
+        .collect();
+
     // 2. Pre-order numbering from the roots.
     let order = canonical_order(&canonical_nodes, module)?;
     let mut remap = vec![NodeId::NONE; canonical_nodes.len()];
@@ -109,10 +119,21 @@ pub(crate) fn prepare(module: &InfinityModule) -> Result<Prepared> {
     }
 
     // 3. Rebuild nodes in canonical order with remapped references.
-    let nodes: Vec<Inode> = order
-        .iter()
-        .map(|old| remap_node(&canonical_nodes[old.index()], &remap))
-        .collect::<Result<Vec<_>>>()?;
+    //
+    // The canonical nodes are consumed rather than cloned: an owned slot vector
+    // lets each node move into its final position and have its references
+    // rewritten in place. For a 10k-field table this removes one full clone of
+    // every field name (see `docs/spec/performance.md`, batch encode).
+    let mut slots: Vec<Option<Inode>> = canonical_nodes.into_iter().map(Some).collect();
+    let mut nodes: Vec<Inode> = Vec::with_capacity(slots.len());
+    for old in &order {
+        let mut node = slots[old.index()]
+            .take()
+            .ok_or(Error::EncodeDangling(old.0))?;
+        remap_node_in_place(&mut node, &remap)?;
+        nodes.push(node);
+    }
+    let nodes = nodes;
 
     let root = module.root().map(|id| remap[id.index()]);
     let mut bindings: Vec<(String, NodeId)> = module
@@ -121,15 +142,6 @@ pub(crate) fn prepare(module: &InfinityModule) -> Result<Prepared> {
         .map(|(name, id)| (name.clone(), remap[id.index()]))
         .collect();
     bindings.sort_by(|a, b| a.0.cmp(&b.0));
-
-    // Secret material that must not survive inside free text metadata.
-    let secret_literals: Vec<String> = canonical_nodes
-        .iter()
-        .filter_map(|node| match node {
-            Inode::Secret(secret) => Some(String::from_utf8_lossy(secret.expose()).into_owned()),
-            _ => None,
-        })
-        .collect();
 
     let annotations: Vec<Annotation> = module
         .annotations()
@@ -610,6 +622,79 @@ pub(crate) fn remap_node(node: &Inode, remap: &[NodeId]) -> Result<Inode> {
         other => other.clone(),
     };
     Ok(out)
+}
+
+/// Rewrite every node reference in place, consuming no clones.
+///
+/// Mirrors [`remap_node`], which returns a new node. Canonicalization uses this
+/// form when it already owns the node; the bytes it produces are identical.
+fn remap_node_in_place(node: &mut Inode, remap: &[NodeId]) -> Result<()> {
+    fn map(id: &mut NodeId, remap: &[NodeId]) -> Result<()> {
+        let mapped = remap
+            .get(id.index())
+            .copied()
+            .filter(|mapped| !mapped.is_none())
+            .ok_or(Error::EncodeDangling(id.0))?;
+        *id = mapped;
+        Ok(())
+    }
+    fn opt(id: &mut Option<NodeId>, remap: &[NodeId]) -> Result<()> {
+        if let Some(id) = id {
+            map(id, remap)?;
+        }
+        Ok(())
+    }
+    match node {
+        Inode::Quantity { value, .. } => map(value, remap)?,
+        Inode::Array { elements } => {
+            for id in elements {
+                map(id, remap)?;
+            }
+        }
+        Inode::Table { fields } => {
+            for (_, id) in fields {
+                map(id, remap)?;
+            }
+        }
+        Inode::SecretRef { locator } => map(locator, remap)?,
+        Inode::Ref(id) => map(id, remap)?,
+        Inode::Env { default, .. } => opt(default, remap)?,
+        Inode::Interpolate { parts } => {
+            for part in parts {
+                if let InterpPart::Expr(id) = part {
+                    map(id, remap)?;
+                }
+            }
+        }
+        Inode::Binary { lhs, rhs, .. } => {
+            map(lhs, remap)?;
+            map(rhs, remap)?;
+        }
+        Inode::Unary { expr, .. } => map(expr, remap)?,
+        Inode::Constrained { target, .. } => map(target, remap)?,
+        Inode::Patch(PatchOp::Set { value, .. }) => map(value, remap)?,
+        Inode::SchemaField(spec) => {
+            opt(&mut spec.min, remap)?;
+            opt(&mut spec.max, remap)?;
+            opt(&mut spec.min_len, remap)?;
+            opt(&mut spec.max_len, remap)?;
+            opt(&mut spec.pattern, remap)?;
+            opt(&mut spec.default, remap)?;
+        }
+        Inode::SchemaTable { fields, .. } => {
+            for (_, id) in fields {
+                map(id, remap)?;
+            }
+        }
+        Inode::SchemaArray { element } => map(element, remap)?,
+        Inode::Semantic { inner, .. } => map(inner, remap)?,
+        Inode::ContentAddressed { media_type, data } => {
+            map(media_type, remap)?;
+            map(data, remap)?;
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 /// Deterministic pre-order numbering over the reachable graph.

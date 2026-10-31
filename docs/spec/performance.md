@@ -109,3 +109,87 @@ A change that makes `validate` or `encode` more than 20% slower on the same
 machine needs a note here and a new baseline in the same commit. CI must keep
 the benchmark binary compiling and the shape tests (`tests/perf_budget.rs`)
 green; it does not gate on cross-machine absolute time.
+
+## Bakeoff (C-7, 2026-10-30)
+
+Host: Intel Xeon E5-1650 v4 @ 3.60 GHz, Windows 10 Pro, 64 GiB RAM,
+`rustc 1.99.1`. Criterion, 20 samples, 1 s warm-up, 2 s measurement, otherwise
+idle. Reproduce:
+
+```text
+cargo bench --all-features --bench bakeoff -- "competitors_encode"
+cargo bench --all-features --bench bakeoff -- "infinity_batch"
+cargo run --release --example bakeoff_sizes --all-features
+cargo run --release --example perf_matrix --all-features
+python scripts/perf_gate.py perf-matrix.json
+```
+
+### Encoded size on one logical table
+
+A table of N string-to-integer fields plus a name, encoded by Active Infinity
+and three real competitors. `serde_json`, `prost` (a protobuf map) and `rkyv`
+measure the same data; none of the three is canonical, validating or graph-aware
+(rkyv is zero-copy, but it neither validates on read nor canonicalizes).
+
+| Fields | Infinity | serde_json | prost | rkyv |
+|---|---|---|---|---|
+| 8 | 880 B | 114 B | 111 B | 160 B |
+| 1,000 | 69,240 B | 15,798 B | 15,769 B | 25,108 B |
+| 10,000 | 699,240 B | 177,798 B | 168,769 B | 261,584 B |
+
+Infinity is about 4x the JSON size on this shape. The bytes buy a fixed 48-byte
+node record per value (`kind`, inline scalar, auxiliary index), an 8-byte edge
+per table entry, a symbol table that deduplicates repeated names, canonical
+field order, unit and type tables, and structural secret separation. A format
+that stores only the values cannot offer those properties. Where bandwidth is
+the binding constraint, the `zstd` feature compresses the image for transport
+while the content hash stays over the uncompressed bytes.
+
+### Encode latency (median)
+
+| Fields | Infinity | serde_json | prost | rkyv |
+|---|---|---|---|---|
+| 8 | 13.2 µs | 1.50 µs | 1.82 µs | 2.10 µs |
+| 1,000 | 792 µs | 185 µs | 232 µs | 160 µs |
+| 10,000 | 9.85 ms | 1.65 ms | 2.36 ms | 1.58 ms |
+
+Encode is not a memcpy by design: it normalizes, renumbers by DFS, deduplicates
+every symbol table and re-derives the edge table so equal modules are byte-equal.
+The C-7 profiling work removed one full clone of every node from that path:
+canonicalization now moves each owned node into its final position and rewrites
+its references in place (`canonical::remap_node_in_place`). On the 10k shape the
+same benchmark moved from **16.9 ms to 9.85 ms (−42%)**.
+
+### Read side
+
+| Shape | Bytes | validate (p50) | decode (p50) | content hash |
+|---|---|---|---|---|
+| 1k fields | 69,240 | 0.18 ms | 0.61 ms | — |
+| 10k fields | 699,240 | 1.63 ms | 3.52 ms | 1.70 ms |
+
+Validation is the gate a consumer pays once; it is roughly 2x faster than decode
+because it never allocates the owned IR. These rows come from
+`examples/perf_matrix` (p50 over 200 samples); the competitor table above comes
+from the criterion bench, which reports a mean over a shorter run. Run-to-run
+variation on this host is about 20%.
+
+### Batch encode
+
+`encode_into` writes into a caller-owned buffer and `encode_many` reuses one
+buffer per module. On 32 modules of 1,000 fields:
+
+| Path | Time |
+|---|---|
+| `encode` per module (`Vec` per image) | 19.9 ms |
+| `encode_many` with reused buffers | 17.9 ms (−10%) |
+
+The batch path matters for a server that encodes many modules per tick; the
+bytes are identical and `tests/encode_batch_tests.rs` proves it.
+
+### The gate
+
+`scripts/perf_gate.py` enforces tail stability (p95 ≤ 4× p50 plus slack for one
+scheduler hiccup), linear scaling (10k/1k ≤ 18x for encode/validate, 20x for
+decode) and encoded-size growth. CI runs the ratio gate in the `perf-gate` job
+and uploads the matrix as an artifact; `--baseline docs/spec/perf-baseline.json`
+adds an absolute comparison (p50 ≤ 1.6x, p99 ≤ 3.0x) for a release machine.

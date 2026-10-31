@@ -73,12 +73,53 @@ pub fn encode(module: &InfinityModule) -> Result<Vec<u8>> {
 
 /// Encode a module with explicit options.
 pub fn encode_with(module: &InfinityModule, opts: EncodeOpts) -> Result<Vec<u8>> {
+    let mut out = Vec::new();
+    encode_into_with(module, &mut out, opts)?;
+    Ok(out)
+}
+
+/// Encode into an existing buffer, reusing its capacity.
+///
+/// The buffer is cleared and refilled. A caller that encodes repeatedly (a
+/// server, a store, a test harness) pays one allocation instead of one per
+/// image; the bytes are identical to [`encode`].
+pub fn encode_into(module: &InfinityModule, out: &mut Vec<u8>) -> Result<()> {
+    encode_into_with(module, out, EncodeOpts::default())
+}
+
+/// Encode into an existing buffer with explicit options.
+pub fn encode_into_with(
+    module: &InfinityModule,
+    out: &mut Vec<u8>,
+    opts: EncodeOpts,
+) -> Result<()> {
     let prepared = prepare(module)?;
-    encode_prepared(&prepared, opts)
+    encode_prepared_into(&prepared, opts, out)
+}
+
+/// Encode a batch, reusing the capacity of every output buffer.
+///
+/// `out` is resized to the batch length; existing buffers keep their capacity.
+/// This is the batch path a server uses to encode many modules per tick
+/// without an allocation per image.
+pub fn encode_many<'a, I>(modules: I, out: &mut Vec<Vec<u8>>) -> Result<()>
+where
+    I: IntoIterator<Item = &'a InfinityModule>,
+{
+    let modules: Vec<&InfinityModule> = modules.into_iter().collect();
+    out.resize_with(modules.len(), Vec::new);
+    for (buffer, module) in out.iter_mut().zip(modules) {
+        encode_into(module, buffer)?;
+    }
+    Ok(())
 }
 
 /// Encode an already-prepared module.
-pub(crate) fn encode_prepared(prepared: &Prepared, opts: EncodeOpts) -> Result<Vec<u8>> {
+pub(crate) fn encode_prepared_into(
+    prepared: &Prepared,
+    opts: EncodeOpts,
+    image: &mut Vec<u8>,
+) -> Result<()> {
     let mut header = Header {
         major: FORMAT_MAJOR,
         minor: FORMAT_MINOR,
@@ -110,8 +151,9 @@ pub(crate) fn encode_prepared(prepared: &Prepared, opts: EncodeOpts) -> Result<V
 
     let tables = build_node_tables(prepared)?;
 
-    let mut image: Vec<u8> =
-        Vec::with_capacity(HEADER_SIZE + prepared.nodes.len() * NODE_RECORD_SIZE);
+    let capacity = HEADER_SIZE + prepared.nodes.len() * NODE_RECORD_SIZE;
+    image.clear();
+    image.reserve(capacity);
     image.resize(HEADER_SIZE, 0);
 
     // --- nodes ---------------------------------------------------------
@@ -120,46 +162,56 @@ pub(crate) fn encode_prepared(prepared: &Prepared, opts: EncodeOpts) -> Result<V
     for record in &tables.records {
         image.extend_from_slice(&record.to_bytes());
     }
-    pad(&mut image);
+    pad(image);
 
     // --- children ------------------------------------------------------
     set_span(
         &mut header,
-        &image,
+        image.as_slice(),
         Section::Children,
         tables.children.len(),
     );
     for child in &tables.children {
         image.extend_from_slice(&child.to_le_bytes());
     }
-    pad(&mut image);
+    pad(image);
 
     // --- fields --------------------------------------------------------
-    set_span(&mut header, &image, Section::Fields, tables.fields.len());
+    set_span(
+        &mut header,
+        image.as_slice(),
+        Section::Fields,
+        tables.fields.len(),
+    );
     for (name, node) in &tables.fields {
         image.extend_from_slice(&name.to_le_bytes());
         image.extend_from_slice(&0u32.to_le_bytes());
         image.extend_from_slice(&node.to_le_bytes());
         image.extend_from_slice(&0u32.to_le_bytes());
     }
-    pad(&mut image);
+    pad(image);
 
     // --- parts ---------------------------------------------------------
-    set_span(&mut header, &image, Section::Parts, tables.parts.len());
+    set_span(
+        &mut header,
+        image.as_slice(),
+        Section::Parts,
+        tables.parts.len(),
+    );
     for (tag, value) in &tables.parts {
         image.extend_from_slice(&tag.to_le_bytes());
         image.extend_from_slice(&value.to_le_bytes());
     }
-    pad(&mut image);
+    pad(image);
 
     // --- edges (derived) ----------------------------------------------
     let edges = derive_edges(prepared);
-    set_span(&mut header, &image, Section::Edges, edges.len());
+    set_span(&mut header, image.as_slice(), Section::Edges, edges.len());
     for (from, to) in &edges {
         image.extend_from_slice(&from.to_le_bytes());
         image.extend_from_slice(&to.to_le_bytes());
     }
-    pad(&mut image);
+    pad(image);
 
     // --- strings -------------------------------------------------------
     header.span_mut(Section::Strings).offset = image.len() as u32;
@@ -177,7 +229,7 @@ pub(crate) fn encode_prepared(prepared: &Prepared, opts: EncodeOpts) -> Result<V
             image.extend_from_slice(string.as_bytes());
         }
     }
-    pad(&mut image);
+    pad(image);
 
     // --- blobs ---------------------------------------------------------
     header.span_mut(Section::Blobs).offset = image.len() as u32;
@@ -195,12 +247,12 @@ pub(crate) fn encode_prepared(prepared: &Prepared, opts: EncodeOpts) -> Result<V
             image.extend_from_slice(payload);
         }
     }
-    pad(&mut image);
+    pad(image);
 
     // --- annotations ---------------------------------------------------
     set_span(
         &mut header,
-        &image,
+        image.as_slice(),
         Section::Annotations,
         prepared.annotations.len(),
     );
@@ -229,7 +281,7 @@ pub(crate) fn encode_prepared(prepared: &Prepared, opts: EncodeOpts) -> Result<V
         image.extend_from_slice(&a.to_le_bytes());
         image.extend_from_slice(&b.to_le_bytes());
     }
-    pad(&mut image);
+    pad(image);
 
     // --- provenance ----------------------------------------------------
     header.span_mut(Section::Provenance).offset = image.len() as u32;
@@ -240,16 +292,21 @@ pub(crate) fn encode_prepared(prepared: &Prepared, opts: EncodeOpts) -> Result<V
     } else {
         header.span_mut(Section::Provenance).count = 0;
     }
-    pad(&mut image);
+    pad(image);
 
     // --- extensions ----------------------------------------------------
     header.span_mut(Section::Extensions).offset = image.len() as u32;
     header.span_mut(Section::Extensions).count = prepared.extensions.len() as u32;
-    encode_extensions(&prepared.extensions, image.len(), &mut image)?;
-    pad(&mut image);
+    encode_extensions(&prepared.extensions, image.len(), image)?;
+    pad(image);
 
     // --- unit table ----------------------------------------------------
-    set_span(&mut header, &image, Section::Units, prepared.units.len());
+    set_span(
+        &mut header,
+        image.as_slice(),
+        Section::Units,
+        prepared.units.len(),
+    );
     for unit in &prepared.units {
         image.extend_from_slice(&unit.discriminant().to_le_bytes());
         let name = if unit.is_builtin() {
@@ -262,10 +319,15 @@ pub(crate) fn encode_prepared(prepared: &Prepared, opts: EncodeOpts) -> Result<V
         };
         image.extend_from_slice(&name.to_le_bytes());
     }
-    pad(&mut image);
+    pad(image);
 
     // --- type table ----------------------------------------------------
-    set_span(&mut header, &image, Section::Types, prepared.types.len());
+    set_span(
+        &mut header,
+        image.as_slice(),
+        Section::Types,
+        prepared.types.len(),
+    );
     let mut type_aux_start = vec![0u32; prepared.types.len()];
     let mut type_aux_count = vec![0u32; prepared.types.len()];
     {
@@ -285,11 +347,11 @@ pub(crate) fn encode_prepared(prepared: &Prepared, opts: EncodeOpts) -> Result<V
         image.extend_from_slice(&type_aux_start[index].to_le_bytes());
         image.extend_from_slice(&type_aux_count[index].to_le_bytes());
     }
-    pad(&mut image);
+    pad(image);
 
     // --- aux -----------------------------------------------------------
     let aux_count = tables.aux.len() + prepared.types.iter().map(|t| t.aux.len()).sum::<usize>();
-    set_span(&mut header, &image, Section::Aux, aux_count);
+    set_span(&mut header, image.as_slice(), Section::Aux, aux_count);
     for (tag, value) in &tables.aux {
         image.extend_from_slice(&tag.to_le_bytes());
         image.extend_from_slice(&value.to_le_bytes());
@@ -300,19 +362,19 @@ pub(crate) fn encode_prepared(prepared: &Prepared, opts: EncodeOpts) -> Result<V
             image.extend_from_slice(&value.to_le_bytes());
         }
     }
-    pad(&mut image);
+    pad(image);
 
     // --- numbers -------------------------------------------------------
     set_span(
         &mut header,
-        &image,
+        image.as_slice(),
         Section::Numbers,
         prepared.numbers.len(),
     );
     for value in &prepared.numbers {
         image.extend_from_slice(&value.to_le_bytes());
     }
-    pad(&mut image);
+    pad(image);
 
     // --- secrets -------------------------------------------------------
     header.span_mut(Section::Secrets).offset = image.len() as u32;
@@ -328,14 +390,19 @@ pub(crate) fn encode_prepared(prepared: &Prepared, opts: EncodeOpts) -> Result<V
     for secret in &prepared.secrets {
         image.extend_from_slice(secret);
     }
-    pad(&mut image);
+    pad(image);
 
     // --- hashes --------------------------------------------------------
-    set_span(&mut header, &image, Section::Hashes, prepared.hashes.len());
+    set_span(
+        &mut header,
+        image.as_slice(),
+        Section::Hashes,
+        prepared.hashes.len(),
+    );
     for hash in &prepared.hashes {
         image.extend_from_slice(hash);
     }
-    pad(&mut image);
+    pad(image);
 
     // --- bindings ------------------------------------------------------
     header.span_mut(Section::Bindings).offset = image.len() as u32;
@@ -356,17 +423,17 @@ pub(crate) fn encode_prepared(prepared: &Prepared, opts: EncodeOpts) -> Result<V
         image.extend_from_slice(&sid.to_le_bytes());
         image.extend_from_slice(&id.0.to_le_bytes());
     }
-    pad(&mut image);
+    pad(image);
 
     header.total_size = image.len() as u64;
-    header.write(&mut image);
+    header.write(image);
 
     if opts.write_hash {
-        let hash = hash_image(&image)?;
+        let hash = hash_image(image.as_slice())?;
         image[16..48].copy_from_slice(&hash);
         let _ = hash;
     }
-    Ok(image)
+    Ok(())
 }
 
 fn set_span(header: &mut Header, image: &[u8], section: Section, count: usize) {

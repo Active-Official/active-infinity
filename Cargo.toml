@@ -48,6 +48,10 @@ proptest = "1"
 sha2 = "0.10"
 criterion = "0.5"
 blake3 = "1.5"
+# Bakeoff competitors (C-7.3): same logical table, different wire formats.
+prost = "0.13"
+rkyv = { version = "0.7", features = ["alloc", "bytecheck"] }
+serde_json = "1.0"
 
 [[bench]]
 name = "codec"
@@ -92,3 +96,7 @@ path = "tests/perf_budget.rs"
 [[test]]
 name = "doc_gate"
 path = "tests/doc_gate.rs"
+
+[[test]]
+name = "encode_batch_tests"
+path = "tests/encode_batch_tests.rs"

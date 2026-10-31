@@ -77,7 +77,7 @@ pub mod validate;
 pub mod view;
 
 pub use decode::{decode, decode_with};
-pub use encode::{encode, encode_with, hash_image};
+pub use encode::{encode, encode_into, encode_into_with, encode_many, encode_with, hash_image};
 pub use error::{Error, Result};
 pub use ir::{
     Annotation, AnnotationKind, BinOp, Constraint, InfinityModule, Inode, InterpPart,

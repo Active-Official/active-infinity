@@ -5,7 +5,7 @@
 //! invented number can be published.
 
 use active_infinity::stream::{apply_delta_in_place, DeltaOp};
-use active_infinity::{content_hash, decode, encode, validate, InfinityModule, Inode};
+use active_infinity::{content_hash, decode, encode, encode_many, validate, InfinityModule, Inode};
 use criterion::{black_box, criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion};
 
 fn fixture(fields: usize) -> InfinityModule {
@@ -72,27 +72,117 @@ fn bench_delta(c: &mut Criterion) {
     });
 }
 
-#[allow(dead_code)]
+fn bench_batch(c: &mut Criterion) {
+    let modules: Vec<InfinityModule> = (0..32).map(|_| fixture(1_000)).collect();
+    let mut group = c.benchmark_group("infinity_batch");
+    group.bench_function("encode_loop_32x1k", |b| {
+        b.iter(|| {
+            let out: Vec<Vec<u8>> = modules
+                .iter()
+                .map(|module| encode(module).expect("encode"))
+                .collect();
+            black_box(out.len())
+        });
+    });
+    let mut reused: Vec<Vec<u8>> = Vec::new();
+    group.bench_function("encode_many_32x1k", |b| {
+        b.iter(|| {
+            encode_many(modules.iter(), &mut reused).expect("batch");
+            black_box(reused.len())
+        });
+    });
+    group.finish();
+}
+
 mod competitors {
-    //! Adapters land in C-7.3 with the same logical module shape.
-    //! TODO(CHECKLIST C-7.3): serde_json, prost, flatbuffers and rkyv adapters.
+    //! Real competitor encoders on the same logical shape: a table of
+    //! `fields` string-to-integer entries plus a name.
+    //!
+    //! FlatBuffers is excluded from the encoded-size and encode-time matrix: a
+    //! fair comparison needs schema-generated code, and a hand-written builder
+    //! would measure our glue instead of the format. The interop story for
+    //! FlatBuffers/Protobuf lives in `docs/spec/performance.md`.
+    use std::collections::{BTreeMap, HashMap};
 
-    pub fn serde_json_encode() -> Option<Vec<u8>> {
-        None
+    use prost::Message;
+
+    pub fn pairs(fields: usize) -> BTreeMap<String, i64> {
+        (0..fields)
+            .map(|index| (format!("field-{index}"), index as i64))
+            .collect()
     }
 
-    pub fn prost_encode() -> Option<Vec<u8>> {
-        None
+    #[derive(Clone, PartialEq, prost::Message)]
+    pub struct ProstTable {
+        #[prost(map = "string, int64", tag = "1")]
+        pub fields: HashMap<String, i64>,
+        #[prost(string, tag = "2")]
+        pub name: String,
     }
 
-    pub fn flatbuffers_encode() -> Option<Vec<u8>> {
-        None
+    #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+    pub struct RkyvTable {
+        pub fields: BTreeMap<String, i64>,
+        pub name: String,
     }
 
-    pub fn rkyv_encode() -> Option<Vec<u8>> {
-        None
+    pub fn serde_json_bytes(fields: usize) -> Vec<u8> {
+        // Same logical shape as the other adapters: every field plus the name.
+        let mut map = serde_json::Map::new();
+        for (key, value) in pairs(fields) {
+            map.insert(key, serde_json::Value::from(value));
+        }
+        map.insert("name".to_string(), serde_json::Value::from("bakeoff"));
+        serde_json::to_vec(&map).expect("json")
+    }
+
+    pub fn prost_bytes(fields: usize) -> Vec<u8> {
+        ProstTable {
+            fields: pairs(fields).into_iter().collect(),
+            name: "bakeoff".to_string(),
+        }
+        .encode_to_vec()
+    }
+
+    pub fn rkyv_bytes(fields: usize) -> Vec<u8> {
+        let table = RkyvTable {
+            fields: pairs(fields),
+            name: "bakeoff".to_string(),
+        };
+        rkyv::to_bytes::<_, 256>(&table).expect("rkyv").to_vec()
     }
 }
 
-criterion_group!(benches, bench_infinity, bench_delta);
+fn bench_competitors(c: &mut Criterion) {
+    let mut group = c.benchmark_group("competitors_encode");
+    for (name, fields) in [("small", 8usize), ("medium", 1_000), ("large", 10_000)] {
+        group.bench_with_input(
+            BenchmarkId::new("active-infinity", name),
+            &fields,
+            |b, fields| {
+                b.iter(|| black_box(encode(&fixture(*fields)).expect("encode")));
+            },
+        );
+        group.bench_with_input(
+            BenchmarkId::new("serde_json", name),
+            &fields,
+            |b, fields| b.iter(|| black_box(competitors::serde_json_bytes(*fields))),
+        );
+        group.bench_with_input(BenchmarkId::new("prost", name), &fields, |b, fields| {
+            b.iter(|| black_box(competitors::prost_bytes(*fields)))
+        });
+        group.bench_with_input(BenchmarkId::new("rkyv", name), &fields, |b, fields| {
+            b.iter(|| black_box(competitors::rkyv_bytes(*fields)))
+        });
+    }
+    group.finish();
+}
+
+criterion_group!(
+    benches,
+    bench_infinity,
+    bench_delta,
+    bench_batch,
+    bench_competitors
+);
 criterion_main!(benches);

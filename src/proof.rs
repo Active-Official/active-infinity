@@ -8,6 +8,13 @@
 //!
 //! The sidecar is not authority: it never grants anything, and a proof that
 //! does not match its image is refused with `infinity/proof`.
+//!
+//! The `Display` of a rejection says which check disagreed, which is useful to
+//! an operator and is an oracle to anyone else: a service that verifies
+//! attacker-supplied sidecars must answer with one fixed response and must not
+//! forward [`std::fmt::Display`]. The JSON parser accepts only the fields this
+//! version defines, so a future or smuggled key cannot ride along on a sidecar
+//! that verifies.
 
 use crate::layout::Meta;
 use crate::schema::Schema;
@@ -22,6 +29,22 @@ pub const PROOF_FORMAT: &str = "active-infinity/proof/1";
 /// an optional hash), so a few hundred bytes is the real size. This ceiling
 /// stops a hostile file from forcing an unbounded parse.
 pub const MAX_SIDECAR_BYTES: usize = 16 << 10;
+
+/// The complete field set of `active-infinity/proof/1`.
+#[cfg(feature = "json")]
+const PROOF_FIELDS: [&str; 11] = [
+    "format",
+    "content_hash",
+    "size",
+    "nodes",
+    "edges",
+    "secrets",
+    "major",
+    "minor",
+    "dialect_hash",
+    "canonical",
+    "schema_hash",
+];
 
 /// A proof sidecar for one canonical image.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -166,6 +189,14 @@ impl Proof {
         }
         let value: serde_json::Value =
             serde_json::from_str(text).map_err(|_| Error::Proof("sidecar is not JSON"))?;
+        let object = value
+            .as_object()
+            .ok_or(Error::Proof("sidecar is not a JSON object"))?;
+        for field in object.keys() {
+            if !PROOF_FIELDS.contains(&field.as_str()) {
+                return Err(Error::Proof("sidecar carries an unknown field"));
+            }
+        }
         if value.get("format").and_then(|v| v.as_str()) != Some(PROOF_FORMAT) {
             return Err(Error::Proof("unknown sidecar format"));
         }
@@ -174,11 +205,20 @@ impl Proof {
             .and_then(|v| v.as_str())
             .ok_or(Error::Proof("missing content hash"))?;
         let content_hash = parse_hex32(hash)?;
+        // A JSON number stays exact in serde_json's u64 path, but a verifier
+        // written in a language whose numbers are f64 (JavaScript) loses
+        // precision past 2^53. Accepting a decimal string as well lets such a
+        // producer round-trip `dialect_hash` without a v2 format.
         let number = |key: &str| -> Result<u64> {
-            value
-                .get(key)
-                .and_then(|v| v.as_u64())
-                .ok_or(Error::Proof("missing numeric field"))
+            match value.get(key) {
+                Some(serde_json::Value::Number(number)) => number
+                    .as_u64()
+                    .ok_or(Error::Proof("numeric field is not an unsigned integer")),
+                Some(serde_json::Value::String(text)) => text
+                    .parse()
+                    .map_err(|_| Error::Proof("numeric string is not an unsigned integer")),
+                _ => Err(Error::Proof("missing numeric field")),
+            }
         };
         let u32_field = |key: &str| -> Result<u32> {
             u32::try_from(number(key)?).map_err(|_| Error::Proof("field out of range"))

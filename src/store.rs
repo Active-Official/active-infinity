@@ -148,8 +148,7 @@ impl Store {
     /// replacing evidence that may already be pinned by a reader.
     pub fn put_signed(&self, signed: &SignedImage) -> Result<[u8; 32]> {
         signed.verify()?;
-        let hash = signed.content_hash()?;
-        self.put(&signed.image)?;
+        let hash = self.put(&signed.image)?;
         let path = self.path_for_signature(&hash);
         self.store_bytes(
             &path,
@@ -200,9 +199,10 @@ impl Store {
         let signed = self
             .get_signature(hash)?
             .ok_or(Error::Signature("no signature for the object"))?;
-        if signed.image != image {
-            return Err(Error::Signature("the signature covers different bytes"));
-        }
+        // No byte comparison is needed: `get` proved that `image` hashes to
+        // `hash`, and `get_signature` proved that the envelope's image does
+        // too. Comparing the buffers would only add a length-dependent timing
+        // signal over secret-bearing bytes.
         if let Some(key) = trusted {
             if key.to_bytes() != signed.public_key {
                 return Err(Error::Signature("the object was signed by another key"));

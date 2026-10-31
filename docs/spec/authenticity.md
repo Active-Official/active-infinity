@@ -19,13 +19,24 @@ thing.
 3. **A proof proves canonical form.** `Proof::verify` runs
    `validate_canonical`, so a verified image re-encodes to itself. A sidecar that
    says `canonical: false` is refused, and the sidecar is capped at 16 KiB.
-4. **A signature proves key possession.** `SignedImage::verify` validates the
-   image and checks Ed25519 over `DOMAIN || image`. Pin the public key
-   (`Store::get_verified_with_key`, `store get --verify --key`) to turn "someone
-   signed this" into "the signer I chose signed this".
+4. **A signature proves key possession over canonical bytes.**
+   `SignedImage::verify` proves the canonical form (`validate_canonical`) and
+   checks Ed25519 over `DOMAIN || image`, so a signature certifies bytes that
+   re-encode to themselves. A structurally valid but non-canonical image is
+   `infinity/not-canonical` at signing and `infinity/signature` when an envelope
+   is parsed. Pin the public key (`Store::get_verified_with_key`,
+   `store get --verify --key`) to turn "someone signed this" into "the signer I
+   chose signed this". An envelope is capped at the codec ceiling plus its fixed
+   header, and `Debug` prints its metadata and never the image.
 5. **Order of checks.** Image validity first, then the signature, then the
-   trust decision. A corrupted image is refused by validation before a
-   signature is even considered (`put_signed_refuses_a_corrupted_image`).
+   trust decision. A corrupted image is refused before the signature is
+   considered, and the envelope reports every failure as `infinity/signature` so
+   a monitor that watches one code sees every rejected envelope.
+6. **A sidecar has exactly its version's fields.** `Proof::from_json` refuses an
+   unknown key, so a smuggled or future field cannot ride on a verified sidecar.
+   An integer field may arrive as a decimal string: a verifier written in a
+   language with f64 numbers loses precision past 2^53, and the string form
+   round-trips `dialect_hash` exactly.
 
 ## Using it
 
@@ -69,3 +80,7 @@ policy decision, so the names say which is which.
   key signed these bytes, not when. Record the timestamp in your release process.
 - Store envelopes are detached files; a store backend that replicates objects
   must replicate the `.sig` files too.
+- A rejected sidecar's `Display` says which check disagreed. That is useful to
+  an operator and is an oracle to anyone else: a service that verifies
+  attacker-supplied sidecars must answer with one fixed response and must not
+  forward the message.

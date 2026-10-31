@@ -153,9 +153,9 @@ fn put_signed_refuses_an_envelope_that_does_not_verify() {
     fs::remove_dir_all(&dir).expect("cleanup");
 }
 
-/// A corrupted image inside an otherwise well-formed envelope is refused by
-/// validation before the signature is even considered: a bad image is never
-/// stored under a signature that claims it is canonical.
+/// A corrupted image inside an otherwise well-formed envelope is refused before
+/// the signature is considered, and the whole envelope reports its own code: a
+/// caller monitoring `infinity/signature` sees every rejected envelope.
 #[test]
 fn put_signed_refuses_a_corrupted_image() {
     let dir = sandbox("corrupt-image");
@@ -166,12 +166,8 @@ fn put_signed_refuses_a_corrupted_image() {
     let error = store
         .put_signed(&signed)
         .expect_err("a corrupted image must not be stored");
-    assert!(error.code().starts_with("infinity/"), "{error}");
-    assert_ne!(
-        error.code(),
-        "infinity/signature",
-        "the image is refused first"
-    );
+    assert_eq!(error.code(), "infinity/signature", "{error}");
+    assert!(error.to_string().contains("does not validate"), "{error}");
     assert!(store.is_empty());
     fs::remove_dir_all(&dir).expect("cleanup");
 }

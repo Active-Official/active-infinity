@@ -35,6 +35,20 @@
 - **Secrets**: `SecretBytes` zeroes its buffer with `zeroize` on drop (a volatile
   write the optimizer cannot elide), `has_secret()` recognises `SecretRef`, and
   `TypeSpec::name()` no longer echoes enum members.
+- **Signature** (`signature.rs`): `SignedImage::sign` and `verify` prove the
+  canonical form, so an envelope can no longer certify bytes that re-encode
+  differently. Parsing an envelope is bounded at the codec ceiling plus the fixed
+  header (`infinity/limit`) before the image is copied, and every image fault is
+  reported as `infinity/signature` so one monitored code covers every rejected
+  envelope. `Debug` prints the envelope's metadata and never the image (the
+  derived form printed the secret heap as decimal bytes).
+  `Store::get_verified` no longer byte-compares the image against the envelope:
+  both sides are pinned to the same content hash, and the comparison added a
+  length-dependent timing signal over secret-bearing bytes.
+- **Proof**: `Proof::from_json` accepts exactly the fields of
+  `active-infinity/proof/1` and refuses anything else, and an integer field may
+  arrive as a decimal string so a verifier whose numbers are f64 (JavaScript)
+  round-trips `dialect_hash` without losing precision.
 - **Compression** (`compress.rs`): an empty input is refused instead of decoding
   to empty bytes; a level outside the build's zstd range is
   `infinity/invalid-argument` instead of being silently clamped; dictionary

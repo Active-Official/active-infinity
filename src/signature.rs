@@ -3,17 +3,28 @@
 //! Signature is supply-chain evidence, not identity: the content hash remains
 //! the Blake3 hash of the image. The envelope binds the image bytes and the
 //! public key with a domain separator.
+//!
+//! Both [`SignedImage::sign`] and [`SignedImage::verify`] prove the canonical
+//! form. A signature over a structurally valid image that does not re-encode to
+//! itself would certify bytes no honest producer can reproduce and no store
+//! accepts, so it is refused up front with `infinity/not-canonical`. Every
+//! failure while parsing or verifying an envelope is reported as
+//! `infinity/signature`: a caller that monitors that one code sees every
+//! rejected envelope.
 
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 
-use crate::{content_hash, validate, Error, Result};
+use crate::layout::Limits;
+use crate::{validate_canonical, Error, Result};
 
 const MAGIC: [u8; 4] = *b"AISG";
 const VERSION: u8 = 1;
 const DOMAIN: &[u8] = b"active-infinity/signed-image/v1\0";
+/// Magic, version, public key and signature ahead of the image.
+const HEADER: usize = 4 + 1 + 32 + 64;
 
 /// A detached signed image.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct SignedImage {
     /// Canonical image bytes.
     pub image: Vec<u8>,
@@ -23,10 +34,25 @@ pub struct SignedImage {
     pub signature: [u8; 64],
 }
 
+impl std::fmt::Debug for SignedImage {
+    /// Prints the envelope's metadata, never the image.
+    ///
+    /// The image carries the secret heap, so the derived `Debug` would print it
+    /// as a decimal byte list into any log or panic message.
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SignedImage")
+            .field("image_bytes", &self.image.len())
+            .field("public_key", &hex(&self.public_key))
+            .field("signature", &hex(&self.signature[..8]))
+            .finish()
+    }
+}
+
 impl SignedImage {
     /// Validate and sign an image.
     pub fn sign(image: Vec<u8>, key: &SigningKey) -> Result<Self> {
-        validate(&image)?;
+        validate_canonical(&image, Limits::default())?;
         let mut message = Vec::with_capacity(DOMAIN.len() + image.len());
         message.extend_from_slice(DOMAIN);
         message.extend_from_slice(&image);
@@ -48,8 +74,13 @@ impl SignedImage {
     }
 
     /// Verify the image, public key and signature. Fail closed on any mismatch.
+    ///
+    /// The image must be canonical: a signature certifies bytes that re-encode
+    /// to themselves. Any image fault is reported as `infinity/signature`, the
+    /// envelope's code.
     pub fn verify(&self) -> Result<()> {
-        validate(&self.image)?;
+        validate_canonical(&self.image, Limits::default())
+            .map_err(|_| Error::Signature("the signed image does not validate"))?;
         let key = VerifyingKey::from_bytes(&self.public_key)
             .map_err(|_| Error::Signature("invalid public key"))?;
         let signature = Signature::from_bytes(&self.signature);
@@ -63,12 +94,12 @@ impl SignedImage {
 
     /// Content hash of the signed image.
     pub fn content_hash(&self) -> Result<[u8; 32]> {
-        content_hash(&self.image)
+        crate::content_hash(&self.image)
     }
 
     /// Serialize the detached envelope.
     pub fn to_bytes(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(4 + 1 + 32 + 64 + self.image.len());
+        let mut out = Vec::with_capacity(HEADER + self.image.len());
         out.extend_from_slice(&MAGIC);
         out.push(VERSION);
         out.extend_from_slice(&self.public_key);
@@ -78,8 +109,20 @@ impl SignedImage {
     }
 
     /// Parse and verify a detached envelope.
+    ///
+    /// The input is bounded before the image is copied: an envelope is a
+    /// canonical image plus a fixed header, so anything past the codec ceiling
+    /// is refused with `infinity/limit`. Every other failure is
+    /// `infinity/signature`.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
-        if bytes.len() < 4 + 1 + 32 + 64 || bytes[..4] != MAGIC {
+        let limit = envelope_limit();
+        if bytes.len() as u64 > limit {
+            return Err(Error::Limit {
+                kind: "signature envelope bytes",
+                limit,
+            });
+        }
+        if bytes.len() < HEADER || bytes[..4] != MAGIC {
             return Err(Error::Signature("bad envelope magic or length"));
         }
         if bytes[4] != VERSION {
@@ -90,13 +133,28 @@ impl SignedImage {
         let mut signature = [0u8; 64];
         signature.copy_from_slice(&bytes[37..101]);
         let envelope = Self {
-            image: bytes[101..].to_vec(),
+            image: bytes[HEADER..].to_vec(),
             public_key,
             signature,
         };
         envelope.verify()?;
         Ok(envelope)
     }
+}
+
+/// Largest envelope accepted: the codec's image ceiling plus the fixed header
+/// and room for a future extension.
+fn envelope_limit() -> u64 {
+    Limits::default().max_total_bytes.saturating_add(4096)
+}
+
+fn hex(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        let _ = write!(out, "{byte:02x}");
+    }
+    out
 }
 
 #[cfg(test)]

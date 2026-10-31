@@ -23,7 +23,7 @@ the code → regression test first → minimal fix → targeted tests + clippy �
 | I-07 | schema class | `src/schema.rs` | CLEAN | 6 fixed, 1 rejected | this commit |
 | I-08 | store | `src/store.rs` | **CLEAN** | 7 fixed, 1 rejected | this commit |
 | I-09 | compress | `src/compress.rs`, CLI `dict` | **CLEAN** | 6 fixed, 4 rejected/documented | this commit |
-| I-10 | signature / proof | `src/signature.rs`, `src/proof.rs` | pending | — | — |
+| I-10 | signature / proof | `src/signature.rs`, `src/proof.rs` | **CLEAN** | 6 fixed, 2 rejected/documented | this commit |
 | I-11 | merge | `src/merge.rs` | pending | — | — |
 | I-12 | interop / protobuf | `src/interop.rs`, `src/protobuf.rs` | pending | — | — |
 | I-13 | error codes | `src/error.rs` | pending | — | — |
@@ -407,3 +407,32 @@ Gate: clippy clean on both feature sets; Infinity 278 passed all-features /
 227 no-default; CLI 15 passed; the three refusal tests fail against the pre-fix
 tree (library probe with a documented `level_range` shim, CLI with `main.rs`
 stashed).
+
+### I-10 signature and proof - 2026-10-31
+
+| # | Severity | Finding | Disposition |
+|---|---|---|---|
+| 1 | high | `SignedImage::sign`/`verify` used structural `validate` while the store and proof require the canonical form: an envelope could certify bytes no store accepts and no producer reproduces | **fixed**: both prove `validate_canonical`; `sign_refuses_a_non_canonical_image` (signing) and `from_bytes_refuses_a_non_canonical_envelope` (an envelope built by hand over doctored bytes) |
+| 2 | high | `from_bytes` copied `bytes[101..]` with no ceiling and `verify` built a second `DOMAIN || image` buffer, so a fabricated ~1 GiB `.sig` forced multi-GiB transient memory | **fixed**: the envelope length is checked against the codec ceiling plus its fixed header before the image is copied (`infinity/limit`); the message buffer remains one allocation by construction. `from_bytes_refuses_an_oversized_envelope_before_copying_it` |
+| 3 | high | envelope parse surfaced the inner image code (`infinity/header-truncated`, `infinity/hash-mismatch`, …), and the old test enshrined it, so a monitor watching `infinity/signature` missed rejected envelopes | **fixed**: every image fault during parse/verify is `infinity/signature`; `from_bytes_maps_every_image_fault_to_the_signature_code`, and `put_signed_refuses_a_corrupted_image` was rewritten to the one-code contract |
+| 4 | medium | the CLI read input files unbounded before any limit | **fixed in I-09** (one bounded `read` for the whole CLI); recorded here so the finding is not lost |
+| 5 | medium | `Proof::from_json` ignored unknown fields, so a smuggled key could ride on a sidecar that verifies | **fixed**: exactly the eleven `active-infinity/proof/1` fields are accepted; `a_sidecar_with_an_unknown_field_is_refused` |
+| 6 | medium | `get_verified` compared `signed.image != image` with early-exit `Vec` equality over secret-bearing bytes (a length-dependent timing signal), on top of two unlocked reads | **fixed**: the comparison is gone. `get` proves the image hashes to `hash` and `get_signature` proves the envelope's image does too, so byte equality follows from the content hash. The two-read race stays a residual: a swap is caught by the hash check and fails closed |
+| 7 | low | proof rejection messages distinguish which check failed (hash vs metadata vs schema) | **rejected as a code change, documented as a contract**: the distinctions are operator diagnostics. The module docs and `authenticity.md` now require a service that verifies attacker-supplied sidecars to answer with one fixed response and never forward `Display` |
+| 8 | low | `dialect_hash`/`size` are JSON numbers; a JavaScript verifier loses precision past 2^53 | **fixed on the parse side**: an integer field may be a decimal string, so a precision-limited producer round-trips exactly. `a_u64_field_may_arrive_as_a_decimal_string`. Emitting strings stays a v2 format decision |
+
+Also fixed while there: `SignedImage`'s derived `Debug` printed the image (the
+secret heap included) as decimal bytes; the manual form prints the image length,
+the public key and the signature prefix. `the_debug_form_does_not_print_the_image`.
+`Store::put_signed` reuses the hash returned by `put` instead of validating the
+image a third time.
+
+Residuals: the CLI still parses a signing seed from `--seed` hex and holds it in
+argv/heap memory; zeroizing one copy would not remove the others, and a real fix
+is a key-handling design (file descriptor, agent socket), not a line of code.
+Envelope replication and the absence of a transparency log remain as recorded in
+`authenticity.md`.
+
+Gate: clippy clean on both feature sets; Infinity 285 passed all-features / 227
+no-default; CLI 15; doc gates 15. Five signature tests and both proof tests fail
+against the pre-fix tree (`src/signature.rs` then `src/proof.rs` stashed).

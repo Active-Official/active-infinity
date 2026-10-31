@@ -2149,6 +2149,15 @@ fn validate_layout(buf: &[u8], header: &Header) -> Result<[u64; SECTION_COUNT]> 
             offset: header.total_size,
         });
     }
+    // The alignment slack after the last section belongs to the image and must be
+    // zero, exactly like the gaps between sections. All current section ends are
+    // 8-aligned, so this loop is empty today; it is the guard that keeps a future
+    // variable-length trailing section from opening an unaccounted gap.
+    for offset in cursor..align8(cursor) {
+        if buf[offset as usize] != 0 {
+            return Err(Error::Padding { offset });
+        }
+    }
     if header.total_size != buf.len() as u64 {
         if header.total_size < buf.len() as u64 {
             return Err(Error::TrailingBytes {
@@ -2170,23 +2179,73 @@ fn section_end(
     offset: u64,
     count: u32,
 ) -> Result<u64> {
+    // Every index is computed in `u64` with checked arithmetic and bounds-checked
+    // against the buffer before it is narrowed to `usize`: a 32-bit target cannot
+    // represent `count as usize * stride` for a full-range count, and wrapping
+    // there would make the same image validate differently per platform.
+    let available = buf.len() as u64;
+    let table_len = |stride: u64| -> Result<u64> {
+        let bytes = (count as u64).checked_mul(stride).ok_or(Error::Count {
+            field: section.name(),
+            value: count as u64,
+        })?;
+        let end = offset.checked_add(bytes).ok_or(Error::Count {
+            field: section.name(),
+            value: count as u64,
+        })?;
+        if end > available {
+            return Err(Error::Count {
+                field: section.name(),
+                value: count as u64,
+            });
+        }
+        Ok(end)
+    };
+    let word = |index: u64, stride: u64, field: u64| -> Result<u32> {
+        let at = offset
+            .checked_add(index.checked_mul(stride).ok_or(Error::Count {
+                field: section.name(),
+                value: count as u64,
+            })?)
+            .and_then(|base| base.checked_add(field))
+            .ok_or(Error::Count {
+                field: section.name(),
+                value: count as u64,
+            })?;
+        let at = usize::try_from(at).map_err(|_| Error::Count {
+            field: section.name(),
+            value: count as u64,
+        })?;
+        read_u32(buf, at)
+    };
+
     let end = match section {
         Section::Strings => {
             if count == 0 {
                 offset
             } else {
-                let table = offset as usize;
-                let heap_len = read_u32(buf, table + count as usize * 4)? as u64;
+                // The table holds `count` entries plus one heap-length word.
+                let table_end = table_len(4)?.checked_add(4).ok_or(Error::Count {
+                    field: "strings",
+                    value: count as u64,
+                })?;
+                if table_end > available {
+                    return Err(Error::Count {
+                        field: "strings",
+                        value: count as u64,
+                    });
+                }
+                let heap_len = word(count as u64, 4, 0)? as u64;
                 offset + (count as u64 + 1) * 4 + heap_len
             }
         }
         Section::Blobs => {
-            let table = offset as usize;
+            table_len(BLOB_ENTRY_SIZE as u64)?;
             let mut heap = 0u64;
-            for index in 0..count {
-                let len = read_u32(buf, table + index as usize * BLOB_ENTRY_SIZE + 36)? as u64;
+            for index in 0..count as u64 {
+                let len = word(index, BLOB_ENTRY_SIZE as u64, 36)? as u64;
                 heap = heap.checked_add(len).ok_or(Error::Blob {
-                    id: index,
+                    id: index as u32,
                     reason: "payload heap overflows",
                 })?;
             }
@@ -2194,11 +2253,13 @@ fn section_end(
         }
         Section::Provenance => offset + count as u64,
         Section::Secrets => {
-            let table = offset as usize;
+            table_len(8)?;
             let mut heap = 0u64;
-            for index in 0..count {
-                let len = read_u32(buf, table + index as usize * 8 + 4)? as u64;
-                heap = heap.checked_add(len).ok_or(Error::SecretEntry(index))?;
+            for index in 0..count as u64 {
+                let len = word(index, 8, 4)? as u64;
+                heap = heap
+                    .checked_add(len)
+                    .ok_or(Error::SecretEntry(index as u32))?;
             }
             offset + count as u64 * 8 + heap
         }
@@ -2206,12 +2267,19 @@ fn section_end(
             if count == 0 {
                 offset
             } else {
+                table_len(EXT_DIR_SIZE as u64)?;
                 let mut max_end = offset + count as u64 * EXT_DIR_SIZE as u64;
-                for index in 0..count {
-                    let dir = offset as usize + index as usize * EXT_DIR_SIZE;
-                    let payload_offset = read_u32(buf, dir + 8)? as u64;
-                    let payload_len = read_u32(buf, dir + 12)? as u64;
-                    max_end = max_end.max(payload_offset + payload_len);
+                for index in 0..count as u64 {
+                    let payload_offset = word(index, EXT_DIR_SIZE as u64, 8)? as u64;
+                    let payload_len = word(index, EXT_DIR_SIZE as u64, 12)? as u64;
+                    let payload_end =
+                        payload_offset
+                            .checked_add(payload_len)
+                            .ok_or(Error::Extension {
+                                tag: 0,
+                                reason: "payload range overflows",
+                            })?;
+                    max_end = max_end.max(payload_end);
                 }
                 max_end
             }

@@ -15,7 +15,7 @@ the code → regression test first → minimal fix → targeted tests + clippy �
 | ID | Section | Paths | State | Findings (fixed / rejected / open) | Commits |
 |----|---------|-------|-------|------------------------------------|---------|
 | I-01 | layout / header | `src/layout.rs` | CLEAN (round 2 open items fixed) | 10 fixed, 1 rejected, 0 open | this commit |
-| I-02 | validate | `src/validate.rs` | pending | — | — |
+| I-02 | validate | `src/validate.rs` | in progress (slice A fixed; B–E pending) | 3 fixed, 2 rejected, 0 open | this commit |
 | I-03 | encode / canonical | `src/encode.rs`, `src/canonical.rs` | pending | — | — |
 | I-04 | decode / view | `src/decode.rs`, `src/view.rs` | pending | — | — |
 | I-05 | IR / units | `src/ir.rs`, `src/unit.rs` | pending | — | — |
@@ -79,4 +79,21 @@ Round 2 findings and disposition:
 | 16 | low | `SectionSpan::bytes` is only valid for fixed-stride sections | **rejected**: the doc says "for a fixed-stride section"; the var-length sections compute their end in `validate.rs::section_end` |
 
 Gate after the section: `cargo clippy --locked --all-targets --all-features
--D warnings` clean; `cargo test --all-features` 213 passed, 0 failed.
+-D warnings` clean; `cargo test --all-features` 218 passed, 0 failed.
+
+### I-02 validate, slice A (layout, counts, offsets, totals) — 2026-10-31
+
+Round 1, five findings:
+
+| # | Severity | Finding | Disposition |
+|---|---|---|---|
+| 1 | high | `section_end` indexed with unchecked `usize` arithmetic (`table + count as usize * 4`), which wraps on a 32-bit target and yields a different verdict for the same image; `stream.rs::section_body_len` already used checked math | **fixed**: every index is `u64` with `checked_mul`/`checked_add`, bounds-checked against the buffer, then narrowed with `usize::try_from`; failures are `infinity/count` |
+| 2 | medium | a count that cannot be satisfied by the buffer reported `infinity/truncated` for strings/blobs/secrets/extensions (the table read failed first) but `infinity/count` for fixed-stride sections | **fixed**: each variable section bounds its table before the first read, so the code is `infinity/count` per spec §9; `a_count_bomb_in_a_variable_section_is_a_count_error` |
+| 3 | medium | provenance exempted from the count pass (`u32::MAX`), no byte budget | **partly rejected**: provenance is a *byte-length* section bounded by `total_size` and `max_total_bytes`, and `check_provenance` compares the entry count against `max_prov_entries` before iterating; `the_provenance_ceiling_is_checked_before_the_block_is_walked` pins the ordering |
+| 4 | low | `Header::parse` accepted any `total_size` (0, sub-header, unaligned) | **fixed**: `total_size < 224` or not a multiple of 8 is `infinity/offset` with section `total-size`; `the_header_total_size_is_bounded` |
+| 5 | low | alignment slack after the last section was not zero-checked (unreachable today) | **fixed**: the loop is in place and documented as the guard for a future variable-length trailing section |
+
+Two behaviour changes were caught by existing tests during the fix: the strings
+length word was first read with the wrong stride (caught by the signature and
+compress round-trip tests) and a zeroed-header unit test now expects the
+`total-size` offset error. Both are in the committed suite.

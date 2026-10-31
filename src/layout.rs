@@ -329,6 +329,16 @@ impl Header {
         content_hash.copy_from_slice(&buf[16..48]);
         let dialect_hash = read_u64(buf, 48)?;
         let total_size = read_u64(buf, 56)?;
+        // `total_size` is a header field, so its coarse bounds are checked here:
+        // an image can never be shorter than its header, and every section starts
+        // 8-aligned, so the total is too. Section-by-section agreement is the
+        // validator's job.
+        if total_size < HEADER_SIZE as u64 || total_size % 8 != 0 {
+            return Err(Error::Offset {
+                section: "total-size",
+                offset: total_size,
+            });
+        }
         let mut sections = [SectionSpan::default(); SECTION_COUNT];
         for (index, span) in sections.iter_mut().enumerate() {
             let base = 64 + index * 8;
@@ -781,6 +791,15 @@ mod tests {
         // A zeroed header-size field is refused before any section is read.
         assert_eq!(Header::parse(&bytes).unwrap_err(), Error::HeaderSize(0));
         bytes[10..12].copy_from_slice(&(HEADER_SIZE as u16).to_le_bytes());
+        // A zero total size cannot contain even the header.
+        assert_eq!(
+            Header::parse(&bytes).unwrap_err(),
+            Error::Offset {
+                section: "total-size",
+                offset: 0,
+            }
+        );
+        bytes[56..64].copy_from_slice(&(HEADER_SIZE as u64).to_le_bytes());
         assert!(Header::parse(&bytes).is_ok());
     }
 

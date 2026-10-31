@@ -16,7 +16,7 @@ the code → regression test first → minimal fix → targeted tests + clippy �
 |----|---------|-------|-------|------------------------------------|---------|
 | I-01 | layout / header | `src/layout.rs` | CLEAN (round 2 open items fixed) | 10 fixed, 1 rejected, 0 open | this commit |
 | I-02 | validate | `src/validate.rs` | **CLEAN** (round 3: 3 high fixed, 10 triaged) | 24 fixed, 10 rejected, 0 open | this commit |
-| I-03 | encode / canonical | `src/encode.rs`, `src/canonical.rs` | round 1 received, triage in progress | — | — |
+| I-03 | encode / canonical | `src/encode.rs`, `src/canonical.rs` | in progress (finding 2 fixed; rest pending) | 1 fixed, 0 rejected, 0 open | this commit |
 | I-04 | decode / view | `src/decode.rs`, `src/view.rs` | pending | — | — |
 | I-05 | IR / units | `src/ir.rs`, `src/unit.rs` | pending | — | — |
 | I-06 | stream / delta | `src/stream.rs` | pending | — | — |
@@ -194,3 +194,15 @@ before any change, as with every other section.
 
 Resume here: verify each claim against the current tree, then follow the usual
 loop (regression test first, fix, full gates, log the disposition).
+
+**Finding 2 fixed, 2026-10-31** (`tests/marathon_canonical_tests.rs`): the claim
+was correct. `canonical_order` built its roots from the root node, the binding
+targets **sorted by numeric id**, the annotation subjects and the constraint
+expressions; the spec and `InfinityModule::roots` order bindings by **name**.
+A value reachable only through a binding was therefore numbered by arena
+position, so the same logical module could encode to different bytes. The
+function now takes its roots from `roots()`, which is the single source of
+truth, and three tests pin it: canonical bytes, structural equality and the
+decode/encode identity. A module whose binding-only nodes were pushed out of
+name order re-encodes to a different (correct) hash; `validate_canonical` calls
+the old bytes not canonical and the changelog records the change.

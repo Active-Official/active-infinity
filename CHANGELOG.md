@@ -9,6 +9,13 @@
   member order encode to the same bytes and share one content hash. Images
   produced before this change with unsorted members still `validate` but fail
   `validate_canonical`; re-encode them to migrate.
+- **Canonical form**: node numbering takes its roots from
+  `InfinityModule::roots`, which orders bindings by name. Ordering the binding
+  roots by numeric node id let arena construction order leak into the image, so
+  two modules with the same content could hash differently. A module whose
+  binding-only nodes were pushed in an order other than their names re-encodes
+  to a different (correct) hash; `validate_canonical` reports the old bytes as
+  not canonical.
 - **Validation** (`validate.rs`): node reserved bytes must be zero; the
   `children`/`fields`/`parts` tables must be packed sequentially in node order;
   every aux entry must be referenced exactly once; a table type's flag must agree

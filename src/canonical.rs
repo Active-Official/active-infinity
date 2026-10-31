@@ -709,27 +709,14 @@ fn remap_node_in_place(node: &mut Inode, remap: &[NodeId]) -> Result<()> {
 }
 
 /// Deterministic pre-order numbering over the reachable graph.
+///
+/// The roots come from [`InfinityModule::roots`], which orders bindings by name
+/// and everything else by its stored (already canonical) order. Ordering them
+/// by numeric id instead would let arena construction order leak into the
+/// canonical bytes: two modules with the same content but a different push order
+/// would hash differently.
 fn canonical_order(nodes: &[Inode], module: &InfinityModule) -> Result<Vec<NodeId>> {
-    let mut roots = Vec::new();
-    if let Some(root) = module.root() {
-        roots.push(root);
-    }
-    let mut bindings: Vec<NodeId> = module.bindings().iter().map(|(_, id)| *id).collect();
-    bindings.sort_by_key(|id| id.0);
-    roots.extend(bindings);
-    let mut subjects: Vec<NodeId> = module.annotations().iter().map(|a| a.node).collect();
-    subjects.sort_by_key(|id| id.0);
-    roots.extend(subjects);
-    let mut exprs: Vec<NodeId> = module
-        .annotations()
-        .iter()
-        .filter_map(|a| match &a.kind {
-            AnnotationKind::Constraint { expr, .. } => Some(*expr),
-            _ => None,
-        })
-        .collect();
-    exprs.sort_by_key(|id| id.0);
-    roots.extend(exprs);
+    let roots = module.roots();
 
     let mut order = Vec::with_capacity(nodes.len());
     let mut seen = vec![false; nodes.len()];

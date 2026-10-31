@@ -149,7 +149,9 @@ mod competitors {
             fields: pairs(fields),
             name: "bakeoff".to_string(),
         };
-        rkyv::to_bytes::<rkyv::rancor::Error>(&table).expect("rkyv").to_vec()
+        rkyv::to_bytes::<rkyv::rancor::Error>(&table)
+            .expect("rkyv")
+            .to_vec()
     }
 }
 

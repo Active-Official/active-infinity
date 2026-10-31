@@ -19,23 +19,42 @@ Build the artifacts once (from the repository root):
 
 ## Status
 
-| # | Language | Binding | Conformance | CI |
-|---|----------|---------|-------------|-----|
+| # | Language | Binding | Conformance test | CI job |
+|---|----------|---------|------------------|--------|
 | 1 | Rust | reference crate | full suite | `gates` |
 | 2 | C | `polyglot/c` | `consumer.c` | `abi` |
-| 3 | C++ | `polyglot/cpp` (header-only RAII) | `test.cpp` | `polyglot-native` |
+| 3 | C++ | `polyglot/cpp` (RAII) | `test.cpp` | `polyglot-native` |
 | 4 | Python | `polyglot/python` (ctypes) | `test_conformance.py` | `polyglot-native` |
 | 5 | Go | `polyglot/go` (wazero) | `go test ./...` | `polyglot-go` |
-| 6 | TypeScript | `polyglot/ts` (typed WASM wrapper) | `conformance.ts` | `polyglot-ts` |
-| 7 | JavaScript | `polyglot/js` (WASM wrapper) | `test.js` | `wasm`, `polyglot-ts` |
-| 8-20 | Java, Kotlin/JVM, Scala, C#, Swift, Zig*, Kotlin/Native, Ruby, PHP, Dart, AssemblyScript, Lua, Shell | see below | scheduled under **C-8.2** | — |
+| 6 | TypeScript | `polyglot/ts` | `conformance.ts` (`tsc --strict`) | `polyglot-ts` |
+| 7 | JavaScript | `polyglot/js` | `test.js` | `wasm`, `polyglot-ts` |
+| 8 | Java | `polyglot/java` (JNI) | `Conformance.java` | `polyglot-jvm` |
+| 9 | C# / .NET | `polyglot/csharp` (P/Invoke) | `Conformance/Program.cs` | `polyglot-dotnet` |
+| 10 | Kotlin/JVM | `polyglot/kotlin` (JNI) | `Conformance.kt` | `polyglot-jvm` |
+| 11 | Swift | `polyglot/swift` (C interop) | `Sources/Conformance` | `polyglot-swift` |
+| 12 | Zig | `polyglot/zig` (`@cImport`) | `zig build run` | `polyglot-native` |
+| 13 | Ruby | `polyglot/ruby` (FFI gem) | `test_conformance.rb` | `polyglot-scripting` |
+| 14 | PHP | `polyglot/php` (ext-ffi) | `test.php` | `polyglot-scripting` |
+| 15 | Scala | `polyglot/scala` (JVM) | `Conformance.scala` | `polyglot-jvm` |
+| 16 | Dart | `polyglot/dart` (`dart:ffi`) | `bin/conformance.dart` | `polyglot-scripting` |
+| 17 | Kotlin/Native | `polyglot/kotlin-native` (dlopen) | `Conformance.kt` | `polyglot-kotlin-native` |
+| 18 | AssemblyScript | `polyglot/assemblyscript` (WASM host) | `test.js` | `polyglot-assemblyscript` |
+| 19 | Lua | `polyglot/lua` (LuaJIT FFI) | `test.lua` | `polyglot-scripting` |
+| 20 | Shell / ops | `active-infinity-cli` | `polyglot/shell/test.sh` | `polyglot-shell` |
 
-| * | Zig is delivered (`polyglot/zig`, `zig build`); the table row above is kept
-| in the numbering of `POLYGLOT.md` and is covered by `polyglot-native`.
+Every row validates an AINF image, reproduces the manifest content hash,
+re-encodes to canonical bytes, compiles Active text, and asserts that the
+redaction canary `CANARY_SECRET_` never appears. The RPC thin client for each
+language is tracked separately in `polyglot/rpc/PROTOCOL.md` (C-8.3).
 
-Rows 8-20 are tracked as the remaining work of checklist item **C-8.2**; each
-one uses the same ABI/WASM artifact and the same `conformance/manifest.json`
-oracle. None is considered optional.
+### Notes on toolchains
+
+- Kotlin/Native links the ABI with `dlopen`, so it does not inherit the
+  compiler's old sysroot at link time.
+- AssemblyScript cannot host a second WASM module; `host.js` binds its imports to
+  the reference module and copies across the two linear memories.
+- The shared library must be findable at run time: set `ACTIVE_INFINITY_LIB`, or
+  put `ffi/active-infinity-ffi/target/release` on the loader path.
 
 ## Quickstarts
 

@@ -1,0 +1,4 @@
+module CActiveInfinity {
+    header "../../../../ffi/active-infinity-ffi/include/active_infinity.h"
+    export *
+}

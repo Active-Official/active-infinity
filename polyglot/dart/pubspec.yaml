@@ -1,0 +1,6 @@
+name: active_infinity
+description: Active Infinity Dart bindings (FFI over the C ABI)
+version: 0.1.0
+publish_to: none
+environment:
+  sdk: ">=3.0.0 <4.0.0"

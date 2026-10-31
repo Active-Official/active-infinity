@@ -151,6 +151,141 @@ jobs:
       - name: JavaScript conformance
         run: node polyglot/js/test.js
 
+  polyglot-scripting:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build the shared library
+        working-directory: ffi/active-infinity-ffi
+        run: cargo build --locked --release
+      - name: Install scripting runtimes
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ruby-full php-cli php-ffi luajit
+          gem install ffi --no-document
+      - uses: dart-lang/setup-dart@v1
+      - name: Ruby
+        env:
+          ACTIVE_INFINITY_LIB: ${{ github.workspace }}/ffi/active-infinity-ffi/target/release/libactive_infinity_ffi.so
+        run: ruby polyglot/ruby/test/test_conformance.rb
+      - name: PHP
+        env:
+          ACTIVE_INFINITY_LIB: ${{ github.workspace }}/ffi/active-infinity-ffi/target/release/libactive_infinity_ffi.so
+        run: php polyglot/php/test.php
+      - name: Lua
+        env:
+          ACTIVE_INFINITY_LIB: ${{ github.workspace }}/ffi/active-infinity-ffi/target/release/libactive_infinity_ffi.so
+        run: luajit polyglot/lua/test.lua
+      - name: Dart
+        env:
+          ACTIVE_INFINITY_LIB: ${{ github.workspace }}/ffi/active-infinity-ffi/target/release/libactive_infinity_ffi.so
+        run: dart run polyglot/dart/bin/conformance.dart
+
+  polyglot-dotnet:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+      - name: Build the shared library
+        working-directory: ffi/active-infinity-ffi
+        run: cargo build --locked --release
+      - name: C# conformance
+        env:
+          LD_LIBRARY_PATH: ${{ github.workspace }}/ffi/active-infinity-ffi/target/release
+        run: dotnet run -c Release --project polyglot/csharp/Conformance
+
+  polyglot-jvm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - name: Install the Kotlin compiler
+        run: |
+          curl -fL https://github.com/JetBrains/kotlin/releases/download/v2.0.21/kotlin-compiler-2.0.21.zip -o /tmp/kotlin.zip
+          unzip -q /tmp/kotlin.zip -d /opt
+          echo "/opt/kotlinc/bin" >> "$GITHUB_PATH"
+      - name: Build the shared library
+        working-directory: ffi/active-infinity-ffi
+        run: cargo build --locked --release
+      - name: Java
+        env:
+          LD_LIBRARY_PATH: ${{ github.workspace }}/ffi/active-infinity-ffi/target/release
+        run: bash polyglot/java/build.sh
+      - name: Kotlin/JVM
+        run: bash polyglot/kotlin/build.sh
+      - name: Scala
+        env:
+          SCALA_CLI: /tmp/scala-cli
+        run: bash polyglot/scala/build.sh
+
+  polyglot-kotlin-native:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Cache the Kotlin/Native compiler
+        uses: actions/cache@v4
+        with:
+          path: /tmp/kotlin-native-cache
+          key: kotlin-native-2.0.21
+      - name: Kotlin/Native conformance
+        env:
+          POLYGLOT_CACHE: /tmp/kotlin-native-cache
+        run: bash polyglot/kotlin-native/build.sh
+
+  polyglot-swift:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build the shared library
+        working-directory: ffi/active-infinity-ffi
+        run: cargo build --locked --release
+      - name: Swift conformance
+        run: |
+          cd polyglot/swift
+          swift build -c release
+          cd ../..
+          LD_LIBRARY_PATH="$PWD/ffi/active-infinity-ffi/target/release" \
+            polyglot/swift/.build/release/Conformance
+
+  polyglot-assemblyscript:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Build the shared WASM module
+        working-directory: ffi/active-infinity-ffi
+        run: |
+          rustup target add wasm32-unknown-unknown
+          cargo build --locked --release --target wasm32-unknown-unknown
+      - name: Compile the AssemblyScript shim
+        run: |
+          mkdir -p polyglot/assemblyscript/build
+          npx --yes -p assemblyscript@0.27.31 asc polyglot/assemblyscript/assembly/index.ts \
+            -o polyglot/assemblyscript/build/conformance.wasm --optimize
+      - name: AssemblyScript conformance
+        run: node polyglot/assemblyscript/test.js
+
+  polyglot-shell:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Shell/CLI conformance
+        run: bash polyglot/shell/test.sh
+
   msrv:
     runs-on: ubuntu-latest
     steps:

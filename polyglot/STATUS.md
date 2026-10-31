@@ -4,8 +4,10 @@ Every language in `POLYGLOT.md` is required. This table is the release gate: a
 single `FAIL` means phase C-8 is incomplete. There are no tiers and no optional
 rows.
 
-Verified 2026-10-31 at `ebec21d` (Infinity) and `66f9fef` (Active RPC), in the
-`active-all-toolchains:phase2` container (Ubuntu 24.04).
+Verified 2026-10-31 at `ebec21d` (Infinity) and `66f9fef` (Active RPC), re-run
+for the RPC column at `59e58e2` (Rust and TypeScript clients, 20/20 live and
+20/20 byte-identical), in the `active-all-toolchains:phase2` container
+(Ubuntu 24.04).
 
 | # | Language | Validate + hash | Redaction | Encode | RPC thin client | Result |
 |---|----------|-----------------|-----------|--------|-----------------|--------|

@@ -16,7 +16,7 @@ the code → regression test first → minimal fix → targeted tests + clippy �
 |----|---------|-------|-------|------------------------------------|---------|
 | I-01 | layout / header | `src/layout.rs` | CLEAN (round 2 open items fixed) | 10 fixed, 1 rejected, 0 open | this commit |
 | I-02 | validate | `src/validate.rs` | **CLEAN** (round 3: 3 high fixed, 10 triaged) | 24 fixed, 10 rejected, 0 open | this commit |
-| I-03 | encode / canonical | `src/encode.rs`, `src/canonical.rs` | in progress (findings 1–6, 9, 11, 12 addressed; 7, 8, 10 dispositioned) | 9 fixed, 3 rejected, 0 open | this commit |
+| I-03 | encode / canonical | `src/encode.rs`, `src/canonical.rs` | **CLEAN** (round 2 fixed two more) | 11 fixed, 3 rejected, 0 open | `aef1efd`, `43b1078` |
 | I-04 | decode / view | `src/decode.rs`, `src/view.rs` | pending | — | — |
 | I-05 | IR / units | `src/ir.rs`, `src/unit.rs` | pending | — | — |
 | I-06 | stream / delta | `src/stream.rs` | pending | — | — |
@@ -255,7 +255,17 @@ failure output):
 | 11 | low | unchecked counters (`secret_cursor += 1`, …) | **fixed for the secret cursor** via `checked_add`; the remaining `+1` is on the binding count, bounded by the u32 node space |
 | 12 | low | spec §6 listed the type sort key as `(code, flags, aux start, count)` and the promotion rule as "referenced only by secret nodes" | **fixed**: the prose now says content `(code, flags, aux entries)` and "reachable only through a secret", which is what the code does |
 
-Gate: clippy clean; `cargo test --all-features` 242 passed, 0 failed. (`tests/marathon_canonical_tests.rs`): the claim
+Gate: clippy clean; `cargo test --all-features` 242 passed, 0 failed.
+
+### I-03 round 2 (re-audit) — 2026-10-31
+
+| # | Severity | Finding | Disposition |
+|---|---|---|---|
+| 1 | high | annotation insertion order leaked into canonical numbering: an annotation subject can be a node nothing else reaches, and `roots()` emitted subjects in stored order, so the same annotation set produced two images | **fixed**: `canonical_order` orders annotation subjects and constraint expressions by a content key — a depth-limited, id-free rendering that follows child references instead of printing ids and writes secrets as a fixed marker; `annotation_order_does_not_change_the_canonical_bytes` (fails pre-fix) |
+| 2 | low | residual `as u32` casts on byte-heap paths | **fixed at the boundary**: section spans and extension offsets/lengths were already `try_from`; a final `u32::try_from(image.len())` before the header covers a heap that grows past the space after the last span |
+
+Gate: clippy clean; `cargo test --all-features` 243 passed, 0 failed. Section
+I-03 is CLEAN. (`tests/marathon_canonical_tests.rs`): the claim
 was correct. `canonical_order` built its roots from the root node, the binding
 targets **sorted by numeric id**, the annotation subjects and the constraint
 expressions; the spec and `InfinityModule::roots` order bindings by **name**.

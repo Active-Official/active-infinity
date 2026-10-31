@@ -9,8 +9,12 @@
   member order encode to the same bytes and share one content hash. Images
   produced before this change with unsorted members still `validate` but fail
   `validate_canonical`; re-encode them to migrate.
-- **Canonical form**: node numbering takes its roots from
-  `InfinityModule::roots`, which orders bindings by name. Ordering the binding
+- **Canonical form**: annotation subjects and constraint expressions are numbered
+  in *content* order (a depth-limited, id-free rendering of the subtree) instead
+  of the order `annotate` was called, so the call order can no longer change the
+  bytes. Hash-affecting only for modules whose annotation-only subjects were
+  added out of content order.
+- **Canonical form**: node numbering orders bindings by name. Ordering the binding
   roots by numeric node id let arena construction order leak into the image, so
   two modules with the same content could hash differently. A module whose
   binding-only nodes were pushed in an order other than their names re-encodes

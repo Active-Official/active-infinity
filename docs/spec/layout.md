@@ -518,6 +518,8 @@ messages. Every code below is part of the contract.
 | `infinity/depth` | nesting deeper than the configured limit |
 | `infinity/limit` | a configured `Limits` ceiling was exceeded |
 | `infinity/invalid-argument` | caller-supplied argument outside its range |
+| `infinity/schema` | companion schema rejected the instance shape |
+| `infinity/compression` | optional zstd compression failed or exceeded its bound |
 | `infinity/encode` | module cannot be encoded (dangling reference, tainted blob with payload, ...) |
 | `infinity/encode-dangling` | encoding referenced a missing node |
 | `infinity/too-large` | image exceeds the 4 GiB address space |

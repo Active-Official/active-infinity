@@ -58,6 +58,8 @@
 #![warn(clippy::all)]
 
 pub mod canonical;
+#[cfg(feature = "zstd")]
+pub mod compress;
 pub mod decode;
 pub mod encode;
 pub mod error;
@@ -65,6 +67,7 @@ pub mod interop;
 pub mod ir;
 pub mod layout;
 pub mod protobuf;
+pub mod schema;
 pub mod stream;
 pub mod unit;
 pub mod validate;
@@ -83,6 +86,7 @@ pub use layout::{
     FORMAT_MINOR, HEADER_SIZE,
 };
 pub use protobuf::to_protobuf;
+pub use schema::Schema;
 pub use stream::{Frame, FrameKind, StreamDecoder, StreamEncoder};
 pub use unit::UnitTag;
 pub use validate::{validate, validate_canonical, validate_with, Validated};

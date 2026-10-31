@@ -39,6 +39,14 @@ const NON_IMAGE_CLASSES: &[(&str, &str)] = &[
         "caller-supplied argument (offset, depth, tag) outside its range",
     ),
     (
+        "infinity/schema",
+        "companion-schema validation failure; not a byte-image class",
+    ),
+    (
+        "infinity/compression",
+        "optional zstd transport/storage failure; not a byte-image class",
+    ),
+    (
         "infinity/encode",
         "encoder-side refusal; the bytes it would have produced do not exist",
     ),

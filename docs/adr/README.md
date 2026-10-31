@@ -16,3 +16,4 @@ immutable once accepted: a later ADR supersedes it and says so.
 | [0009](0009-protobuf-projection.md) | Protobuf interop projection |
 | [0010](0010-no-public-secret-accessor.md) | No public secret accessor |
 | [0011](0011-bakeoff-methodology.md) | Public bakeoff methodology and CI regression policy |
+| [0012](0012-schema-class.md) | Schema-class companion modules and the hash boundary |

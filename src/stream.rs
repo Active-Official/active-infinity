@@ -598,50 +598,61 @@ impl DeltaOp {
 /// Apply delta operations to a module, returning the updated module.
 pub fn apply_delta(module: &InfinityModule, ops: &[DeltaOp]) -> Result<InfinityModule> {
     let mut out = module.clone();
+    apply_delta_in_place(&mut out, ops)?;
+    Ok(out)
+}
+
+/// Apply delta operations in place.
+///
+/// This is the incremental path for a caller that already owns the module: it
+/// avoids cloning the whole graph and only merges the fragment nodes actually
+/// referenced by `PutNode`. Canonical encoding still runs once at the end,
+/// because the canonical image is the identity boundary.
+pub fn apply_delta_in_place(module: &mut InfinityModule, ops: &[DeltaOp]) -> Result<()> {
     for op in ops {
         match op {
             DeltaOp::SetRoot(root) => {
                 if let Some(root) = root {
-                    if out.get(*root).is_none() {
+                    if module.get(*root).is_none() {
                         return Err(Error::StreamDelta("root node does not exist"));
                     }
                 }
-                out.set_root(*root);
+                module.set_root(*root);
             }
             DeltaOp::PutNode { target, fragment } => {
-                if out.get(*target).is_none() {
+                if module.get(*target).is_none() {
                     return Err(Error::StreamDelta("target node does not exist"));
                 }
                 if fragment.node_count() == 0 {
                     return Err(Error::StreamDelta("fragment is empty"));
                 }
-                let replacement = merge_fragment(&mut out, fragment)?;
-                let content = out
+                let replacement = merge_fragment(module, fragment)?;
+                let content = module
                     .get(replacement)
                     .cloned()
                     .ok_or(Error::StreamDelta("fragment root missing"))?;
-                *out.node_mut(*target)? = content;
+                *module.node_mut(*target)? = content;
             }
             DeltaOp::SetBinding { name, node } => {
-                if out.get(*node).is_none() {
+                if module.get(*node).is_none() {
                     return Err(Error::StreamDelta("binding target does not exist"));
                 }
-                out.bind(name.clone(), *node);
+                module.bind(name.clone(), *node);
             }
             DeltaOp::RemoveBinding { name } => {
-                out.remove_binding(name);
+                module.remove_binding(name);
             }
             DeltaOp::SetAnnotation { node, kind } => {
-                if out.get(*node).is_none() {
+                if module.get(*node).is_none() {
                     return Err(Error::StreamDelta("annotation subject does not exist"));
                 }
-                out.annotate(*node, kind.clone());
+                module.annotate(*node, kind.clone());
             }
-            DeltaOp::ClearAnnotations => out.clear_annotations(),
-            DeltaOp::SetProvenance(prov) => out.set_provenance(prov.clone()),
+            DeltaOp::ClearAnnotations => module.clear_annotations(),
+            DeltaOp::SetProvenance(prov) => module.set_provenance(prov.clone()),
         }
     }
-    Ok(out)
+    Ok(())
 }
 
 fn merge_fragment(base: &mut InfinityModule, fragment: &InfinityModule) -> Result<NodeId> {

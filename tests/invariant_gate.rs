@@ -1,6 +1,7 @@
 //! C-1 invariant gate: a secret canary never appears in any Infinity
 //! diagnostic or projection, and the canonical hash still covers the instance.
 
+#[cfg(feature = "json")]
 use active_infinity::interop::to_redacted_json;
 use active_infinity::{content_hash, encode, validate, InfinityModule, Inode, SecretBytes};
 
@@ -26,9 +27,11 @@ fn fixture() -> InfinityModule {
 fn canary_never_reaches_debug_display_json_or_protobuf() {
     let module = fixture();
     let print = format!("{module:?}");
+    #[cfg(feature = "json")]
     let json = to_redacted_json(&module).expect("json projection");
     let proto = active_infinity::to_protobuf(&module).expect("protobuf");
     assert!(!print.contains(CANARY), "Debug leaked the canary");
+    #[cfg(feature = "json")]
     assert!(!json.contains(CANARY), "JSON projection leaked the canary");
     assert!(
         !String::from_utf8_lossy(&proto).contains(CANARY),

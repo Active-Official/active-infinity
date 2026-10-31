@@ -4,8 +4,9 @@
 //! are filled in C-7.3; until then they are explicit placeholders so no
 //! invented number can be published.
 
+use active_infinity::stream::{apply_delta_in_place, DeltaOp};
 use active_infinity::{content_hash, decode, encode, validate, InfinityModule, Inode};
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{black_box, criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion};
 
 fn fixture(fields: usize) -> InfinityModule {
     let mut module = InfinityModule::new();
@@ -42,6 +43,35 @@ fn bench_infinity(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_delta(c: &mut Criterion) {
+    let mut module = InfinityModule::new();
+    let mut fields = Vec::new();
+    for index in 0..10_000 {
+        let value = module.push(Inode::Int(index));
+        fields.push((format!("field-{index}"), value));
+    }
+    let root = module.push(Inode::Table { fields });
+    module.set_root(Some(root));
+    let target = active_infinity::ir::NodeId(9_999);
+    let mut fragment = InfinityModule::new();
+    let new_value = fragment.push(Inode::Int(-1));
+    fragment.set_root(Some(new_value));
+    let ops = [DeltaOp::PutNode {
+        target,
+        fragment: Box::new(fragment),
+    }];
+    c.bench_function("delta_patch_large_10k", |b| {
+        b.iter_batched(
+            || module.clone(),
+            |mut patched| {
+                apply_delta_in_place(&mut patched, &ops).expect("delta");
+                black_box(encode(&patched).expect("encode"))
+            },
+            BatchSize::SmallInput,
+        );
+    });
+}
+
 #[allow(dead_code)]
 mod competitors {
     //! Adapters land in C-7.3 with the same logical module shape.
@@ -64,5 +94,5 @@ mod competitors {
     }
 }
 
-criterion_group!(benches, bench_infinity);
+criterion_group!(benches, bench_infinity, bench_delta);
 criterion_main!(benches);

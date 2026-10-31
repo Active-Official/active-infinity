@@ -460,6 +460,45 @@ fn the_store_refuses_a_non_canonical_image() {
 }
 
 #[test]
+fn provenance_cloning_is_bounded_before_it_allocates() {
+    // Every entry that shares one long string would clone it once when the
+    // provenance block is materialised: 64K entries over a 32 KiB value is 2 GiB
+    // from a ~1 MiB image. The validator must refuse on the projection, not OOM.
+    let value = "v".repeat(32 << 10);
+    let entries: Vec<active_infinity::ProvEntry> = (0..400)
+        .map(|index| active_infinity::ProvEntry {
+            key: format!("k{index:05}"),
+            value: active_infinity::ProvValue::Text(value.clone()),
+        })
+        .collect();
+    let mut module = InfinityModule::new();
+    let root = module.push(Inode::Int(1));
+    module.set_root(Some(root));
+    module.set_provenance(Some(active_infinity::Provenance {
+        producer: Some("marathon".to_string()),
+        timestamp_ms: 1,
+        model: None,
+        tool: None,
+        parent: None,
+        entries,
+    }));
+    let bytes = encode(&module).expect("encode");
+    // 400 entries over a 32 KiB value project to 12.8 MiB; the image itself is
+    // about 35 KiB, so the bound has to be the projection.
+    let opts = DecodeOpts {
+        limits: Limits {
+            max_total_bytes: 1 << 20,
+            ..Limits::default()
+        },
+        verify_hash: true,
+        verify_canonical: false,
+    };
+    let error = validate_with(&bytes, opts).expect_err("the projection exceeds the byte budget");
+    assert_eq!(error.code(), "infinity/limit", "{error:?}");
+    assert!(format!("{error}").contains("provenance"), "{error}");
+}
+
+#[test]
 fn a_canonical_image_still_validates_under_strict_limits() {
     let opts = DecodeOpts {
         limits: Limits::strict(),

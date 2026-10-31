@@ -1085,6 +1085,20 @@ impl<'a> Validated<'a> {
                     reason: "payload out of range",
                 });
             }
+            // Verify the payload once, here. The node check used to re-hash the
+            // same payload for every node that referenced it, so N nodes sharing a
+            // large blob forced N hashes of it.
+            if len != 0 {
+                let payload = &self.buf[(heap + off as u64) as usize..payload_end as usize];
+                let mut hasher = blake3::Hasher::new();
+                hasher.update(payload);
+                if hasher.finalize().as_bytes() != &hash {
+                    return Err(Error::Blob {
+                        id,
+                        reason: "payload hash mismatch",
+                    });
+                }
+            }
             cursor = cursor.checked_add(len).ok_or(Error::Blob {
                 id,
                 reason: "payload heap overflows",
@@ -1655,20 +1669,14 @@ impl<'a> Validated<'a> {
                             limit: limits.max_blob_bytes as u64,
                         });
                     }
+                    // The payload's hash is verified once per entry in
+                    // `check_blobs`; here only the node's view of it is checked.
+                    let _ = &hash;
                     if has_payload {
-                        let payload = self.blob(rec.a as u32)?;
-                        if payload.len() as u64 != size {
+                        if len as u64 != size {
                             return Err(Error::Blob {
                                 id: rec.a as u32,
                                 reason: "payload length disagrees with size",
-                            });
-                        }
-                        let mut hasher = blake3::Hasher::new();
-                        hasher.update(payload);
-                        if hasher.finalize().as_bytes() != &hash {
-                            return Err(Error::Blob {
-                                id: rec.a as u32,
-                                reason: "payload hash mismatch",
                             });
                         }
                     } else if len != 0 {
@@ -1972,6 +1980,41 @@ impl<'a> Validated<'a> {
                 kind: "provenance entries",
                 limit: limits.max_prov_entries as u64,
             });
+        }
+        if PROV_HEADER_SIZE
+            .checked_add(count as usize * PROV_ENTRY_SIZE)
+            .map(|needed| needed > len)
+            .unwrap_or(true)
+        {
+            return Err(Error::Provenance("entry exceeds block"));
+        }
+        // `provenance()` materialises every key and text value. Count the bytes
+        // that would allocate before doing it: many entries can share one long
+        // string in the heap, and cloning it per entry is quadratic memory from a
+        // small image.
+        let mut projected: u64 = 0;
+        for index in 0..count as usize {
+            let entry = start + PROV_HEADER_SIZE + index * PROV_ENTRY_SIZE;
+            let kind = read_u32(self.buf, entry)?;
+            let key = self
+                .string(read_u32(self.buf, entry + 4)?)
+                .map_err(|_| Error::Provenance("dangling provenance string"))?;
+            let value_len = if kind == 0 {
+                self.string(read_u32(self.buf, entry + 8)?)
+                    .map_err(|_| Error::Provenance("dangling provenance string"))?
+                    .len() as u64
+            } else {
+                0
+            };
+            projected = projected
+                .saturating_add(key.len() as u64)
+                .saturating_add(value_len);
+            if projected > limits.max_total_bytes {
+                return Err(Error::Limit {
+                    kind: "provenance bytes",
+                    limit: limits.max_total_bytes,
+                });
+            }
         }
         let prov = self.provenance()?;
         if let Some(prov) = prov {

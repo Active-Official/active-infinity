@@ -15,7 +15,7 @@ the code → regression test first → minimal fix → targeted tests + clippy �
 | ID | Section | Paths | State | Findings (fixed / rejected / open) | Commits |
 |----|---------|-------|-------|------------------------------------|---------|
 | I-01 | layout / header | `src/layout.rs` | CLEAN (round 2 open items fixed) | 10 fixed, 1 rejected, 0 open | this commit |
-| I-02 | validate | `src/validate.rs` | in progress (slices A–E fixed; final re-audit) | 21 fixed, 6 rejected, 0 open | this commit |
+| I-02 | validate | `src/validate.rs` | **CLEAN** (round 3: 3 high fixed, 10 triaged) | 24 fixed, 10 rejected, 0 open | this commit |
 | I-03 | encode / canonical | `src/encode.rs`, `src/canonical.rs` | pending | — | — |
 | I-04 | decode / view | `src/decode.rs`, `src/view.rs` | pending | — | — |
 | I-05 | IR / units | `src/ir.rs`, `src/unit.rs` | pending | — | — |
@@ -157,3 +157,18 @@ Gate after slices C and D: clippy clean; `cargo test --all-features` 229 passed,
 | 7 | low | decode/encode failures inside the proof propagated as encoder codes | **fixed**: any failure to reproduce the image is `infinity/not-canonical` |
 
 Gate: clippy clean; `cargo test --all-features` 231 passed, 0 failed.
+
+### I-02 validate, round 3 (whole section) — 2026-10-31
+
+| # | Severity | Finding | Disposition |
+|---|---|---|---|
+| 1 | high | `provenance()` clones every key/value; entries sharing one long heap string project to far more memory than the image | **fixed**: `check_provenance` bounds the projection against `max_total_bytes` before materialising; `provenance_cloning_is_bounded_before_it_allocates` |
+| 2 | high | every blob node re-hashed its payload, so N nodes sharing a blob forced N hashes of it | **fixed**: the payload hash is verified once per entry in `check_blobs`; the node check keeps size/flags |
+| 3 | high | pending stream deltas were bounded by operation count, not bytes | **fixed**: `pending_delta_bytes` is bounded by `max_total_bytes` |
+| 4 | medium | `finish()` returned the previous generation when deltas never got their `End` | **fixed**: pending deltas make the stream unterminated |
+| 5 | medium | the strict profile buffered a 64 MiB frame before comparing against an 8 MiB bound | **triaged, deferred**: the frame is bounded by `MAX_FRAME_PAYLOAD`; a pre-read length check belongs with the frame-reader rework in I-06 (stream/delta). Logged there |
+| 6 | medium | binding, field and unit names equal to a secret literal stay in the public string heap while annotations and provenance are redacted | **triaged, deferred to I-05** (IR/canonical): the fix is a canonicalization rule that must be decided with the string-interning contract, and a wrong redaction would rename a binding |
+| 7–13 | low | `u32` truncation in `assemble` (**fixed**: `try_from`), `encode_stream` chunk bound, edge-mismatch diagnostics, `NodeRef` truncation in messages, delta UTF-8 code, `Store::get` canonical enforcement (deliberately structural so pre-canonical objects stay readable; `put` is the write gate), 32-bit section sum (**fixed**: saturating `u64`) | six fixed or deliberately documented |
+
+Gate: clippy clean; `cargo test --all-features` 232 passed, 0 failed. Section
+I-02 is CLEAN with the deferred items recorded.

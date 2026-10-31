@@ -692,6 +692,8 @@ pub struct StreamDecoder {
     module: Option<InfinityModule>,
     image: Option<Vec<u8>>,
     pending_deltas: Vec<DeltaOp>,
+    /// Bytes held by the pending delta frames.
+    pending_delta_bytes: u64,
     frames: u64,
     partial: Vec<u8>,
     cursor: usize,
@@ -712,6 +714,7 @@ impl StreamDecoder {
             module: None,
             image: None,
             pending_deltas: Vec::new(),
+            pending_delta_bytes: 0,
             frames: 0,
             partial: Vec::new(),
             cursor: 0,
@@ -877,6 +880,17 @@ impl StreamDecoder {
                         limit: self.limits.max_aux as u64,
                     });
                 }
+                self.pending_delta_bytes = self
+                    .pending_delta_bytes
+                    .saturating_add(frame.payload.len() as u64);
+                if self.pending_delta_bytes > self.limits.max_total_bytes {
+                    // A stream can carry many delta frames; the operation count is
+                    // not the resource that matters, the bytes are.
+                    return Err(Error::Limit {
+                        kind: "delta bytes",
+                        limit: self.limits.max_total_bytes,
+                    });
+                }
                 for _ in 0..count {
                     self.pending_deltas.push(DeltaOp::decode(
                         &frame.payload,
@@ -972,7 +986,9 @@ impl StreamDecoder {
             while image.len() % 8 != 0 {
                 image.push(0);
             }
-            header.span_mut(section).offset = image.len() as u32;
+            header.span_mut(section).offset = u32::try_from(image.len()).map_err(|_| {
+                Error::StreamDelta("reassembled image exceeds the u32 offset space")
+            })?;
             header.span_mut(section).count = self.counts[section as usize];
             image.extend_from_slice(&self.sections[section as usize]);
         }
@@ -1023,6 +1039,11 @@ impl StreamDecoder {
                 needed,
                 found: self.partial.len() as u64,
             });
+        }
+        if !self.pending_deltas.is_empty() {
+            // Deltas that never reached their closing `End` frame describe a
+            // generation this stream did not produce.
+            return Err(Error::StreamUnterminated);
         }
         let module = self.module.ok_or(Error::StreamUnterminated)?;
         let image = self.image.ok_or(Error::StreamUnterminated)?;

@@ -28,12 +28,28 @@ use crate::layout::{
 use crate::unit::{UnitTag, UNIT_NAMED};
 
 /// A validated image plus zero-copy accessors.
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy)]
 pub struct Validated<'a> {
     buf: &'a [u8],
     header: Header,
     ends: [u64; SECTION_COUNT],
     limits: Limits,
+}
+
+/// Printing a validated image never prints its bytes: the buffer carries the
+/// secret heap, and a `{:?}` in a log or a crash report must not become a leak
+/// channel.
+impl std::fmt::Debug for Validated<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Validated")
+            .field("bytes", &self.buf.len())
+            .field(
+                "content_hash",
+                &crate::ir::hash_hex(&self.header.content_hash),
+            )
+            .field("nodes", &self.header.span(Section::Nodes).count)
+            .finish()
+    }
 }
 
 impl<'a> Validated<'a> {

@@ -18,7 +18,7 @@ use crate::ir::{
     ProvEntry, ProvValue, Provenance, SchemaFieldSpec, TypeSpec,
 };
 use crate::layout::{DecodeOpts, ANN_KIND_AI_IMMUTABLE, ANN_KIND_CONSTRAINT, ANN_KIND_INTENT};
-use crate::validate::{validate, Validated};
+use crate::validate::Validated;
 
 /// Decode with default options (hash verified, canonical form not re-proved).
 pub fn decode(bytes: &[u8]) -> Result<InfinityModule> {
@@ -72,7 +72,12 @@ pub fn decode_validated(validated: &Validated<'_>) -> Result<InfinityModule> {
     let provenance = validated.provenance()?;
     let mut module = InfinityModule::from_parts(nodes, root, bindings, annotations, provenance);
     module.set_extensions(decode_extensions(validated)?);
-    module.validate_structure(u32::MAX as u64, 0)?;
+    // Keep the depth budget the wire pass enforced: passing 0 here would let a
+    // deep materialised module escape the ceiling downstream.
+    module.validate_structure(
+        validated.limits_snapshot().max_nodes as u64,
+        validated.limits_snapshot().max_depth,
+    )?;
     Ok(module)
 }
 
@@ -413,8 +418,8 @@ fn decode_type(validated: &Validated<'_>, index: u32) -> Result<TypeSpec> {
 
 /// Decode only the provenance block (cheap metadata read).
 pub fn decode_provenance(bytes: &[u8]) -> Result<Option<Provenance>> {
-    let meta = validate(bytes)?;
-    let _ = meta;
+    // One validation pass: `Validated::new` already runs the full wire check, so a
+    // preceding `validate` would double the work on untrusted bytes.
     let validated = Validated::new(bytes, DecodeOpts::default())?;
     validated.provenance()
 }
@@ -431,7 +436,12 @@ pub fn decode_annotations(bytes: &[u8]) -> Result<Vec<Annotation>> {
                 source: validated.string(a)?.to_string(),
                 expr: NodeId(b),
             },
-            _ => AnnotationKind::AiImmutable(a == 1),
+            _ => {
+                return Err(Error::Annotation {
+                    id: index,
+                    reason: "unknown annotation kind",
+                })
+            }
         };
         out.push(Annotation {
             node: NodeId(node),

@@ -35,10 +35,18 @@ impl NodeView {
         node_kind_name(self.kind)
     }
 
-    /// Child count for container kinds.
+    /// Child count for the kind, matching [`InfinityView::children`].
+    ///
+    /// Every kind that carries references reports them here; a caller that sizes
+    /// or bounds work by `count()` must not skip the children of a scalar that
+    /// points at another node.
     pub fn count(&self) -> u64 {
         match self.kind {
             7 | 8 | 14 | 20 => self.b,
+            15 | 24 => 2,
+            18 | 19 => self.c,
+            12 => u64::from(self.a != u32::MAX as u64),
+            6 | 10 | 11 | 16 | 17 | 21 | 22 => 1,
             _ => 0,
         }
     }
@@ -107,15 +115,19 @@ impl<'a> InfinityView<'a> {
         self.validated.bindings()
     }
 
-    pub fn annotations(&self) -> Result<Vec<(NodeId, u32, u32)>> {
+    /// Annotation records: `(subject, kind, a, b)`.
+    ///
+    /// `b` is the constraint expression node for a constraint annotation; dropping
+    /// it would hide the expression a caller is expected to check.
+    pub fn annotations(&self) -> Result<Vec<(NodeId, u32, u32, u32)>> {
         let mut out = Vec::new();
         for index in 0..self
             .validated
             .span(crate::layout::Section::Annotations)
             .count
         {
-            let (node, kind, a, _b) = self.validated.annotation(index)?;
-            out.push((NodeId(node), kind, a));
+            let (node, kind, a, b) = self.validated.annotation(index)?;
+            out.push((NodeId(node), kind, a, b));
         }
         Ok(out)
     }
@@ -152,7 +164,8 @@ impl<'a> InfinityView<'a> {
     pub fn node_string_id(&self, id: NodeId) -> Result<Option<u32>> {
         let node = self.node(id)?;
         Ok(match node.kind {
-            4 | 13 | 23 => Some(node.aux),
+            // 12 is `Env`, whose variable name is a string id in `aux`.
+            4 | 12 | 13 | 23 => Some(node.aux),
             _ => None,
         })
     }
@@ -242,10 +255,12 @@ impl<'a> InfinityView<'a> {
 
     /// Provenance entries, borrowed.
     ///
-    /// A raw accessor: it returns the stored entries as they are. The encoded
-    /// form is already redacted against the module's secrets, so this is safe
-    /// for a validated image; a caller that builds a view over hand-made bytes
-    /// should use `interop::provenance_json` for output that leaves the process.
+    /// A raw accessor: it returns the stored entries as they are. Canonicalization
+    /// redacts provenance against the module's secrets, so for an image that is
+    /// canonical (`validate_canonical`) the text is already safe. This view only
+    /// proves structure, so a caller that builds it over hand-made or
+    /// non-canonical bytes must use `interop::provenance_json` for output that
+    /// leaves the process.
     pub fn provenance_entries(&self) -> Result<Vec<(String, ProvEntry)>> {
         Ok(self
             .validated

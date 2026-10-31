@@ -17,7 +17,7 @@ the code → regression test first → minimal fix → targeted tests + clippy �
 | I-01 | layout / header | `src/layout.rs` | CLEAN (round 2 open items fixed) | 10 fixed, 1 rejected, 0 open | this commit |
 | I-02 | validate | `src/validate.rs` | **CLEAN** (round 3: 3 high fixed, 10 triaged) | 24 fixed, 10 rejected, 0 open | this commit |
 | I-03 | encode / canonical | `src/encode.rs`, `src/canonical.rs` | **CLEAN** (round 2 fixed two more) | 11 fixed, 3 rejected, 0 open | `aef1efd`, `43b1078` |
-| I-04 | decode / view | `src/decode.rs`, `src/view.rs` | pending | — | — |
+| I-04 | decode / view | `src/decode.rs`, `src/view.rs` | CLEAN | 7 fixed, 3 rejected, 0 open | this commit |
 | I-05 | IR / units | `src/ir.rs`, `src/unit.rs` | pending | — | — |
 | I-06 | stream / delta | `src/stream.rs` | pending | — | — |
 | I-07 | schema | `src/schema.rs` | pending | — | — |
@@ -45,6 +45,25 @@ the code → regression test first → minimal fix → targeted tests + clippy �
 ## Log
 
 Entries are appended per section: date, reviewer path, findings, disposition.
+
+### I-04 decode / zero-copy view — 2026-10-31
+
+| # | Severity | Finding | Disposition |
+|---|---|---|---|
+| 1 | critical | `Validated` derived `Debug`, so `{:?}` printed the image buffer — the secret heap included — as a decimal byte list into any log or panic message | **fixed**: manual `Debug` prints the byte length, the content hash and the node count; `printing_a_view_never_prints_the_secret_heap` (decimal-byte assertion, fails pre-fix) |
+| 2 | high | public `buf()` exposes the secret heap | **rejected**: the caller supplied that buffer. The accessor returns the bytes it was given and creates no reach the caller did not already have |
+| 3 | high | `with_opts(verify_hash: false)` still reports `content_hash()` | **rejected**: the caller explicitly opted out of hash verification; the value is the header's claim, and the docs say so. A caller that needs a trusted identity uses the default options |
+| 4 | high | the `provenance_entries` doc claimed redaction although the view validates structure only | **fixed in docs**: the accessor now says redaction holds for a canonical image (`validate_canonical`) and points non-canonical callers at `interop::provenance_json` |
+| 5 | medium | `decode_annotations` mapped an unknown kind onto `AiImmutable` while the full decoder refused it | **fixed**: both paths return `infinity/annotation`; `an_unknown_annotation_kind_is_refused_by_the_accessor` |
+| 6 | medium | `InfinityView::annotations` dropped `b`, the constraint expression | **fixed**: it returns `(subject, kind, a, b)`; `an_annotation_reports_its_constraint_expression` |
+| 7 | medium | `node_string_id` omitted kind 12, so an `Env` node had no primary string | **fixed**: the env name is the primary string; `an_env_node_reports_its_name_as_the_primary_string` |
+| 8 | medium | `NodeView::count()` returned 0 for kinds that point at another node | **fixed**: it reports the children every kind carries; `count_matches_children_for_every_kind` |
+| 9 | medium | `decode_provenance` validated twice | **fixed**: one `Validated::new` pass |
+| 10 | medium | `dependents()` scans every edge per call and `edges()` materialises the table | **documented**: both are whole-graph queries by contract; a caller that walks them per node is doing O(V·E) work, which the docs now say |
+| 11 | low | `decode_validated` re-validated structure with no depth budget after the wire pass had enforced one | **fixed**: it passes the view's `max_nodes` and `max_depth` |
+| 12 | low | `children()` hand-rolled four kinds | **rejected**: the four branches are the same traversal `node_children` performs; making them share one function is a refactor with no defect behind it |
+
+Gate: clippy clean; `cargo test --all-features` 248 passed, 0 failed.
 
 ### I-01 layout / header — 2026-10-31 (rounds 1 and 2)
 

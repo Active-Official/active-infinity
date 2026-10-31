@@ -60,12 +60,12 @@ Invariants discovered in code comments and tests during the audit (now mapped):
 
 ### H0.2 Fuzz, corpus and coverage
 
-- Eight structure-aware targets cover validate/decode/encode/view, stream
+- Nine structure-aware targets cover validate/decode/encode/view, stream
   reassembly, canonical round-trips, section layout, graph cycles, secret
   positions, unit discriminants and projection agreement. Each asserts a semantic
   invariant, not only “did not crash”.
 - Conformance corpus: 49 `.ainf` images, 46,673 bytes. Fuzz corpora are
-  **committed** under `fuzz/corpus/<target>/` (all targets, 94 seeds total) and
+  **committed** under `fuzz/corpus/<target>/` (all targets, 99 seeds total) and
   documented in `docs/hardening/CORPUS.md`.
 - Coverage (all features, Windows x86_64): 73.44% regions, 71.66% lines,
   75.00% functions, tracked by `docs/hardening/coverage-baseline.json` and the
@@ -169,7 +169,7 @@ Run: `python scripts/negative_controls.py --check`. CI job `negative-controls`.
 | `cargo package --locked` | pass | local run 2026-10-27 |
 | `cargo audit` / `cargo deny check` | pass (1 allowed warning) | local run + CI `supply-chain` |
 | API-surface gate | pass | CI job `api-surface` |
-| Fuzz campaigns (8 targets) | pass | CI 2k/target; nightly 200k/target |
+| Fuzz campaigns (9 targets) | pass | CI 2k/target; nightly 200k/target |
 | Negative controls (6) | pass | local run + CI `negative-controls` |
 | 32-bit i686 lane | pass | `scripts/check_32bit.sh`, Docker |
 | Benchmark matrix | checked in | `benches/codec.rs`, `docs/spec/performance.md` |
@@ -199,7 +199,7 @@ Fresh clone of `Active-Official/active-infinity`, checked out at
 | Lint (both feature sets) | `cargo clippy --locked --all-targets ... -- -D warnings` | pass |
 | Docs | `RUSTDOCFLAGS=-D warnings cargo doc --locked --no-deps --all-features` | pass |
 | API surface | rustdoc JSON + `python scripts/api_surface.py` | clean (1,980 items / 550 functions) |
-| Fuzz | 8 targets, 2,000 runs each, Docker Linux | no crash |
+| Fuzz | 9 targets, 2,000 runs each, Docker Linux | no crash |
 | Red-team | `cargo test --test redteam_battery --test redteam_tests` | 16 + 26 pass |
 | Negative controls | `python scripts/negative_controls.py --check` | 6/6 fail as required |
 | Performance budgets | `cargo test --test perf_budget` | 4 pass |

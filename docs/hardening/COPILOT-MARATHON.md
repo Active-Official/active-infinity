@@ -28,8 +28,8 @@ the code → regression test first → minimal fix → targeted tests + clippy �
 | I-12 | interop / protobuf | `src/interop.rs`, `src/protobuf.rs` | **CLEAN** | 6 fixed, 1 rejected | this commit |
 | I-13 | error codes | `src/error.rs` | **CLEAN** | 6 fixed, 2 rejected | this commit |
 | I-14 | FFI | `ffi/**` | **CLEAN** | 12 fixed, 3 documented | this commit |
-| I-15 | CLI | `cli/active-infinity-cli/**` | pending | — | — |
-| I-16 | fuzz targets | `fuzz/**` | pending | — | — |
+| I-15 | CLI | `cli/active-infinity-cli/**` | **CLEAN** | 13 fixed, 2 documented | this commit |
+| I-16 | fuzz targets | `fuzz/**` | **CLEAN** | 11 fixed, 2 documented | this commit |
 
 ## Cross-cutting passes (after the sections)
 
@@ -529,3 +529,49 @@ Gate: 18 FFI tests (the version, success-ok, unterminated-name, oversized-source
 and fatal-classification cases fail against the pre-fix shim; the alloc-cap test
 cannot be run pre-fix because it allocates a gigabyte). WASM
 `wasm32-unknown-unknown` release build green; Infinity suite green.
+
+### I-15 CLI - 2026-10-31
+
+| # | Severity | Finding | Disposition |
+|---|---|---|---|
+| 1 | high | `stream` read `args[2]`, so `stream <file>` always failed | **fixed**: the command parses its own arguments like every other one; `stream_reassembles_a_valid_stream` (fails pre-fix) |
+| 2 | high | `--sign SEED_HEX` put the seed on argv, visible to other processes, and the parsed array was never cleared | **fixed**: `--sign-file` and `ACTIVE_INFINITY_SIGN_SEED` are the preferred sources, the parsed `[u8; 32]` is zeroized after signing, and the help/man explain the exposure. `a_signing_seed_can_come_from_a_file` |
+| 3 | medium | `bench --iterations` was unbounded (`Vec::with_capacity(N)`) | **fixed**: 1..=1_000_000, otherwise a usage error; `strict_arguments_are_usage_errors` |
+| 4 | medium | `fs::read_to_string` for source, proof sidecar and manifest, and `fs::read` for conformance cases, bypassed the input ceiling | **fixed**: each has its own ceiling (16 MiB source, 16 KiB sidecar, 1 MiB manifest, image ceiling for cases) through one bounded reader and a 1 MiB reserve cap |
+| 5 | medium | `limits_from` used `as u32` (wrap), ignored malformed pairs and never applied limits to `valid` cases | **fixed**: `try_from`, malformed/unknown entries are errors, and `valid` cases validate and decode under the declared limits |
+| 6 | medium | the conformance base was `manifest.parent().parent()`, so a manifest outside `conformance/` lost its cases, and a case path could escape the directory | **fixed**: the base is the manifest's own directory and absolute or `..` case paths are refused; `conformance_uses_the_manifest_directory_as_its_base`, `a_conformance_case_cannot_escape_the_manifest_directory` |
+| 7 | medium | `write_output` truncated in place, followed a symlink, had no input==output guard and no private mode | **fixed**: a `create_new` temp in the same directory, `sync_all`, an atomic rename (which replaces a link entry, not its target), 0600 on Unix, and `ensure_distinct`; `an_output_that_names_the_input_is_refused` |
+| 8 | medium | `flag_number` and `parse_hash` errors lacked the `usage:` prefix, so a bad value exited 1 | **fixed**: every argument error is `usage:` (exit 2), including a bad number and a bad hash |
+| 9 | medium | the default `store get` is integrity-only and the docs did not say so | **fixed**: `store get` prints a note when a stored signature exists but `--verify` was not passed; the man page, README and help make `--verify` explicit. `a_signed_object_is_flagged_when_verification_is_not_requested` |
+| 10 | medium | no arity or flag strictness: extra positionals and flags were ignored, and a flag without a value silently defaulted | **fixed**: `check_flags` / `check_positional` on every command and a `split_args` that refuses a missing value, a duplicate flag and an unknown flag; `strict_arguments_are_usage_errors` |
+| 11 | low | `split_args` and `arg_value` disagreed (first vs last value, silent defaults) | **fixed**: one parser, duplicate flags refused, values passed through `flags` |
+| 12 | low | `read` reserved the declared file size (a sparse 1 GiB file reserved a gigabyte) and truncated on 32-bit | **fixed**: reserve is capped at 1 MiB and the cast is `try_from` |
+| 13 | low | the man page said 0.2.0 and omitted `store signature`, `--sign/--verify/--key` and the `--output` flags; exit-status prose was wrong | **fixed**: the man page is current and a test pins the version, the command list and the new flags against the binary |
+| 14 | low | conformance I/O and aggregate errors carried no `infinity/...` code | **documented, not changed**: a CLI I/O failure is not a codec failure; the man page now says which exit-1 messages carry a code and which are plain I/O text. A fabricated `infinity/…` code for a missing file would be misclassification |
+| 15 | low | `hash`, `decode` and `bench` printed only the code, unlike `validate` | **fixed**: every codec failure prints `code: detail` |
+
+Gate: 23 CLI tests (7 of the new cases fail against the pre-fix binary), CLI
+clippy clean.
+
+### I-16 fuzz - 2026-10-31
+
+| # | Severity | Finding | Disposition |
+|---|---|---|---|
+| 1 | high | `scripts/fuzz_docker.py` omitted `fuzz_compressed_frame`, so the documented Windows/MSVC lane never fuzzed decompression | **fixed**: the target is in `TARGETS`, the script has a `--check` mode, and `tests/fuzz_manifest_tests.rs` fails when the Cargo manifest, the script, either workflow, the README or the corpus index disagree (proved by removing the target) |
+| 2 | high | `nightly.yml` duplicated the fuzz campaign with an older 8-target matrix and no artifact upload | **fixed**: the duplicate job is gone; `nightly.yml` keeps only the coverage floor and `fuzz-nightly.yml` is the canonical campaign |
+| 3 | high | the PR fuzz job discarded crashing inputs | **fixed**: `ci.yml` uploads `fuzz/artifacts` on failure |
+| 4 | high | `fuzz_compressed_frame` scaled its ceiling with the input and asserted nothing | **fixed**: fixed ceilings, a 1 MiB expansion bomb refused at 64 bytes with `infinity/compression`, a large-ceiling round trip, an identity round trip and a zero-ceiling check; 3,000 Docker runs pass |
+| 5 | high | `fuzz_canonical_roundtrip` never toggled the build parity, so its order assertion was vacuous | **fixed**: the parity bit is flipped (with an explicit empty-input case) |
+| 6 | high | `fuzz_unit_discriminants` discarded the result for valid units | **fixed**: a built-in unit must validate; `UNIT_NAMED` without its aux data must be refused with a stable code |
+| 7 | high | `fuzz_graph_cycles` never validated its raw input | **fixed**: every input is passed to `validate` first (Ok decodes and encodes, Err starts with `infinity/`) |
+| 8 | medium | `fuzz_stream_reassembly` accepted a corrupted stream that decoded to different bytes and ignored an incremental finish error | **fixed**: the built stream must decode, the split reassembly must finish, and a corrupted stream must be refused or byte-identical |
+| 9 | medium | `fuzz_decode_infinity` walked up to 4M view nodes and skipped error-code checks | **fixed**: the walk is bounded at 4096 and every validate failure must carry an `infinity/` code |
+| 10 | medium | `common.rs` helpers silently ignore out-of-bounds writes and leaks | **documented**: the helpers are best-effort and every caller re-checks by hashing (`rehash` returns false). A debug-only panic would fire on the partial buffers the harness deliberately constructs |
+| 11 | medium | the secret/projection oracle projects an in-memory module | **partially fixed**: the target already re-projects `decode(encode(module))`; the in-memory projection is the stronger case (it runs before wire redaction). The raw `windows == hash` check stays: it asserts the advertised field without re-implementing the protobuf parser |
+| 12 | medium | `fuzz_docker.py` aborted the campaign on one timeout, used a `-v` mount that can misparse a Windows path, and forwarded no libFuzzer limits | **fixed**: `TimeoutExpired` records a failure and continues, the mount is `--mount type=bind`, and `-timeout` / `-rss_limit_mb` are passed (`--libfuzzer-timeout`, `--rss-limit-mb`) |
+| 13 | low | the fuzz docs said eight targets and 94 seeds; `doc_gate` did not cover them | **fixed**: README, CORPUS and STATUS say nine and 99, and the parity test covers the target lists and that every target has a seed |
+
+Gate: `cargo check --manifest-path fuzz/Cargo.toml` clean; the nine-target Docker
+campaign runs without a crash (2,000 runs each, `fuzz_compressed_frame` also at
+3,000); `tests/fuzz_manifest_tests.rs` green and proved to fail when a target is
+removed from the Docker lane.

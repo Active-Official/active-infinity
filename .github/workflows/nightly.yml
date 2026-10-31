@@ -1,4 +1,8 @@
-name: Nightly fuzz
+name: Nightly coverage
+
+# The fuzz campaign lives in `fuzz-nightly.yml` (the canonical lane: every
+# target, a per-target time budget and artifact upload). This workflow keeps the
+# coverage floor separate so the two campaigns do not duplicate work.
 
 on:
   schedule:
@@ -6,30 +10,6 @@ on:
   workflow_dispatch:
 
 jobs:
-  fuzz:
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        target:
-          - fuzz_decode_infinity
-          - fuzz_stream_reassembly
-          - fuzz_canonical_roundtrip
-          - fuzz_layout_sections
-          - fuzz_graph_cycles
-          - fuzz_secret_positions
-          - fuzz_unit_discriminants
-          - fuzz_projection_agreement
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@nightly
-      - name: Install clang (libFuzzer runtime)
-        run: sudo apt-get update && sudo apt-get install -y clang
-      - name: Install cargo-fuzz
-        run: cargo install cargo-fuzz --locked
-      - name: Long campaign
-        run: cargo fuzz run "${{ matrix.target }}" -- -runs=200000 -print_final_stats=1
-
   coverage:
     runs-on: ubuntu-latest
     steps:

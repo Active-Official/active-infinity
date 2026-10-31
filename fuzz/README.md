@@ -1,6 +1,6 @@
 # Fuzzing
 
-Eight targets cover the untrusted-input surface. Every target drives the
+Nine targets cover the untrusted-input surface. Every target drives the
 shipped public API and asserts a semantic invariant, not only "did not crash".
 
 | Target | Surface | Invariant |
@@ -13,6 +13,7 @@ shipped public API and asserts a semantic invariant, not only "did not crash".
 | `fuzz_secret_positions` | secrets in binding names, keys, annotations, provenance | no export path carries the literal |
 | `fuzz_unit_discriminants` | unit table and quantity unit index | unknown units are `infinity/unknown-unit`; out-of-range is `infinity/unit-ref` |
 | `fuzz_projection_agreement` | JSON and Protobuf projections | both redact, both carry the marker, both are deterministic, protobuf advertises the hash |
+| `fuzz_compressed_frame` | zstd frames and dictionaries | a decode never exceeds its ceiling; a 1 MiB bomb is refused at 64 bytes and round-trips at a fitting ceiling |
 
 ## Running
 

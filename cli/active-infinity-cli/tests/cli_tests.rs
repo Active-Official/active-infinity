@@ -541,3 +541,229 @@ fn an_input_above_the_ceiling_is_refused_before_it_is_read() {
         stderr(&output)
     );
 }
+
+#[test]
+fn stream_reassembles_a_valid_stream() {
+    let dir = sandbox("stream");
+    let image = image(0);
+    let module = decode(&image).expect("decode");
+    let mut bytes = Vec::new();
+    for frame in active_infinity::stream::encode_stream(&module, 4096).expect("stream") {
+        bytes.extend_from_slice(&frame.to_bytes());
+    }
+    let path = dir.join("s.ains");
+    write(&path, &bytes);
+
+    let output = run(&["stream", path.to_str().expect("utf8")]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(stdout(&output).contains("ok bytes="), "{}", stdout(&output));
+
+    // A missing path is a usage error, not a panic or a silent success.
+    let usage = run(&["stream"]);
+    assert_eq!(usage.status.code(), Some(2), "{}", stderr(&usage));
+}
+
+#[test]
+fn a_signing_seed_can_come_from_a_file() {
+    let dir = sandbox("sign-file");
+    let store = dir.join("store");
+    let image_path = dir.join("image.ainf");
+    write(&image_path, &image(0));
+    let seed_path = dir.join("seed.txt");
+    write(&seed_path, &"09".repeat(32).into_bytes());
+
+    let put = run(&[
+        "store",
+        "put",
+        image_path.to_str().expect("utf8"),
+        "--root",
+        store.to_str().expect("utf8"),
+        "--sign-file",
+        seed_path.to_str().expect("utf8"),
+    ]);
+    assert!(put.status.success(), "{}", stderr(&put));
+    let hash = stdout(&put).trim().to_string();
+
+    let get = run(&[
+        "store",
+        "get",
+        &hash,
+        "--root",
+        store.to_str().expect("utf8"),
+        "--verify",
+    ]);
+    assert!(get.status.success(), "{}", stderr(&get));
+
+    // Two seed sources at once are ambiguous.
+    let both = run(&[
+        "store",
+        "put",
+        image_path.to_str().expect("utf8"),
+        "--root",
+        store.to_str().expect("utf8"),
+        "--sign",
+        &"09".repeat(32),
+        "--sign-file",
+        seed_path.to_str().expect("utf8"),
+    ]);
+    assert_eq!(both.status.code(), Some(2), "{}", stderr(&both));
+}
+
+#[test]
+fn a_signed_object_is_flagged_when_verification_is_not_requested() {
+    let dir = sandbox("signed-note");
+    let store = dir.join("store");
+    let image_path = dir.join("image.ainf");
+    write(&image_path, &image(0));
+    let put = run(&[
+        "store",
+        "put",
+        image_path.to_str().expect("utf8"),
+        "--root",
+        store.to_str().expect("utf8"),
+        "--sign",
+        &"09".repeat(32),
+    ]);
+    assert!(put.status.success(), "{}", stderr(&put));
+    let hash = stdout(&put).trim().to_string();
+
+    let plain = run(&[
+        "store",
+        "get",
+        &hash,
+        "--root",
+        store.to_str().expect("utf8"),
+    ]);
+    assert!(plain.status.success(), "{}", stderr(&plain));
+    assert!(
+        stderr(&plain).contains("pass --verify"),
+        "the integrity-only path must point at --verify: {}",
+        stderr(&plain)
+    );
+}
+
+#[test]
+fn strict_arguments_are_usage_errors() {
+    let dir = sandbox("strict");
+    let image_path = dir.join("image.ainf");
+    write(&image_path, &image(0));
+    let path = image_path.to_str().expect("utf8");
+
+    for args in [
+        vec!["validate", path, "extra"],
+        vec!["hash", path, "extra"],
+        vec!["validate", path, "--nope"],
+        vec!["encode", path, "--name"],
+        vec!["bench", "validate", path, "--iterations", "0"],
+        vec!["bench", "validate", path, "--iterations", "999999999999"],
+    ] {
+        let reference: Vec<&str> = args.clone();
+        let output = run(&reference);
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "{args:?}: {}",
+            stderr(&output)
+        );
+    }
+}
+
+#[test]
+fn an_output_that_names_the_input_is_refused() {
+    let dir = sandbox("same-path");
+    let source = dir.join("source.active");
+    write(&source, b"port = 8080\n");
+    let output = run(&[
+        "encode",
+        source.to_str().expect("utf8"),
+        "--output",
+        source.to_str().expect("utf8"),
+    ]);
+    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+}
+
+#[test]
+fn conformance_uses_the_manifest_directory_as_its_base() {
+    let dir = sandbox("conformance-base");
+    write(&dir.join("case.ainf"), &image(0));
+    let manifest = dir.join("manifest.json");
+    write(
+        &manifest,
+        br#"{"version":"test","cases":[{"name":"case","kind":"valid","path":"case.ainf","content_hash":""}]}"#,
+    );
+    let output = run(&[
+        "conformance",
+        "run",
+        "--manifest",
+        manifest.to_str().expect("utf8"),
+    ]);
+    // The case fails on the deliberately empty hash, but it is *found*: the
+    // base is the manifest's own directory.
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    let scorecard: serde_json::Value = serde_json::from_str(&stdout(&output)).expect("scorecard");
+    let detail = scorecard["cases"][0]["detail"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        !detail.contains("cannot read") && !detail.contains("No such file"),
+        "the case was not found: {detail}"
+    );
+}
+
+#[test]
+fn a_conformance_case_cannot_escape_the_manifest_directory() {
+    let dir = sandbox("conformance-escape");
+    let manifest = dir.join("manifest.json");
+    write(
+        &manifest,
+        br#"{"version":"test","cases":[{"name":"escape","kind":"valid","path":"../../etc/passwd"}]}"#,
+    );
+    let output = run(&[
+        "conformance",
+        "run",
+        "--manifest",
+        manifest.to_str().expect("utf8"),
+    ]);
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert!(
+        stdout(&output).contains("escapes the manifest directory"),
+        "{}",
+        stdout(&output)
+    );
+}
+
+#[test]
+fn the_man_page_matches_the_command_surface() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let man = fs::read_to_string(root.join("docs/man/active-infinity-cli.1")).expect("man page");
+    for command in [
+        "encode",
+        "decode",
+        "validate",
+        "hash",
+        "stream",
+        "store",
+        "dict",
+        "proof",
+        "bench",
+        "conformance",
+        "doctor",
+        "help",
+    ] {
+        assert!(man.contains(command), "the man page omits {command}");
+    }
+    assert!(
+        man.contains(env!("CARGO_PKG_VERSION")),
+        "the man page must carry the CLI version {}",
+        env!("CARGO_PKG_VERSION")
+    );
+    assert!(
+        man.contains("--verify"),
+        "the man page must document --verify"
+    );
+    assert!(
+        man.contains("--sign-file"),
+        "the man page must document --sign-file"
+    );
+}

@@ -465,8 +465,16 @@ jobs:
             fuzz_projection_agreement \
             fuzz_compressed_frame; do
             echo "== $target =="
-            cargo fuzz run "$target" -- -runs=2000
+            cargo fuzz run "$target" -- -runs=2000 -timeout=25 -rss_limit_mb=2048 -print_final_stats=1
           done
+      # A crash is only actionable if the input survives the runner.
+      - name: Upload crashing inputs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts
+          path: fuzz/artifacts
+          if-no-files-found: ignore
 
   supply-chain:
     runs-on: ubuntu-latest

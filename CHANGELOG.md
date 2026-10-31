@@ -35,6 +35,27 @@
 - **Secrets**: `SecretBytes` zeroes its buffer with `zeroize` on drop (a volatile
   write the optimizer cannot elide), `has_secret()` recognises `SecretRef`, and
   `TypeSpec::name()` no longer echoes enum members.
+- **CLI** (`active-infinity-cli`): `stream` now takes its path (it read the
+  wrong argument and always failed); every command rejects unknown flags, extra
+  positionals and flags without a value; the signing seed can come from
+  `--sign-file` or `ACTIVE_INFINITY_SIGN_SEED` and the parsed array is zeroized;
+  Active source, proof sidecars and the conformance manifest are read under
+  their own ceilings; output files are written through a same-directory temp and
+  an atomic rename (0600 on Unix) and an output naming an input is refused; the
+  conformance base is the manifest's own directory and a case path that escapes
+  it is refused; limits are parsed with `try_from` and reject malformed or
+  unknown entries; `bench --iterations` is capped; `store get` prints a note when
+  a stored signature exists but `--verify` was not requested; the man page and
+  CLI README match the surface and carry the CLI version.
+- **Fuzz**: a parity test keeps `fuzz/Cargo.toml`, `scripts/fuzz_docker.py`,
+  both workflows, the fuzz README and the corpus index on the same nine targets
+  (the Docker lane had silently dropped `fuzz_compressed_frame`). The
+  compressed-frame target now proves a fixed ceiling (a 1 MiB bomb refused at 64
+  bytes), the canonical-order target actually toggles the build parity, a valid
+  unit must validate, the graph target validates its raw input, a corrupted
+  stream must be refused or unchanged, and the decode target bounds its view
+  walk. The duplicate nightly fuzz lane is gone, the CI fuzz job uploads
+  crashing inputs, and both lanes pass `-timeout` / `-rss_limit_mb`.
 - **Errors** (`error.rs`, `stream.rs`, `layout.rs`): `infinity/evaluation` is a
   documented code with `Error::sub_code()` exposing the evaluator's class
   (`S001`, `T001`, ...) without parsing the message; `is_fatal()` now matches its

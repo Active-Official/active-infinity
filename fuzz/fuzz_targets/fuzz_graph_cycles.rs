@@ -23,6 +23,20 @@ use active_infinity::{decode, encode, validate, InfinityModule, Inode};
 mod common;
 
 fuzz_target!(|data: &[u8]| {
+    // The raw input is a full image candidate: the validator must answer with
+    // a stable code, and a validated image must decode and re-encode.
+    match validate(data) {
+        Ok(_) => {
+            let module = decode(data).expect("a validated image decodes");
+            let _ = encode(&module).expect("a decoded module encodes");
+        }
+        Err(error) => assert!(
+            error.code().starts_with("infinity/"),
+            "unexpected code {}",
+            error.code()
+        ),
+    }
+
     if data.len() < 2 {
         return;
     }

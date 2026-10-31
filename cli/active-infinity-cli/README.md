@@ -12,9 +12,9 @@ active-infinity-cli <command> [options]
   decode <image.ainf>
   validate <image.ainf>
   hash <image.ainf>
-  stream <image.ainf>
-  store put <image.ainf> [--root DIR]
-  store get <hash> [--root DIR] [--output PATH]
+  stream <stream.ains>
+  store put <image.ainf> [--root DIR] [--sign-file PATH]
+  store get <hash> [--root DIR] [--output PATH] [--verify] [--key PUBLIC_HEX]
   dict train --output <dict> [--size N] <sample>...
   dict apply --dictionary <dict> [--decompress] [--level N] [--max-bytes N] <input>
   proof issue <image> [--schema PATH] [--output PATH]
@@ -36,7 +36,7 @@ Without `--output`, commands that emit bytes write to stdout.
 | `validate` | Fail-closed validation; prints node and byte counts on success. |
 | `hash` | Blake3 content hash over the canonical image, 64 hex characters. |
 | `stream` | Reassemble an AINS stream and print the image hash. |
-| `store put` / `store get` | Content-addressed local store (default root `.active-store`). `put` prints the hash. |
+| `store put` / `store get` | Content-addressed local store (default root `.active-store`). `put` prints the hash; `get --verify` requires a valid envelope and `--key` pins the signer. |
 | `dict train` | Train a zstd dictionary from representative images or frames. |
 | `dict apply` | Compress with a dictionary, or decompress with `--decompress` and an output ceiling. |
 | `proof issue` | Write a JSON sidecar: hash, size, counts, secret count, dialect and an optional companion-schema hash. |
@@ -63,8 +63,8 @@ active-infinity-cli hash app.ainf
 active-infinity-cli decode app.ainf
 
 # Content-addressed store
-active-infinity-cli store put app.ainf --root .active-store
-active-infinity-cli store get <hash> --root .active-store --output restored.ainf
+active-infinity-cli store put app.ainf --root .active-store --sign-file seed.txt
+active-infinity-cli store get <hash> --root .active-store --verify --output restored.ainf
 
 # Dictionary compression (hashes stay over uncompressed bytes)
 active-infinity-cli dict train --output frames.dict tests/vectors/valid/*.ainf

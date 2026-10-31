@@ -27,10 +27,17 @@ use active_infinity::{
 mod common;
 
 fuzz_target!(|data: &[u8]| {
-    // 1. The gate always answers.
+    // 1. The gate always answers with a stable code.
     let meta = match validate(data) {
         Ok(meta) => meta,
-        Err(_) => return,
+        Err(error) => {
+            assert!(
+                error.code().starts_with("infinity/"),
+                "unexpected code {}",
+                error.code()
+            );
+            return;
+        }
     };
 
     // 2. A validated image decodes, densely and under the strict options.
@@ -78,7 +85,10 @@ fuzz_target!(|data: &[u8]| {
     // 4. Zero-copy views never panic on validated input.
     if let Ok(view) = InfinityView::new(data, Limits::default()) {
         assert_eq!(view.node_count(), meta.nodes);
-        for index in 0..view.node_count() {
+        // The view path is O(nodes); cap the walk so one large valid input
+        // cannot spend the whole fuzz budget. Large-graph projection work is
+        // gated separately below.
+        for index in 0..view.node_count().min(4096) {
             let id = active_infinity::NodeId(index);
             if let Ok(node) = view.node(id) {
                 let _ = view.children(id);

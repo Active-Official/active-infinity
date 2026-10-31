@@ -41,18 +41,17 @@ fuzz_target!(|data: &[u8]| {
     }
 
     // 1. Whole stream decodes to the whole-module image.
-    if let Ok(streamed) = decode_stream(&stream) {
-        assert_eq!(streamed.image, whole, "reassembly changed the image");
-        assert_eq!(
-            streamed.content_hash,
-            hash_image(&whole).expect("hash"),
-            "reassembly changed the content hash"
-        );
-        assert!(
-            validate(&streamed.image).is_ok(),
-            "a reassembled image must validate"
-        );
-    }
+    let streamed = decode_stream(&stream).expect("a stream we just built must decode");
+    assert_eq!(streamed.image, whole, "reassembly changed the image");
+    assert_eq!(
+        streamed.content_hash,
+        hash_image(&whole).expect("hash"),
+        "reassembly changed the content hash"
+    );
+    assert!(
+        validate(&streamed.image).is_ok(),
+        "a reassembled image must validate"
+    );
 
     // 2. Arbitrary byte splits reassemble identically.
     let mut decoder = StreamDecoder::new();
@@ -68,9 +67,10 @@ fuzz_target!(|data: &[u8]| {
         selector += 1;
     }
     if cursor == stream.len() {
-        if let Ok(streamed) = decoder.finish() {
-            assert_eq!(streamed.image, whole, "split reassembly changed the image");
-        }
+        let streamed = decoder
+            .finish()
+            .expect("a fully consumed valid stream must finish");
+        assert_eq!(streamed.image, whole, "split reassembly changed the image");
     }
 
     // 3. Arbitrary bytes are total.
@@ -87,12 +87,18 @@ fuzz_target!(|data: &[u8]| {
         let mut corrupted = stream.clone();
         let index = 1 + (data[1] as usize % corrupted.len());
         corrupted[index] ^= 1 << (data[0] % 8);
-        if let Ok(streamed) = decode_stream(&corrupted) {
-            let reencoded = encode(&streamed.module).expect("a decoded module encodes");
-            assert!(
-                validate(&reencoded).is_ok(),
-                "a corrupted stream produced a module that does not validate"
-            );
+        match decode_stream(&corrupted) {
+            // A one-bit change either fails the frame checksum or reaches the
+            // same bytes; accepting different bytes would be silent corruption.
+            Ok(streamed) => assert_eq!(
+                streamed.image, whole,
+                "a corrupted stream produced different bytes"
+            ),
+            Err(error) => assert!(
+                error.code().starts_with("infinity/"),
+                "unexpected code {}",
+                error.code()
+            ),
         }
     }
 

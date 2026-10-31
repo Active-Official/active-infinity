@@ -76,8 +76,18 @@ fuzz_target!(|data: &[u8]| {
         let outcome = validate(&unknown);
         // `0..=UNIT_MAX_BUILTIN` are valid units and `UNIT_NAMED` is the named
         // escape hatch; everything else must be refused.
-        if UnitTag::from_discriminant(disc).is_some() || disc == active_infinity::unit::UNIT_NAMED {
-            let _ = outcome;
+        if let Some(_unit) = UnitTag::from_discriminant(disc) {
+            outcome.expect("a built-in unit discriminant must validate");
+        } else if disc == active_infinity::unit::UNIT_NAMED {
+            // `UNIT_NAMED` carries its name in the aux table; rewriting a
+            // built-in entry to it leaves that reference dangling, so the
+            // image must be refused with a stable code.
+            let error = outcome.expect_err("a named unit without its aux data must be refused");
+            assert!(
+                error.code().starts_with("infinity/"),
+                "unexpected code {}",
+                error.code()
+            );
         } else {
             let error = outcome.expect_err("an unknown unit discriminant must be refused");
             assert_eq!(error.code(), "infinity/unknown-unit");

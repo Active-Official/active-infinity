@@ -38,6 +38,7 @@ size limit, short count, trailing bytes, not canonical, secret entry.
 | `fuzz_secret_positions` | `fuzz_targets/fuzz_secret_positions.rs` | `full.ainf`, `secret_entry.ainf`, generated metadata-copy module | no export path carries the literal |
 | `fuzz_unit_discriminants` | `fuzz_targets/fuzz_unit_discriminants.rs` | `bad_unit.ainf`, `unit_ref.ainf`, generated unknown unit | unknown units are `infinity/unknown-unit`; out-of-range is `infinity/unit-ref` |
 | `fuzz_projection_agreement` | `fuzz_targets/fuzz_projection_agreement.rs` | `full.ainf`, `extensions.ainf`, generated secret module | JSON and Protobuf agree on redaction, marker, determinism and hash |
+| `fuzz_compressed_frame` | `fuzz_targets/fuzz_compressed_frame.rs` | generated zstd frames, a 1 MiB expansion bomb, dictionary splits | a decode never exceeds its ceiling; the bomb is refused at 64 bytes and fits a large ceiling; round trip is the identity |
 
 All targets live in `fuzz/fuzz_targets/`; `common.rs` holds shared fixture and
 wire-layout helpers but is not a target. `fuzz/Cargo.toml` declares each binary.
@@ -54,6 +55,7 @@ wire-layout helpers but is not a target. `fuzz/Cargo.toml` declares each binary.
 | `fuzz/corpus/fuzz_secret_positions` | 6 |
 | `fuzz/corpus/fuzz_unit_discriminants` | 5 |
 | `fuzz/corpus/fuzz_projection_agreement` | 4 |
+| `fuzz/corpus/fuzz_compressed_frame` | 5 |
 
 `fuzz/target` and `fuzz/artifacts` remain ignored.
 

@@ -68,8 +68,14 @@ fuzz_target!(|data: &[u8]| {
 
     // Independent encodes of the same logical module agree.
     let one = encode(&reverse_build(data)).expect("build encodes");
+    // Flip the parity bit: an empty input builds in order 0, so the second
+    // build needs order 1 to exercise the reversed construction.
     let mut reordered = data.to_vec();
-    reordered.push(1);
+    if reordered.is_empty() {
+        reordered.push(1);
+    } else {
+        reordered[0] ^= 1;
+    }
     let two = encode(&reverse_build(&reordered)).expect("build encodes");
     assert_eq!(one, two, "construction order changed canonical bytes");
 

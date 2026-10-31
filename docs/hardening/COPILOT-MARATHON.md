@@ -21,7 +21,7 @@ the code → regression test first → minimal fix → targeted tests + clippy �
 | I-05 | IR / units | `src/ir.rs`, `src/unit.rs` | CLEAN | 5 fixed, 2 rejected, 1 deferred | this commit |
 | I-06 | stream and delta | `src/stream.rs` | CLEAN | 7 fixed, 2 rejected, 0 open | this commit |
 | I-07 | schema class | `src/schema.rs` | CLEAN | 6 fixed, 1 rejected | this commit |
-| I-08 | store | `src/store.rs` | pending | — | — |
+| I-08 | store | `src/store.rs` | **CLEAN** | 7 fixed, 1 rejected | this commit |
 | I-09 | compress | `src/compress.rs` | pending | — | — |
 | I-10 | signature / proof | `src/signature.rs`, `src/proof.rs` | pending | — | — |
 | I-11 | merge | `src/merge.rs` | pending | — | — |
@@ -341,3 +341,41 @@ truth, and three tests pin it: canonical bytes, structural equality and the
 decode/encode identity. A module whose binding-only nodes were pushed out of
 name order re-encodes to a different (correct) hash; `validate_canonical` calls
 the old bytes not canonical and the changelog records the change.
+
+### I-08 store - 2026-10-31
+
+
+
+| # | Severity | Finding | Disposition |
+|---|---|---|---|
+| 1 | high | scratch name was `pid` + wall-clock nanos and the write used `fs::write`, which follows a symbolic link: a planted name redirects the image into an attacker-chosen file | **fixed**: scratch files are opened with `O_CREAT|O_EXCL` (Rust `create_new`) under a per-store slot counter; an occupied slot costs a retry, never a write. `put_does_not_write_through_a_planted_scratch_path` occupies slot 0 and asserts the victim file is unchanged |
+| 2 | high | `fs::rename` replaces the destination, so the promised "never overwritten" only held by luck of platform behaviour, and a second `.sig` silently replaced the first | **fixed**: commit is `fs::hard_link`, which is atomic and fails with `AlreadyExists` on Unix and Windows; a race is resolved by comparing bytes. `put_signed_accepts_the_same_envelope_twice` (identical envelope is a no-op) and `put_signed_refuses_a_second_envelope_for_the_same_image` |
+| 3 | high | every read (`put` comparison, `get`, `get_signature`) allocated and read the whole file before any `Limits` check | **fixed**: `read_bounded` checks the metadata size, reads through `take(limit + 1)`, and reports `infinity/limit`; `get_refuses_an_object_larger_than_the_read_limit` and `put_refuses_an_existing_object_larger_than_the_read_limit` plant a sparse 1 GiB + 8 file |
+| 4 | high | `get` used `validate` (structural only) while `put` enforced `validate_canonical`, so a non-canonical image planted at its own key was returned | **fixed**: `get` proves the canonical form and compares the proven content hash; `get_refuses_a_non_canonical_image_planted_at_its_hash` clears the canonical flag and rewrites the header hash so only the canonical proof can catch it |
+| 5 | medium | images carry the secret heap and were written world-readable, with the directory default-mode; the spec was silent on at-rest exposure | **fixed**: Unix directory `0700`, objects `0600`; the threat model is stated in `store.md` and the module docs (a shared store is a shared secret domain). `store_objects_and_directory_are_private` |
+| 6 | medium | `put_signed` overwrote an existing envelope; one image could acquire a second, conflicting signer | **fixed** by the no-clobber commit plus the one-object-one-envelope rule (see 2) |
+| 7 | medium | `len` counted any `*.ainf` name (garbage, uppercase, directories) and a `read_dir` error read as zero; `contains` accepted a link | **fixed**: only regular files named `<64 lowercase hex>.ainf` count; `try_len` reports the read failure instead of reporting empty; `contains` uses `symlink_metadata` so a link is not an object. `len_counts_objects_not_file_names` |
+| 8 | low | not-found, key mismatch and permission failures share `infinity/store`, and the distinct `Display` text is an existence oracle | **rejected as a code change, documented as a contract**: the store is a local API and the distinctions are operator diagnostics. `store.md` and the rustdoc now require a service in front of a store to map every `infinity/store` failure to one response and never forward `Display`; `contains` is documented as a snapshot |
+
+Residuals recorded rather than changed:
+
+- A content-addressed store is a confirmation oracle by construction: a caller
+  that can ask `contains`/`get` can test a guessed hash without the secret. This
+  is inherent to deduplication and is now stated in `store.md`.
+- `get_verified` reads the image and its envelope once each and compares the
+  bytes it holds in memory; a file replaced between the two reads is caught by
+  the comparison (it cannot produce a valid signature over different bytes).
+  There is no further atomicity to add without a locking protocol the format
+  does not define.
+- `Store::open` now refuses a symbolic-link root, which closes the last
+  path-resolution hazard the review listed.
+
+Gate: `cargo fmt --all`; clippy clean on `--all-features` and
+`--no-default-features`; `cargo test --all-features` 274 passed, 0 failed
+(7 new in `tests/marathon_store_tests.rs`, five proved to fail against the
+pre-fix tree by stashing `src/store.rs`); `--no-default-features` suite green.
+
+Two efficiency fixes came with the same change, with no numbers claimed: `put`
+and `get` now take the content hash from the validation result instead of
+calling `content_hash`, which re-validated the whole image a second time, and
+`get` no longer validates twice on the canonical path.

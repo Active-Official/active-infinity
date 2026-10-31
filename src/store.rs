@@ -3,26 +3,73 @@
 //! The key is the Blake3 content hash of a validated canonical image. Paths are
 //! derived only from the hash; callers never supply a path. Writes are atomic
 //! and a second put of identical bytes is a deduplicated no-op.
+//!
+//! # Threat model
+//!
+//! The store directory is trusted to hold objects, not to authenticate its
+//! readers: it is created `0700` and objects are written `0600` on Unix, but a
+//! local user who can already see the directory can read every image, secrets
+//! included. A failed lookup is also an existence oracle, so a service in front
+//! of a store must map every `infinity/store` failure to one response instead of
+//! forwarding [`std::fmt::Display`].
 
-use std::fs;
+use std::fs::{self, File, OpenOptions};
+use std::io::{ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, SystemTime};
 
+use crate::layout::Limits;
 #[cfg(feature = "signatures")]
 use crate::SignedImage;
-use crate::{content_hash, encode, validate, Error, InfinityModule, Result};
+use crate::{encode, validate::validate_canonical, Error, InfinityModule, Result};
+
+/// Temporary slots a single put may try before giving up. Each attempt is an
+/// exclusive create, so an occupied slot costs one failed open, never a write.
+const SCRATCH_ATTEMPTS: u64 = 64;
+/// Envelope overhead over the image: magic, version, key and signature.
+#[cfg(feature = "signatures")]
+const SIGNATURE_OVERHEAD: u64 = 4096;
+/// Scratch files older than this are crashes, not work in progress.
+const STALE_SCRATCH: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// A local directory store keyed by the canonical Blake3 hash.
 #[derive(Debug, Clone)]
 pub struct Store {
     root: PathBuf,
+    /// Scratch slot counter, per store instance. The names are guessable on
+    /// purpose: they are only ever opened with `create_new`, so an occupied
+    /// name costs a retry and can never redirect a write.
+    scratch: Arc<AtomicU64>,
 }
 
 impl Store {
     /// Open or create a store directory.
+    ///
+    /// A root that is a symbolic link or not a directory is refused: following
+    /// a link would let whoever controls the link choose where objects land.
+    /// The directory is created owner-only on Unix.
     pub fn open(root: impl Into<PathBuf>) -> Result<Self> {
         let root = root.into();
-        fs::create_dir_all(&root).map_err(|_| Error::Store("cannot create store directory"))?;
-        Ok(Self { root })
+        match fs::symlink_metadata(&root) {
+            Ok(meta) => {
+                if meta.file_type().is_symlink() {
+                    return Err(Error::Store("store root is a symbolic link"));
+                }
+                if !meta.is_dir() {
+                    return Err(Error::Store("store root is not a directory"));
+                }
+            }
+            Err(error) if error.kind() == ErrorKind::NotFound => create_store_dir(&root)?,
+            Err(_) => return Err(Error::Store("cannot inspect store directory")),
+        }
+        let store = Self {
+            root,
+            scratch: Arc::new(AtomicU64::new(0)),
+        };
+        store.sweep_stale_scratch();
+        Ok(store)
     }
 
     /// Store directory.
@@ -36,41 +83,28 @@ impl Store {
     /// re-encodes differently would otherwise get a second key for one logical
     /// module, and a signature over it would bind bytes nobody can reproduce.
     pub fn put(&self, image: &[u8]) -> Result<[u8; 32]> {
-        crate::validate::validate_canonical(image, crate::layout::Limits::default())?;
-        let hash = content_hash(image)?;
+        let limit = object_limit();
+        let meta = validate_canonical(image, Limits::default())?;
+        let hash = meta.content_hash;
         let path = self.path_for(&hash);
-        if let Ok(existing) = fs::read(&path) {
-            if existing == image {
-                return Ok(hash);
-            }
-            return Err(Error::Store("hash collision or corrupt existing object"));
-        }
-        let temp = path.with_extension(format!(
-            "tmp-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|duration| duration.as_nanos())
-                .unwrap_or(0)
-        ));
-        fs::write(&temp, image).map_err(|_| Error::Store("cannot write object"))?;
-        match fs::rename(&temp, &path) {
-            Ok(()) => Ok(hash),
-            Err(_) if path.exists() => {
-                let _ = fs::remove_file(&temp);
-                let existing =
-                    fs::read(&path).map_err(|_| Error::Store("cannot read raced object"))?;
-                if existing == image {
-                    Ok(hash)
-                } else {
-                    Err(Error::Store("object exists with different bytes"))
+        match fs::symlink_metadata(&path) {
+            Ok(existing) => {
+                if !existing.is_file() {
+                    return Err(Error::Store("object path is not a regular file"));
                 }
+                // Read through the same bound as `get`: a planted oversized
+                // file must not be pulled into memory to compare it.
+                let stored = read_bounded(&path, limit)?;
+                if stored == image {
+                    return Ok(hash);
+                }
+                return Err(Error::Store("object exists with different bytes"));
             }
-            Err(_) => {
-                let _ = fs::remove_file(&temp);
-                Err(Error::Store("cannot commit object"))
-            }
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(_) => return Err(Error::Store("cannot inspect object")),
         }
+        self.store_bytes(&path, image, limit)?;
+        Ok(hash)
     }
 
     /// Encode and store a module.
@@ -78,21 +112,27 @@ impl Store {
         self.put(&encode(module)?)
     }
 
-    /// Get an object by hash. Revalidates and rechecks the hash before return.
+    /// Get an object by hash.
+    ///
+    /// The bytes are read under the default size ceiling, proven canonical and
+    /// checked against the requested key before they are returned. A symbolic
+    /// link at the object path is refused; objects are regular files.
     pub fn get(&self, hash: &[u8; 32]) -> Result<Vec<u8>> {
-        let path = self.path_for(hash);
-        let image = fs::read(&path).map_err(|_| Error::Store("object not found"))?;
-        validate(&image)?;
-        let actual = content_hash(&image)?;
-        if &actual != hash {
-            return Err(Error::Store("object hash mismatch"));
+        let image = read_bounded(&self.path_for(hash), object_limit())?;
+        let meta = validate_canonical(&image, Limits::default())?;
+        if &meta.content_hash != hash {
+            return Err(Error::Store("object does not match its key"));
         }
         Ok(image)
     }
 
-    /// Whether the store contains an object for this hash.
+    /// Whether the store contains a regular object file for this hash.
+    ///
+    /// This is a snapshot: a `contains` answer does not reserve the object, so
+    /// a later `get` can still fail. It never reports a symbolic link or a
+    /// directory as an object.
     pub fn contains(&self, hash: &[u8; 32]) -> bool {
-        self.path_for(hash).is_file()
+        fs::symlink_metadata(self.path_for(hash)).is_ok_and(|meta| meta.is_file())
     }
 
     #[cfg(feature = "signatures")]
@@ -101,24 +141,21 @@ impl Store {
     /// The envelope is verified before anything is written, so a store never
     /// holds a signature that does not match its object. The image is stored
     /// through [`Store::put`], which validates it and deduplicates bytes.
+    ///
+    /// One object has one envelope: re-storing the identical envelope is a
+    /// no-op on every platform, and a second envelope for the same image (a
+    /// different signer, or different signature bytes) is refused rather than
+    /// replacing evidence that may already be pinned by a reader.
     pub fn put_signed(&self, signed: &SignedImage) -> Result<[u8; 32]> {
         signed.verify()?;
         let hash = signed.content_hash()?;
         self.put(&signed.image)?;
         let path = self.path_for_signature(&hash);
-        let temp = path.with_extension(format!(
-            "sig-tmp-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|duration| duration.as_nanos())
-                .unwrap_or(0)
-        ));
-        fs::write(&temp, signed.to_bytes()).map_err(|_| Error::Store("cannot write signature"))?;
-        fs::rename(&temp, &path).map_err(|_| {
-            let _ = fs::remove_file(&temp);
-            Error::Store("cannot commit signature")
-        })?;
+        self.store_bytes(
+            &path,
+            &signed.to_bytes(),
+            object_limit().saturating_add(SIGNATURE_OVERHEAD),
+        )?;
         Ok(hash)
     }
 
@@ -129,11 +166,15 @@ impl Store {
     /// fails verification, or one that covers a different object, is an error.
     pub fn get_signature(&self, hash: &[u8; 32]) -> Result<Option<SignedImage>> {
         let path = self.path_for_signature(hash);
-        let bytes = match fs::read(&path) {
-            Ok(bytes) => bytes,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(_) => return Err(Error::Store("cannot read signature")),
-        };
+        match fs::symlink_metadata(&path) {
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+            Err(_) => return Err(Error::Store("cannot inspect signature")),
+            Ok(meta) if !meta.is_file() => {
+                return Err(Error::Store("signature path is not a regular file"))
+            }
+            Ok(_) => {}
+        }
+        let bytes = read_bounded(&path, object_limit().saturating_add(SIGNATURE_OVERHEAD))?;
         let signed = SignedImage::from_bytes(&bytes)?;
         if &signed.content_hash()? != hash {
             return Err(Error::Signature(
@@ -182,15 +223,31 @@ impl Store {
     }
 
     /// Number of stored objects.
+    ///
+    /// A directory that cannot be read counts as empty; use [`Store::try_len`]
+    /// when the difference matters.
     pub fn len(&self) -> usize {
-        fs::read_dir(&self.root)
-            .map(|entries| {
-                entries
-                    .filter_map(std::result::Result::ok)
-                    .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "ainf"))
-                    .count()
-            })
-            .unwrap_or(0)
+        self.try_len().unwrap_or(0)
+    }
+
+    /// Number of stored objects, failing when the directory cannot be read.
+    ///
+    /// Only regular files named `<64 lowercase hex>.ainf` count: a hand-placed
+    /// name, a directory or a link is not an object.
+    pub fn try_len(&self) -> Result<usize> {
+        let mut count = 0;
+        for entry in
+            fs::read_dir(&self.root).map_err(|_| Error::Store("cannot read store directory"))?
+        {
+            let entry = entry.map_err(|_| Error::Store("cannot read store directory"))?;
+            if !is_object_name(&entry.file_name()) {
+                continue;
+            }
+            if entry.file_type().is_ok_and(|kind| kind.is_file()) {
+                count += 1;
+            }
+        }
+        Ok(count)
     }
 
     /// True when the store is empty.
@@ -199,13 +256,238 @@ impl Store {
     }
 
     fn path_for(&self, hash: &[u8; 32]) -> PathBuf {
-        let name: String = hash.iter().map(|byte| format!("{byte:02x}")).collect();
-        self.root.join(format!("{name}.ainf"))
+        self.root.join(format!("{}.ainf", hex32(hash)))
     }
 
     #[cfg(feature = "signatures")]
     fn path_for_signature(&self, hash: &[u8; 32]) -> PathBuf {
-        let name: String = hash.iter().map(|byte| format!("{byte:02x}")).collect();
-        self.root.join(format!("{name}.sig"))
+        self.root.join(format!("{}.sig", hex32(hash)))
     }
+
+    /// Write `bytes` to a fresh scratch file and commit it at `dest` without
+    /// replacing an existing object.
+    fn store_bytes(&self, dest: &Path, bytes: &[u8], limit: u64) -> Result<()> {
+        let name = dest
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or(Error::Store("invalid object name"))?;
+        let (mut file, temp) = self.scratch_file(name)?;
+        let written = file.write_all(bytes).and_then(|()| file.sync_all());
+        drop(file);
+        if written.is_err() {
+            let _ = fs::remove_file(&temp);
+            return Err(Error::Store("cannot write object"));
+        }
+        self.commit(&temp, dest, bytes, limit)
+    }
+
+    /// Create a new scratch file under the store root.
+    ///
+    /// `create_new` is the load-bearing part: it is `O_CREAT|O_EXCL`, which
+    /// refuses a path that already exists, symbolic link or not, on Unix and
+    /// Windows alike. A pre-planted name therefore costs one retry instead of
+    /// redirecting the write into somebody else's file.
+    fn scratch_file(&self, name: &str) -> Result<(File, PathBuf)> {
+        for _ in 0..SCRATCH_ATTEMPTS {
+            let slot = self.scratch.fetch_add(1, Ordering::Relaxed);
+            let path = self
+                .root
+                .join(format!(".{name}.tmp.{}.{slot}", std::process::id()));
+            match create_new_file(&path) {
+                Ok(file) => return Ok((file, path)),
+                Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
+                Err(_) => return Err(Error::Store("cannot create a temporary object")),
+            }
+        }
+        Err(Error::Store("cannot create a temporary object"))
+    }
+
+    /// Give the scratch file its final name without clobbering an existing
+    /// object.
+    ///
+    /// A hard link is the atomic no-replace primitive that both Unix and
+    /// Windows provide. Filesystems without hard links fall back to a rename
+    /// guarded by an existence check; that window is harmless because readers
+    /// validate what they find and refuse a partial object.
+    fn commit(&self, temp: &Path, dest: &Path, bytes: &[u8], limit: u64) -> Result<()> {
+        match fs::hard_link(temp, dest) {
+            Ok(()) => {
+                let _ = fs::remove_file(temp);
+                Ok(())
+            }
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => {
+                let _ = fs::remove_file(temp);
+                self.compare_existing(dest, bytes, limit)
+            }
+            Err(_) if dest.exists() => {
+                let _ = fs::remove_file(temp);
+                self.compare_existing(dest, bytes, limit)
+            }
+            Err(_) => match fs::rename(temp, dest) {
+                Ok(()) => Ok(()),
+                Err(error) if error.kind() == ErrorKind::AlreadyExists => {
+                    let _ = fs::remove_file(temp);
+                    self.compare_existing(dest, bytes, limit)
+                }
+                Err(_) => {
+                    let _ = fs::remove_file(temp);
+                    Err(Error::Store("cannot commit object"))
+                }
+            },
+        }
+    }
+
+    /// A raced or pre-existing object is accepted only when it is byte-identical.
+    fn compare_existing(&self, dest: &Path, bytes: &[u8], limit: u64) -> Result<()> {
+        let existing = read_bounded(dest, limit)?;
+        if existing == bytes {
+            Ok(())
+        } else {
+            Err(Error::Store("object exists with different bytes"))
+        }
+    }
+
+    /// Remove scratch files left behind by a process that died mid-write.
+    ///
+    /// Only names this store creates are considered, and only after a day, so
+    /// a concurrent writer's file is never touched.
+    fn sweep_stale_scratch(&self) {
+        let Ok(entries) = fs::read_dir(&self.root) else {
+            return;
+        };
+        let now = SystemTime::now();
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else {
+                continue;
+            };
+            if !is_scratch_name(name) {
+                continue;
+            }
+            let Ok(meta) = fs::symlink_metadata(entry.path()) else {
+                continue;
+            };
+            if !meta.is_file() {
+                continue;
+            }
+            let Ok(modified) = meta.modified() else {
+                continue;
+            };
+            if now
+                .duration_since(modified)
+                .is_ok_and(|age| age > STALE_SCRATCH)
+            {
+                let _ = fs::remove_file(entry.path());
+            }
+        }
+    }
+}
+
+/// The largest object `get` will read: the codec's own ceiling for one image.
+fn object_limit() -> u64 {
+    Limits::default().max_total_bytes
+}
+
+/// Read a regular file no larger than `limit`, refusing links and directories.
+///
+/// The size is checked from metadata before any allocation, and the read is
+/// bounded again so a file that grows after the check still cannot exceed the
+/// ceiling.
+fn read_bounded(path: &Path, limit: u64) -> Result<Vec<u8>> {
+    let meta = fs::symlink_metadata(path).map_err(|error| match error.kind() {
+        ErrorKind::NotFound => Error::Store("object not found"),
+        _ => Error::Store("cannot inspect object"),
+    })?;
+    if !meta.is_file() {
+        return Err(Error::Store("object is not a regular file"));
+    }
+    if meta.len() > limit {
+        return Err(Error::Limit {
+            kind: "store object bytes",
+            limit,
+        });
+    }
+    let file = File::open(path).map_err(|_| Error::Store("cannot read object"))?;
+    let mut bytes = Vec::with_capacity(meta.len() as usize);
+    file.take(limit.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|_| Error::Store("cannot read object"))?;
+    if bytes.len() as u64 > limit {
+        return Err(Error::Limit {
+            kind: "store object bytes",
+            limit,
+        });
+    }
+    Ok(bytes)
+}
+
+fn create_new_file(path: &Path) -> std::io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options.open(path)
+}
+
+fn create_store_dir(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        let mut builder = fs::DirBuilder::new();
+        builder.recursive(true).mode(0o700);
+        builder
+            .create(path)
+            .map_err(|_| Error::Store("cannot create store directory"))
+    }
+    #[cfg(not(unix))]
+    {
+        fs::create_dir_all(path).map_err(|_| Error::Store("cannot create store directory"))
+    }
+}
+
+/// `<64 lowercase hex>.ainf`, the only name `len` counts.
+fn is_object_name(name: &std::ffi::OsStr) -> bool {
+    let Some(name) = name.to_str() else {
+        return false;
+    };
+    let Some(stem) = name.strip_suffix(".ainf") else {
+        return false;
+    };
+    stem.len() == 64
+        && stem
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+/// A scratch name: `.` + object name + `.tmp.` + pid + `.` + slot.
+fn is_scratch_name(name: &str) -> bool {
+    let Some(rest) = name.strip_prefix('.') else {
+        return false;
+    };
+    match rest.rsplit_once(".tmp.") {
+        Some((_, tail)) => {
+            let mut parts = tail.split('.');
+            matches!(
+                (parts.next(), parts.next()),
+                (Some(pid), Some(slot))
+                    if !pid.is_empty()
+                        && pid.bytes().all(|byte| byte.is_ascii_digit())
+                        && !slot.is_empty()
+                        && slot.bytes().all(|byte| byte.is_ascii_digit())
+            ) && parts.next().is_none()
+        }
+        None => false,
+    }
+}
+
+fn hex32(hash: &[u8; 32]) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(64);
+    for byte in hash {
+        let _ = write!(out, "{byte:02x}");
+    }
+    out
 }

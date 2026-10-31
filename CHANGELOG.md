@@ -37,6 +37,19 @@
   `TypeSpec::name()` no longer echoes enum members.
 - **Store**: `Store::put` now enforces the canonical form it documents instead of
   accepting any structurally valid image.
+- **Store** (`store.rs`): reads are bounded by the codec ceiling *before*
+  allocation (`infinity/limit`), so a hand-planted oversized object cannot be
+  pulled into memory; `get` proves the canonical form instead of accepting any
+  structurally valid image that happens to hash to its name; object and
+  signature paths must be regular files (a symbolic link is refused); commits use
+  a hard link, which is atomic and never replaces an existing object on any
+  platform (the old rename replaced it on Unix *and* Windows); temp files are
+  created with `O_EXCL` under a per-store counter so a planted name cannot
+  redirect a write; a second, different envelope for one image is refused while
+  re-storing the identical envelope is a no-op; on Unix the store directory is
+  `0700` and objects are `0600`; `Store::open` refuses a symlinked or non-directory
+  root; `len` counts `<64 lowercase hex>.ainf` regular files only instead of any
+  `*.ainf` name; stale scratch files are swept after a day.
 - **Secrets**: the promotion rule now treats a secret node as a barrier, so a
   string reachable only through a secret — the fallback of `secret(env.X ?: …)`,
   an interpolated literal — moves to the secret heap instead of the public string
@@ -50,6 +63,8 @@
 
 ### Added
 
+- `Store::try_len` reports a store directory that cannot be read instead of
+  counting it as empty.
 - `canonical::remap_node` is public. Projecting a module into a smaller arena
   (a subgraph, a pruned view) is a real consumer operation, and the reference
   rewrite is exhaustive over `Inode`; duplicating it outside the codec is how a

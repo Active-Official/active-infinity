@@ -286,6 +286,63 @@ jobs:
       - name: Shell/CLI conformance
         run: bash polyglot/shell/test.sh
 
+  polyglot-rpc:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Clone the RPC repository (thin peer)
+        run: git clone --depth 1 https://github.com/Active-Official/active-rpc /tmp/rpc
+      - name: Install scripting runtimes
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ruby-full php-cli php-ffi luajit gcc g++
+          gem install ffi --no-document
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+      - uses: dart-lang/setup-dart@v1
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - name: Install the Kotlin compiler
+        run: |
+          curl -fL https://github.com/JetBrains/kotlin/releases/download/v2.0.21/kotlin-compiler-2.0.21.zip -o /tmp/kotlin.zip
+          unzip -q /tmp/kotlin.zip -d /opt
+          echo "/opt/kotlinc/bin" >> "$GITHUB_PATH"
+      - name: Install scala-cli
+        run: |
+          curl -fL https://github.com/VirtusLab/scala-cli/releases/download/v1.5.4/scala-cli-x86_64-pc-linux.gz \
+            | gunzip > /tmp/scala-cli
+          chmod +x /tmp/scala-cli
+      - name: Cache Kotlin/Native
+        uses: actions/cache@v4
+        with:
+          path: |
+            /tmp/konan-cache
+            ~/.konan
+          key: konan-rpc-2.0.21
+      - name: Run every thin RPC client
+        env:
+          SCALA_CLI: /tmp/scala-cli
+          POLYGLOT_CACHE: /tmp/konan-cache
+        run: |
+          mkdir -p /tmp/konan-cache
+          # `golden` byte-compares every client's encoded request with the Rust
+          # reference encoder before the live round trips run.
+          bash polyglot/rpc/run_clients.sh /tmp/rpc "$PWD" \
+            python c cpp zig js go ruby php lua dart java kotlin scala csharp swift ktnative assemblyscript shell golden
+
   msrv:
     runs-on: ubuntu-latest
     steps:

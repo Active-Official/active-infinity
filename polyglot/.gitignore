@@ -20,3 +20,6 @@ dart/pubspec.lock
 kotlin-native/*.klib-build/
 scala/.bsp/
 scala/.scala-build/
+rpc/.bsp/
+rpc/.scala-build/
+rpc/build/

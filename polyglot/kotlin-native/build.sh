@@ -12,6 +12,9 @@ OUT="$ROOT/polyglot/kotlin-native"
 CACHE="${POLYGLOT_CACHE:-/cache}"
 VERSION="${KOTLIN_NATIVE_VERSION:-2.0.21}"
 KONAN="$CACHE/kotlin-native"
+# Keep the LLVM/libffi dependency downloads with the compiler so a fresh
+# container reuses them instead of re-downloading ~110 MB.
+export KONAN_DATA_DIR="${KONAN_DATA_DIR:-$CACHE/konan-data}"
 
 if [ ! -x "$KONAN/bin/konanc" ]; then
   mkdir -p "$CACHE"

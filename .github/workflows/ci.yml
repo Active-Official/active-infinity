@@ -3,6 +3,7 @@ name: CI
 on:
   push:
     branches: [main]
+    tags: ["v*"]
   pull_request:
     branches: [main]
 
@@ -461,7 +462,8 @@ jobs:
             fuzz_graph_cycles \
             fuzz_secret_positions \
             fuzz_unit_discriminants \
-            fuzz_projection_agreement; do
+            fuzz_projection_agreement \
+            fuzz_compressed_frame; do
             echo "== $target =="
             cargo fuzz run "$target" -- -runs=2000
           done

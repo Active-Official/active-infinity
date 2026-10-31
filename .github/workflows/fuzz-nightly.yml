@@ -1,0 +1,49 @@
+name: Fuzz nightly
+
+# Longer campaigns than the per-push job in CI. Failures upload the crashing
+# input and the grown corpus so the next run starts ahead.
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - name: Install clang (libFuzzer runtime)
+        run: sudo apt-get update && sudo apt-get install -y clang
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+      - name: Campaign (ten minutes per target)
+        env:
+          FUZZ_SECONDS: "600"
+        run: |
+          status=0
+          for target in \
+            fuzz_decode_infinity \
+            fuzz_stream_reassembly \
+            fuzz_canonical_roundtrip \
+            fuzz_layout_sections \
+            fuzz_graph_cycles \
+            fuzz_secret_positions \
+            fuzz_unit_discriminants \
+            fuzz_projection_agreement \
+            fuzz_compressed_frame; do
+            echo "== $target =="
+            cargo fuzz run "$target" -- \
+              -max_total_time="$FUZZ_SECONDS" -print_final_stats=1 || status=1
+          done
+          exit "$status"
+      - name: Upload artifacts and corpus
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-nightly
+          path: |
+            fuzz/artifacts
+            fuzz/corpus
+          if-no-files-found: ignore

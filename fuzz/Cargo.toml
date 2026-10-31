@@ -9,7 +9,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
-active-infinity = { path = "..", default-features = false, features = ["json"] }
+active-infinity = { path = "..", default-features = false, features = ["json", "zstd"] }
 
 [[bin]]
 name = "fuzz_decode_infinity"
@@ -63,6 +63,13 @@ bench = false
 [[bin]]
 name = "fuzz_projection_agreement"
 path = "fuzz_targets/fuzz_projection_agreement.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_compressed_frame"
+path = "fuzz_targets/fuzz_compressed_frame.rs"
 test = false
 doc = false
 bench = false

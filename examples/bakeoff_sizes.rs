@@ -60,7 +60,7 @@ fn main() {
             name: "bakeoff".to_string(),
         };
         let prost = prost::Message::encode_to_vec(&prost);
-        let rkyv = rkyv::to_bytes::<_, 256>(&RkyvTable {
+        let rkyv = rkyv::to_bytes::<rkyv::rancor::Error>(&RkyvTable {
             fields: pairs(fields),
             name: "bakeoff".to_string(),
         })

@@ -52,7 +52,7 @@ criterion = "0.5"
 blake3 = "1.5"
 # Bakeoff competitors (C-7.3): same logical table, different wire formats.
 prost = "0.13"
-rkyv = { version = "0.7", features = ["alloc", "bytecheck"] }
+rkyv = { version = "0.8.17", features = ["alloc", "bytecheck"] }
 serde_json = "1.0"
 
 [[bench]]

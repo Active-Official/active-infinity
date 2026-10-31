@@ -133,9 +133,13 @@ measure the same data; none of the three is canonical, validating or graph-aware
 
 | Fields | Infinity | serde_json | prost | rkyv |
 |---|---|---|---|---|
-| 8 | 880 B | 114 B | 111 B | 160 B |
-| 1,000 | 69,240 B | 15,798 B | 15,769 B | 25,108 B |
-| 10,000 | 699,240 B | 177,798 B | 168,769 B | 261,584 B |
+| 8 | 880 B | 114 B | 111 B | 224 B |
+| 1,000 | 69,240 B | 15,798 B | 15,769 B | 28,560 B |
+| 10,000 | 699,240 B | 177,798 B | 168,769 B | 307,760 B |
+
+rkyv's numbers are from rkyv 0.8.18 (the 0.7 line is affected by
+RUSTSEC-2026-0235); its framing overhead is larger than 0.7's, so its size row
+grew relative to earlier revisions of this table.
 
 Infinity is about 4x the JSON size on this shape. The bytes buy a fixed 48-byte
 node record per value (`kind`, inline scalar, auxiliary index), an 8-byte edge
@@ -149,16 +153,19 @@ while the content hash stays over the uncompressed bytes.
 
 | Fields | Infinity | serde_json | prost | rkyv |
 |---|---|---|---|---|
-| 8 | 13.2 µs | 1.50 µs | 1.82 µs | 2.10 µs |
-| 1,000 | 792 µs | 185 µs | 232 µs | 160 µs |
-| 10,000 | 9.85 ms | 1.65 ms | 2.36 ms | 1.58 ms |
+| 8 | 14.8 µs | 2.86 µs | 2.10 µs | 1.55 µs |
+| 1,000 | 688 µs | 261 µs | 201 µs | 181 µs |
+| 10,000 | 9.32 ms | 3.48 ms | 2.42 ms | 1.73 ms |
+
+Re-measured after the rkyv 0.8 upgrade; the competitor rows move with machine
+load, so treat them as one snapshot rather than a fixed ratio.
 
 Encode is not a memcpy by design: it normalizes, renumbers by DFS, deduplicates
 every symbol table and re-derives the edge table so equal modules are byte-equal.
 The C-7 profiling work removed one full clone of every node from that path:
 canonicalization now moves each owned node into its final position and rewrites
 its references in place (`canonical::remap_node_in_place`). On the 10k shape the
-same benchmark moved from **16.9 ms to 9.85 ms (−42%)**.
+same benchmark moved from **16.9 ms to 9.3 ms (−45%)**.
 
 ### Read side
 

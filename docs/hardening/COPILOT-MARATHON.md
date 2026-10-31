@@ -15,7 +15,7 @@ the code → regression test first → minimal fix → targeted tests + clippy �
 | ID | Section | Paths | State | Findings (fixed / rejected / open) | Commits |
 |----|---------|-------|-------|------------------------------------|---------|
 | I-01 | layout / header | `src/layout.rs` | CLEAN (round 2 open items fixed) | 10 fixed, 1 rejected, 0 open | this commit |
-| I-02 | validate | `src/validate.rs` | in progress (slices A+B fixed; C–E pending) | 9 fixed, 2 rejected, 0 open | this commit |
+| I-02 | validate | `src/validate.rs` | in progress (slices A–D fixed; E pending) | 17 fixed, 4 rejected, 0 open | this commit |
 | I-03 | encode / canonical | `src/encode.rs`, `src/canonical.rs` | pending | — | — |
 | I-04 | decode / view | `src/decode.rs`, `src/view.rs` | pending | — | — |
 | I-05 | IR / units | `src/ir.rs`, `src/unit.rs` | pending | — | — |
@@ -114,3 +114,32 @@ to fail against the pre-fix tree.
 | 6 | low | a self-referential edge was `infinity/edge` while spec §9 defines `infinity/cycle` for a dependency cycle | **fixed**: `from == to` is `Cycle { node }`; `a_self_loop_is_a_cycle` (the pre-existing redteam assertion was updated to the spec code) |
 
 Gate: clippy clean; `cargo test --all-features` 223 passed, 0 failed.
+
+### I-02 validate, slice C (strings, units, types, numbers, hashes) — 2026-10-31
+
+| # | Severity | Finding | Disposition |
+|---|---|---|---|
+| 1 | high | table type (code 7) carries `closed` in the entry flags *and* in aux `AUX_TYPE_TABLE`; the decoder reads the flag, the validator checked each independently, so `flags=1, aux=0` decoded one way and re-encoded another (a byte hidden in the hash) | **fixed**: a table type must have exactly one aux entry and it must equal `(AUX_TYPE_TABLE, flags)`; `a_table_type_flag_must_agree_with_its_aux_entry` |
+| 2 | high | the type table was compared by `(code, flags, start, len)` — allocator positions — while canonicalization sorts by *content* `(code, aux)`; two byte images of one module could both validate | **fixed**: strict ascending comparison on `(code, aux entries)` |
+| 3 | medium | semantically duplicate types at different aux slots validated; the encoder deduplicates them | **fixed** by 2 (equal content is not strictly ascending); `duplicate_type_content_is_refused` |
+| 4 | medium | aux entries could be unreferenced or shared | **fixed in slice D** (see below) |
+| 5 | medium | `check_strings`/`check_hashes` indexed with unchecked `usize` arithmetic and `[]`, so a 32-bit target could wrap and panic instead of refusing | **fixed in `check_strings`** (u64 + `checked_mul`/`checked_add` + `try_from`); `check_hashes` bounds are guaranteed by `section_end`, left as is with the packing rule from slice B |
+| 6 | low | `check_strings`/`check_numbers` relied on the count pass for their ceilings | **fixed for strings** (named `infinity/limit`), numbers have no count ceiling in `Limits` |
+| 7 | low | a type-aux index fault surfaced as `Error::Node` | **not reachable** after the range check (slice A) precedes `aux()`; left as is |
+
+### I-02 validate, slice D (provenance, extensions, bindings, secrets, blobs) — 2026-10-31
+
+| # | Severity | Finding | Disposition |
+|---|---|---|---|
+| 1 | high | aux coverage was never enforced: an unreferenced or shared aux entry validated while its bytes stayed in the hash | **fixed**: one bitmap per validation, marked by type entries and by constraint/patch/schema ranges; an orphan is `infinity/count`, a second reference is `infinity/type`/`infinity/node`; `an_unreferenced_aux_entry_is_refused` |
+| 2 | medium | `check_secrets`/`check_blobs` computed `heap + off + len` in `usize`, which wraps on a 32-bit target before the bounds check | **fixed**: u64 with `checked_add`, `usize::try_from` before any slice |
+| 3 | medium | a dangling provenance string/number/hash reference leaked `infinity/string-ref` or `infinity/node` | **fixed**: the accessor maps them to `infinity/provenance`; `a_dangling_provenance_string_is_a_provenance_fault` |
+| 4 | medium | `check_bindings` compared the count with `max_nodes`, refusing valid modules under a node-only limit | **fixed**: `max_bindings`; `more_bindings_than_nodes_is_fine_when_max_bindings_allows_it` |
+| 5 | medium | an empty module with a dangling root word validated and then failed in the `root()` accessor | **fixed**: the root is checked before the empty-module early return; `an_empty_module_with_a_dangling_root_is_refused` |
+| 6 | low | an unsorted blob table returned `infinity/offset` | **fixed**: `infinity/blob` |
+| 7 | low | `check_provenance` read the entry count before checking the block held a header | **fixed**: the length check comes first |
+| 8 | low | provenance entry offsets used unchecked `usize` multiplication | **fixed**: checked arithmetic |
+| 9 | low | extension tag 1 is accepted although the spec reserves it | **rejected for now**: no wire image in the tree uses it, and reserving it retroactively would refuse images that are valid under the shipped spec; recorded as a spec decision for the next format version |
+
+Gate after slices C and D: clippy clean; `cargo test --all-features` 229 passed,
+0 failed.

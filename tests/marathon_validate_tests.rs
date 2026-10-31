@@ -75,6 +75,19 @@ fn a_section_offset_past_the_buffer_is_refused_before_any_read() {
     );
 }
 
+fn schema_field(typ: active_infinity::ir::TypeSpec) -> Inode {
+    Inode::SchemaField(active_infinity::ir::SchemaFieldSpec {
+        typ,
+        min: None,
+        max: None,
+        min_len: None,
+        max_len: None,
+        pattern: None,
+        default: None,
+        deprecated: None,
+    })
+}
+
 fn rewrite_hash(bytes: &mut [u8]) {
     let hash = active_infinity::encode::hash_image(bytes).expect("hash");
     bytes[16..48].copy_from_slice(&hash);
@@ -206,6 +219,173 @@ fn a_detached_blob_size_is_held_to_the_ceiling() {
     let bytes = encode(&module).expect("encode");
     let error = validate(&bytes).expect_err("an impossible detached size is refused");
     assert_eq!(error.code(), "infinity/limit", "{error:?}");
+}
+
+#[test]
+fn a_table_type_flag_must_agree_with_its_aux_entry() {
+    // Code 7 (table) carries the closed flag in the type entry *and* in an aux
+    // entry; the decoder reads the flag. If the two disagree, one module has two
+    // byte images and a byte hides inside the content hash.
+    let mut module = InfinityModule::new();
+    let field = module.push(schema_field(active_infinity::ir::TypeSpec::Table {
+        closed: true,
+    }));
+    let root = module.push(Inode::SchemaTable {
+        fields: vec![("a".to_string(), field)],
+        closed: false,
+    });
+    module.set_root(Some(root));
+    let mut bytes = encode(&module).expect("encode");
+    let header = Header::parse(&bytes).expect("header");
+    let aux = header.span(Section::Aux).offset as usize;
+    // The single aux entry is (AUX_TYPE_TABLE, 1); make it claim open.
+    bytes[aux + 4..aux + 8].copy_from_slice(&0u32.to_le_bytes());
+    rewrite_hash(&mut bytes);
+    let error = validate(&bytes).expect_err("a split-brain table type is refused");
+    assert_eq!(error.code(), "infinity/type", "{error:?}");
+}
+
+#[test]
+fn duplicate_type_content_is_refused() {
+    // Two enum types with the same members are one type after canonicalization.
+    // An image that lists both validates only if the table is compared by
+    // content, which is what canonicalization sorts on.
+    let mut module = InfinityModule::new();
+    let first = module.push(schema_field(active_infinity::ir::TypeSpec::Enum(vec![
+        "a".to_string()
+    ])));
+    let second = module.push(schema_field(active_infinity::ir::TypeSpec::Enum(vec![
+        "b".to_string()
+    ])));
+    let root = module.push(Inode::SchemaTable {
+        fields: vec![("a".to_string(), first), ("b".to_string(), second)],
+        closed: false,
+    });
+    module.set_root(Some(root));
+    let mut bytes = encode(&module).expect("encode");
+    let header = Header::parse(&bytes).expect("header");
+    let aux = header.span(Section::Aux).offset as usize;
+    // Make the second enum's member the same string id as the first's.
+    let first_member = u32::from_le_bytes(bytes[aux + 4..aux + 8].try_into().expect("value"));
+    bytes[aux + 12..aux + 16].copy_from_slice(&first_member.to_le_bytes());
+    rewrite_hash(&mut bytes);
+    let error = validate(&bytes).expect_err("duplicate type content is refused");
+    assert_eq!(error.code(), "infinity/type", "{error:?}");
+}
+
+#[test]
+fn an_unreferenced_aux_entry_is_refused() {
+    // A constraint carries one aux entry per bound; shrinking its range leaves the
+    // other entry in the table with no reader. Canonical images have no such
+    // entries (the encoder appends all of them), and the bytes are hashed.
+    let mut module = InfinityModule::new();
+    let inner = module.push(Inode::Int(5));
+    let constrained = module.push(Inode::Constrained {
+        target: inner,
+        constraint: active_infinity::ir::Constraint::MinMax {
+            min: Some(1),
+            max: Some(9),
+        },
+    });
+    module.set_root(Some(constrained));
+    let mut bytes = encode(&module).expect("encode");
+    let nodes = Header::parse(&bytes).expect("header").span(Section::Nodes);
+    let mut constraint = None;
+    for index in 0..nodes.count as usize {
+        let at = nodes.offset as usize + index * active_infinity::layout::NODE_RECORD_SIZE;
+        if bytes[at] == 17 {
+            constraint = Some(at);
+            break;
+        }
+    }
+    let at = constraint.expect("the fixture has a constraint node");
+    // `c` is the aux length; drop it to one entry.
+    bytes[at + 24..at + 32].copy_from_slice(&1u64.to_le_bytes());
+    rewrite_hash(&mut bytes);
+    let error = validate(&bytes).expect_err("an orphan aux entry is refused");
+    assert_eq!(error.code(), "infinity/count", "{error:?}");
+}
+
+#[test]
+fn more_bindings_than_nodes_is_fine_when_max_bindings_allows_it() {
+    // `check_bindings` used to compare the binding count against `max_nodes`, so a
+    // module with one node and two bindings was refused under a limit that only
+    // bounds nodes. Each binding names a node; several may name the same one.
+    let mut module = InfinityModule::new();
+    let root = module.push(Inode::Int(1));
+    module.set_root(Some(root));
+    module.bind("a", root);
+    module.bind("b", root);
+    let bytes = encode(&module).expect("encode");
+    let opts = DecodeOpts {
+        limits: Limits {
+            max_nodes: 1,
+            max_bindings: 1000,
+            ..Limits::default()
+        },
+        verify_hash: true,
+        verify_canonical: true,
+    };
+    validate_with(&bytes, opts).expect("bindings are bounded by max_bindings, not max_nodes");
+
+    // And the binding ceiling itself is enforced.
+    let opts = DecodeOpts {
+        limits: Limits {
+            max_bindings: 1,
+            ..Limits::default()
+        },
+        verify_hash: true,
+        verify_canonical: false,
+    };
+    let error = validate_with(&bytes, opts).expect_err("two bindings exceed the cap");
+    assert_eq!(error.code(), "infinity/limit", "{error:?}");
+    assert!(format!("{error}").contains("bindings"), "{error}");
+}
+
+#[test]
+fn a_dangling_provenance_string_is_a_provenance_fault() {
+    let mut module = InfinityModule::new();
+    let root = module.push(Inode::Int(1));
+    module.set_root(Some(root));
+    module.set_provenance(Some(active_infinity::Provenance {
+        producer: Some("marathon".to_string()),
+        timestamp_ms: 1,
+        model: None,
+        tool: None,
+        parent: None,
+        entries: vec![active_infinity::ProvEntry {
+            key: "run".to_string(),
+            value: active_infinity::ProvValue::Text("baseline".to_string()),
+        }],
+    }));
+    let mut bytes = encode(&module).expect("encode");
+    let provenance = Section::Provenance as usize;
+    let offset = u32::from_le_bytes(
+        bytes[64 + provenance * 8..64 + provenance * 8 + 4]
+            .try_into()
+            .expect("offset"),
+    ) as usize;
+    // Entry 0: kind at +96, key at +100, value a at +104.
+    bytes[offset + 104..offset + 108].copy_from_slice(&9999u32.to_le_bytes());
+    rewrite_hash(&mut bytes);
+    let error = validate(&bytes).expect_err("a dangling provenance string is refused");
+    assert_eq!(error.code(), "infinity/provenance", "{error:?}");
+}
+
+#[test]
+fn an_empty_module_with_a_dangling_root_is_refused() {
+    // Zero nodes and a root word that names node 0: the image used to validate and
+    // then fail in the `root()` accessor.
+    let module = InfinityModule::new();
+    let mut bytes = encode(&module).expect("encode");
+    let bindings = Header::parse(&bytes)
+        .expect("header")
+        .span(Section::Bindings)
+        .offset as usize;
+    bytes[bindings..bindings + 4].copy_from_slice(&0u32.to_le_bytes());
+    rewrite_hash(&mut bytes);
+    let error = validate(&bytes).expect_err("a dangling root is refused");
+    assert_eq!(error.code(), "infinity/node-ref", "{error:?}");
 }
 
 #[test]

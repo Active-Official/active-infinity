@@ -97,14 +97,26 @@ impl<'a> Validated<'a> {
             return Err(Error::SecretEntry(0));
         }
 
+        // Every aux entry must be referenced exactly once, by a type or a node.
+        // The range checks below bound each reference; this bitmap closes the
+        // holes and overlaps that a canonical image never has (the encoder appends
+        // every entry from one of the two places).
+        let aux_count = validated.span(Section::Aux).count as usize;
+        let mut aux_used = vec![false; aux_count];
         validated.check_strings()?;
         validated.check_units(limits)?;
-        validated.check_types(limits)?;
+        validated.check_types(limits, &mut aux_used)?;
         validated.check_numbers()?;
         validated.check_hashes()?;
         validated.check_secrets(limits)?;
         validated.check_blobs(limits)?;
-        validated.check_nodes(limits)?;
+        validated.check_nodes(limits, &mut aux_used)?;
+        if let Some(index) = aux_used.iter().position(|used| !used) {
+            return Err(Error::Count {
+                field: "aux",
+                value: index as u64,
+            });
+        }
         validated.check_fields()?;
         validated.check_parts()?;
         validated.check_edges()?;
@@ -528,7 +540,12 @@ impl<'a> Validated<'a> {
             if id == u32::MAX {
                 Ok(None)
             } else {
-                Ok(Some(self.string(id)?.to_string()))
+                // A provenance reference that dangles is a provenance fault; the
+                // string/number accessors would otherwise leak their own codes and
+                // send a caller branching on codes down the wrong path.
+                self.string(id)
+                    .map(|text| Some(text.to_string()))
+                    .map_err(|_| Error::Provenance("dangling provenance string"))
             }
         };
         let producer = read_sid(16)?;
@@ -553,7 +570,13 @@ impl<'a> Validated<'a> {
         }
         let mut entries = Vec::with_capacity(count.min(1024) as usize);
         for index in 0..count as usize {
-            let offset = PROV_HEADER_SIZE + index * PROV_ENTRY_SIZE;
+            let offset = PROV_HEADER_SIZE
+                .checked_add(
+                    index
+                        .checked_mul(PROV_ENTRY_SIZE)
+                        .ok_or(Error::Provenance("provenance entry offset overflows"))?,
+                )
+                .ok_or(Error::Provenance("provenance entry offset overflows"))?;
             if offset + PROV_ENTRY_SIZE > block.len() {
                 return Err(Error::Provenance("entry exceeds block"));
             }
@@ -570,15 +593,25 @@ impl<'a> Validated<'a> {
                 return Err(Error::Provenance("non-zero entry reserved word"));
             }
             let value = match kind {
-                0 => ProvValue::Text(self.string(a)?.to_string()),
-                1 => ProvValue::Int(self.number(a)?),
+                0 => ProvValue::Text(
+                    self.string(a)
+                        .map_err(|_| Error::Provenance("dangling provenance string"))?
+                        .to_string(),
+                ),
+                1 => ProvValue::Int(
+                    self.number(a)
+                        .map_err(|_| Error::Provenance("dangling provenance number"))?,
+                ),
                 2 => {
                     if a > 1 {
                         return Err(Error::Provenance("flag entry is not 0/1"));
                     }
                     ProvValue::Flag(a == 1)
                 }
-                3 => ProvValue::Hash(self.hash_entry(a)?),
+                3 => ProvValue::Hash(
+                    self.hash_entry(a)
+                        .map_err(|_| Error::Provenance("dangling provenance hash"))?,
+                ),
                 _ => unreachable!("kind checked above"),
             };
             entries.push(crate::ir::ProvEntry { key, value });
@@ -654,10 +687,10 @@ impl<'a> Validated<'a> {
                 offset: (base + 4) as u64,
             });
         }
-        if count as u64 > self.limits.max_nodes as u64 {
+        if count > self.limits.max_bindings {
             return Err(Error::Limit {
                 kind: "bindings",
-                limit: self.limits.max_nodes as u64,
+                limit: self.limits.max_bindings as u64,
             });
         }
         let mut previous: Option<&str> = None;
@@ -679,43 +712,76 @@ impl<'a> Validated<'a> {
         if count == 0 {
             return Ok(());
         }
-        let table = self.header.span(Section::Strings).offset as usize;
-        let heap_len = self.string_heap_len();
-        if heap_len as u64 > self.limits_snapshot().max_string_bytes as u64 {
+        let limits = self.limits_snapshot();
+        if count > limits.max_strings {
             return Err(Error::Limit {
-                kind: "string bytes",
-                limit: self.limits_snapshot().max_string_bytes as u64,
+                kind: "strings",
+                limit: limits.max_strings as u64,
             });
         }
+        let table = self.header.span(Section::Strings).offset as u64;
         let heap_len = self.string_heap_len();
-        let heap = table + (count as usize + 1) * 4;
-        if heap + heap_len as usize > self.ends[Section::Strings as usize] as usize {
+        if heap_len as u64 > limits.max_string_bytes as u64 {
+            return Err(Error::Limit {
+                kind: "string bytes",
+                limit: limits.max_string_bytes as u64,
+            });
+        }
+        // `table + (count + 1) * 4 + heap_len` fits the image (section_end checked
+        // it); computing in u64 keeps a 32-bit target from wrapping.
+        let heap = table
+            .checked_add((count as u64 + 1).checked_mul(4).ok_or(Error::Count {
+                field: "strings",
+                value: count as u64,
+            })?)
+            .ok_or(Error::Count {
+                field: "strings",
+                value: count as u64,
+            })?;
+        let heap_end = heap.checked_add(heap_len as u64).ok_or(Error::Count {
+            field: "strings",
+            value: count as u64,
+        })?;
+        if heap_end > self.ends[Section::Strings as usize] {
             return Err(Error::Offset {
                 section: "strings",
-                offset: table as u64,
+                offset: table,
             });
         }
         let mut previous: Option<&[u8]> = None;
         let mut last_end = 0u32;
         for id in 0..count {
-            let start = read_u32(self.buf, table + id as usize * 4)?;
-            let end = read_u32(self.buf, table + id as usize * 4 + 4)?;
+            let entry = table + id as u64 * 4;
+            let start = read_u32(
+                self.buf,
+                usize::try_from(entry).map_err(|_| Error::Count {
+                    field: "strings",
+                    value: id as u64,
+                })?,
+            )?;
+            let end = read_u32(
+                self.buf,
+                usize::try_from(entry + 4).map_err(|_| Error::Count {
+                    field: "strings",
+                    value: id as u64,
+                })?,
+            )?;
             if start != last_end || end < start || end > heap_len {
                 return Err(Error::Offset {
                     section: "strings",
-                    offset: (heap + start as usize) as u64,
+                    offset: heap + start as u64,
                 });
             }
             last_end = end;
-            let bytes = &self.buf[heap + start as usize..heap + end as usize];
+            let bytes = &self.buf[(heap + start as u64) as usize..(heap + end as u64) as usize];
             std::str::from_utf8(bytes).map_err(|_| Error::Utf8 {
-                offset: (heap + start as usize) as u64,
+                offset: heap + start as u64,
             })?;
             if let Some(previous) = previous {
                 if previous >= bytes {
                     return Err(Error::Offset {
                         section: "strings",
-                        offset: (heap + start as usize) as u64,
+                        offset: heap + start as u64,
                     });
                 }
             }
@@ -724,7 +790,7 @@ impl<'a> Validated<'a> {
         if last_end != heap_len {
             return Err(Error::Offset {
                 section: "strings",
-                offset: (heap + last_end as usize) as u64,
+                offset: heap + last_end as u64,
             });
         }
         Ok(())
@@ -771,7 +837,7 @@ impl<'a> Validated<'a> {
         Ok(())
     }
 
-    fn check_types(&self, limits: Limits) -> Result<()> {
+    fn check_types(&self, limits: Limits, aux_used: &mut [bool]) -> Result<()> {
         let count = self.header.span(Section::Types).count;
         if count > limits.max_types {
             return Err(Error::Limit {
@@ -780,7 +846,11 @@ impl<'a> Validated<'a> {
             });
         }
         let aux_count = self.header.span(Section::Aux).count;
-        let mut previous: Option<(u32, u32, u32, u32)> = None;
+        // The canonical order of the type table is by semantic content
+        // `(code, aux entries)`: that is what canonicalization sorts and
+        // deduplicates on. Ordering by the table's (start, len) would let two
+        // byte images that decode to one module both validate.
+        let mut previous: Option<(u32, Vec<(u32, u32)>)> = None;
         for id in 0..count {
             let offset = self.header.span(Section::Types).offset as usize + id as usize * 16;
             let code = read_u32(self.buf, offset)?;
@@ -805,14 +875,36 @@ impl<'a> Validated<'a> {
                     reason: "table closed flag must be 0 or 1",
                 });
             }
+            if code == 7 && len != 1 {
+                // A table type carries exactly one aux entry (`AUX_TYPE_TABLE`) and
+                // its flag must agree with it; otherwise one module has two byte
+                // images, one of them hiding a byte inside the content hash.
+                return Err(Error::Type {
+                    id,
+                    reason: "table type needs exactly one aux entry",
+                });
+            }
             if start > aux_count || len > aux_count - start {
                 return Err(Error::Type {
                     id,
                     reason: "aux range out of bounds",
                 });
             }
+            let mut entries: Vec<(u32, u32)> = Vec::with_capacity(len as usize);
             for index in start..start + len {
                 let (tag, value) = self.aux(index)?;
+                if let Some(used) = aux_used.get_mut(index as usize) {
+                    if *used {
+                        // Two references to one entry: the image is not canonical
+                        // and the shared bytes carry data no decoder reads twice.
+                        return Err(Error::Type {
+                            id,
+                            reason: "aux entry referenced twice",
+                        });
+                    }
+                    *used = true;
+                }
+                entries.push((tag, value));
                 match (code, tag) {
                     (8, crate::layout::AUX_TYPE_ENUM_ITEM) => {
                         if value >= self.header.span(Section::Strings).count {
@@ -841,15 +933,24 @@ impl<'a> Validated<'a> {
                     reason: "enum type without members",
                 });
             }
-            if let Some(previous) = previous {
-                if previous >= (code, flags, start, len) {
-                    return Err(Error::Offset {
-                        section: "types",
-                        offset: offset as u64,
+            if code == 7 && entries[0] != (crate::layout::AUX_TYPE_TABLE, flags) {
+                return Err(Error::Type {
+                    id,
+                    reason: "table closed flag disagrees with its aux entry",
+                });
+            }
+            let current = (code, entries);
+            if let Some(previous) = &previous {
+                // Strictly ascending by content: equal content is a duplicate
+                // (the encoder deduplicates) and a smaller one is out of order.
+                if *previous >= current {
+                    return Err(Error::Type {
+                        id,
+                        reason: "type table is not in canonical order",
                     });
                 }
             }
-            previous = Some((code, flags, start, len));
+            previous = Some(current);
         }
         Ok(())
     }
@@ -909,14 +1010,27 @@ impl<'a> Validated<'a> {
                 limit: limits.max_secrets as u64,
             });
         }
-        let table = self.header.span(Section::Secrets).offset as usize;
-        let heap = table + count as usize * 8;
-        let end = self.ends[Section::Secrets as usize] as usize;
+        let table = self.header.span(Section::Secrets).offset as u64;
+        let heap = table + count as u64 * 8;
+        let end = self.ends[Section::Secrets as usize];
         let mut cursor = 0u32;
         for id in 0..count {
-            let off = read_u32(self.buf, table + id as usize * 8)?;
-            let len = read_u32(self.buf, table + id as usize * 8 + 4)?;
-            if off != cursor || heap + off as usize + len as usize > end {
+            let entry = table + id as u64 * 8;
+            let off = read_u32(
+                self.buf,
+                usize::try_from(entry).map_err(|_| Error::SecretEntry(id))?,
+            )?;
+            let len = read_u32(
+                self.buf,
+                usize::try_from(entry + 4).map_err(|_| Error::SecretEntry(id))?,
+            )?;
+            // u64 arithmetic: a 32-bit target used to wrap `heap + off + len` and
+            // then slice out of bounds (a panic, not a refusal).
+            let payload_end = heap
+                .checked_add(off as u64)
+                .and_then(|start| start.checked_add(len as u64))
+                .ok_or(Error::SecretEntry(id))?;
+            if off != cursor || payload_end > end {
                 return Err(Error::SecretEntry(id));
             }
             cursor = cursor.checked_add(len).ok_or(Error::SecretEntry(id))?;
@@ -938,18 +1052,29 @@ impl<'a> Validated<'a> {
                 limit: limits.max_blobs as u64,
             });
         }
-        let table = self.header.span(Section::Blobs).offset as usize;
-        let heap = table + count as usize * BLOB_ENTRY_SIZE;
-        let end = self.ends[Section::Blobs as usize] as usize;
+        let table = self.header.span(Section::Blobs).offset as u64;
+        let heap = table + count as u64 * BLOB_ENTRY_SIZE as u64;
+        let end = self.ends[Section::Blobs as usize];
         let mut cursor = 0u32;
         let mut previous: Option<([u8; 32], u32, u32)> = None;
         for id in 0..count {
-            let offset = table + id as usize * BLOB_ENTRY_SIZE;
+            let offset = table + id as u64 * BLOB_ENTRY_SIZE as u64;
+            let at = usize::try_from(offset).map_err(|_| Error::Blob {
+                id,
+                reason: "blob entry offset does not fit the address space",
+            })?;
             let mut hash = [0u8; 32];
-            hash.copy_from_slice(&self.buf[offset..offset + 32]);
-            let off = read_u32(self.buf, offset + 32)?;
-            let len = read_u32(self.buf, offset + 36)?;
-            if off != cursor || heap + off as usize + len as usize > end {
+            hash.copy_from_slice(&self.buf[at..at + 32]);
+            let off = read_u32(self.buf, at + 32)?;
+            let len = read_u32(self.buf, at + 36)?;
+            let payload_end = heap
+                .checked_add(off as u64)
+                .and_then(|start| start.checked_add(len as u64))
+                .ok_or(Error::Blob {
+                    id,
+                    reason: "payload range overflows",
+                })?;
+            if off != cursor || payload_end > end {
                 return Err(Error::Blob {
                     id,
                     reason: "payload out of range",
@@ -961,9 +1086,9 @@ impl<'a> Validated<'a> {
             })?;
             if let Some(previous) = previous {
                 if previous >= (hash, off, len) {
-                    return Err(Error::Offset {
-                        section: "blobs",
-                        offset: offset as u64,
+                    return Err(Error::Blob {
+                        id,
+                        reason: "blob entries are not sorted",
                     });
                 }
             }
@@ -978,7 +1103,7 @@ impl<'a> Validated<'a> {
         Ok(())
     }
 
-    fn check_nodes(&self, limits: Limits) -> Result<()> {
+    fn check_nodes(&self, limits: Limits, aux_used: &mut [bool]) -> Result<()> {
         let count = self.node_count();
         if count > limits.max_nodes {
             return Err(Error::Limit {
@@ -1290,6 +1415,15 @@ impl<'a> Validated<'a> {
                     }
                     let mut seen_kinds = Vec::new();
                     for offset in rec.b..rec.b + rec.c {
+                        if let Some(used) = aux_used.get_mut(offset as usize) {
+                            if *used {
+                                return Err(Error::Node {
+                                    id: index,
+                                    reason: "aux entry referenced twice",
+                                });
+                            }
+                            *used = true;
+                        }
                         let (tag, value) = self.aux(offset as u32)?;
                         seen_kinds.push(tag);
                         match tag {
@@ -1363,6 +1497,15 @@ impl<'a> Validated<'a> {
                     }
                     let mut tags = Vec::new();
                     for offset in rec.b..rec.b + rec.c {
+                        if let Some(used) = aux_used.get_mut(offset as usize) {
+                            if *used {
+                                return Err(Error::Node {
+                                    id: index,
+                                    reason: "aux entry referenced twice",
+                                });
+                            }
+                            *used = true;
+                        }
                         let (tag, value) = self.aux(offset as u32)?;
                         tags.push(tag);
                         match tag {
@@ -1416,6 +1559,15 @@ impl<'a> Validated<'a> {
                     }
                     let mut previous_tag: Option<u32> = None;
                     for offset in rec.b..rec.b + rec.c {
+                        if let Some(used) = aux_used.get_mut(offset as usize) {
+                            if *used {
+                                return Err(Error::Node {
+                                    id: index,
+                                    reason: "aux entry referenced twice",
+                                });
+                            }
+                            *used = true;
+                        }
                         let (tag, value) = self.aux(offset as u32)?;
                         if let Some(previous) = previous_tag {
                             if tag <= previous {
@@ -1806,6 +1958,9 @@ impl<'a> Validated<'a> {
             return Ok(());
         }
         let start = self.header.span(Section::Provenance).offset as usize;
+        if len < PROV_HEADER_SIZE {
+            return Err(Error::Provenance("block shorter than its header"));
+        }
         let count = read_u32(self.buf, start + 4)?;
         if count > limits.max_prov_entries {
             return Err(Error::Limit {
@@ -1957,7 +2112,15 @@ impl<'a> Validated<'a> {
 
     fn check_reachability(&self, limits: Limits) -> Result<()> {
         self.check_bindings()?;
+        // The bindings section's first word is the root id; it must be either the
+        // sentinel or an existing node, even when the module holds no nodes.
+        let root = self.root()?;
         let count = self.node_count();
+        if let Some(root) = root {
+            if root.0 >= count {
+                return Err(Error::NodeRef(root.0));
+            }
+        }
         if count == 0 {
             return Ok(());
         }

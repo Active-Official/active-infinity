@@ -11,6 +11,24 @@ document covers the projections only.
 
 ---
 
+## 0. Authority
+
+- The **AINF image is the system of record**. Its content hash is Blake3 over
+  the canonical bytes; nothing in this document changes that address.
+- A projection is a derived, lossy view and is **unauthenticated**. Editing the
+  JSON or the Protobuf changes only the view: it never becomes the identity of
+  the module and never overrides the hash.
+- To verify a module, validate the AINF bytes (`validate_canonical`) and compare
+  the content hash. A projection cannot be re-addressed as an image, and
+  `validate` rejects projection bytes.
+- Secrets never enter either projection: the redaction pass in §2 replaces them
+  before any renderer runs.
+- A consumer that treats a projection as authoritative has stepped outside this
+  specification. Interop bridges may carry projections, but the AINF bytes and
+  their hash remain the reference.
+
+---
+
 ## 1. Shared redacted tree
 
 Both projections render one intermediate tree, built by

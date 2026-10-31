@@ -634,3 +634,40 @@ tests fail against the pre-fix tree.
 
 Gate: 321 all-features, clippy clean both feature sets; five new behavioural
 tests, four proved to fail against the pre-fix tree.
+
+### Re-audit loop, round 2 (I-05) and round 2 (I-06) - 2026-10-31
+
+**I-05 round 2** (2 high, 4 medium, 1 low):
+
+| # | Severity | Finding | Disposition |
+|---|---|---|---|
+| 1 | high | `validate_structure` bounded the node count but not a single node's vector width (array elements, table fields, interpolation parts, enum members) | **fixed**: a pre-pass bounds every width at 1<<24 (the default `max_children`/`max_fields`/`max_parts`); `a_node_wider_than_the_ceiling_is_refused_before_it_is_walked` (fails pre-fix) |
+| 2 | high | `structurally_eq` blinds secrets while the content hash commits to them, so a hash comparison reveals secret equality | **rejected as the documented content-commitment property**: the hash is a function of the image, and the image carries the secret heap in the clear (confidentiality at rest is a non-goal: `security.md`). Anyone able to compute/compare the hash already holds the bytes. `structurally_eq` is the anti-oracle equality; the hash is not an equality operator |
+| 3 | medium | `UnitTag::Named("")` encoded to an image the validator refuses | **fixed**: `validate_structure` refuses an empty named unit (`infinity/encode`); `an_empty_named_unit_is_refused_at_encode` (fails pre-fix) |
+| 4 | medium | `string_bytes()` counted only node strings, omitting bindings, annotation text and provenance | **fixed**: it now covers every text the canonical heap interns, with a doc note that interning deduplicates; `string_bytes_counts_bindings_annotations_and_provenance` (fails pre-fix) |
+| 5 | medium | `saturating_add/sub` on fan-in hid overflow | **covered by finding 1**: the width and node ceilings bound fan-in to 1<<24, far below u32 |
+| 6 | medium | annotation `expr` edges were missing from `edges()`/`dependency_map()`, so graph queries saw an incomplete dependency set | **fixed**: both include the expression → subject edge and document that it is not a structural edge for acyclicity (the wire edge table is unchanged); `an_annotation_expression_is_a_dependency_edge` (fails pre-fix) |
+| 7 | low | `Debug` cloned the whole module and redacted every field, an unbounded cost in a log path | **fixed**: a module over 65 536 nodes or 1 MiB of text prints a count summary instead; `debug_of_a_large_module_prints_a_summary` (fails pre-fix) |
+
+**I-06 round 2** (8 medium, 1 low):
+
+| # | Severity | Finding | Disposition |
+|---|---|---|---|
+| 1 | medium | `Frame::parse` reported a complete header with a short payload as `stream-frame-len` instead of `truncated` | **fixed**: `infinity/truncated`, which `push_bytes` uses to wait; `a_split_frame_is_truncated_not_over_limit` (fails pre-fix) |
+| 2 | medium | an incremental `End` cleared the pending deltas before proving the generation, so a bad retry applied zero ops | **fixed**: the clear happens after validation; `a_failed_incremental_end_keeps_its_pending_deltas` (fails pre-fix) |
+| 3 | medium | `SetAnnotation` never checked a constraint expression's node | **fixed**: `infinity/stream-delta`; `a_dangling_annotation_expression_is_a_stream_delta` (fails pre-fix) |
+| 4 | medium | `merge_fragment` pushed while remapping, leaving partial appends after a failure | **fixed**: two-phase remap into a temporary vec, then push; the arena is also capped at the default node ceiling (`stream arena nodes`) |
+| 5 | medium | a `chunk` that cannot fit a Batch payload produced a stream the decoder refuses | **fixed**: `infinity/invalid-argument`; `a_chunk_that_cannot_fit_a_frame_is_refused` (fails pre-fix) |
+| 6 | medium | the merged arena was bounded only by u32::MAX, so a stream of tiny fragments could grow it without limit | **fixed** by the same arena ceiling in finding 4 |
+| 7 | medium | the delta `AiImmutable` flag decoded any non-zero byte | **fixed**: 0/1 only, `infinity/stream-delta`; `a_delta_immutable_flag_of_two_is_refused` (fails pre-fix) |
+| 8 | low | `Frame::to_bytes` cast the payload length with `as u32` | **fixed**: `Frame::new` and `to_bytes` assert the `MAX_FRAME_PAYLOAD` contract (documented panic on a caller bug) instead of writing a corrupt length |
+| 9 | low | a newer minor generation reported `VersionMajor` | **fixed**: a matching major with a newer minor is `infinity/version-minor`; `a_newer_minor_generation_is_a_minor_version_error` (fails pre-fix) |
+
+While fixing #2 the re-audit uncovered a real decoder bug the review had not
+listed: `push_bytes` left a semantically refused frame in its buffer, so a
+caller retrying with corrected bytes replayed the bad frame first. The buffer is
+now drained on a semantic error (the semantic state is already rolled back); the
+pending-delta test pins the retry path.
+
+Gate: 332 all-features, clippy clean both feature sets; 11 new behavioural
+tests, all proved to fail against the pre-fix tree.

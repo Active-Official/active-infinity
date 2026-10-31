@@ -1,6 +1,9 @@
 //! Marathon section I-06: the stream and delta codec.
 
-use active_infinity::stream::{apply_delta, decode_stream, DeltaOp, StreamEncoder};
+use active_infinity::stream::{
+    apply_delta, decode_stream, encode_stream, DeltaOp, Frame, FrameKind, StreamDecoder,
+    StreamEncoder, MAX_FRAME_PAYLOAD,
+};
 use active_infinity::{encode, AnnotationKind, InfinityModule, Inode, NodeId};
 
 /// A base whose ids are already canonical, which is what a stream carries: the
@@ -160,4 +163,115 @@ fn an_incremental_generation_resets_its_delta_budget() {
     let mut decoder = active_infinity::stream::StreamDecoder::new().with_limits(limits);
     decoder.push_bytes(&bytes).expect("the stream decodes");
     decoder.finish().expect("the stream finishes");
+}
+
+#[test]
+fn a_split_frame_is_truncated_not_over_limit() {
+    let frame = Frame::new(FrameKind::Batch, 0, vec![0u8; 100]);
+    let bytes = frame.to_bytes();
+    // Complete header, partial payload: a reader must wait for the rest rather
+    // than treat an honest split as a fatal frame-length fault.
+    let error = Frame::parse(&bytes[..40]).expect_err("a partial payload is truncated");
+    assert_eq!(error.code(), "infinity/truncated", "{error}");
+}
+
+#[test]
+fn a_failed_incremental_end_keeps_its_pending_deltas() {
+    let base = base_module();
+    let root = base.root().expect("root");
+    let ops = vec![DeltaOp::SetAnnotation {
+        node: root,
+        kind: AnnotationKind::Intent("kept".into()),
+    }];
+    let mut encoder = StreamEncoder::new(&base, 4096).expect("encoder");
+    encoder.push_delta(&base, &ops).expect("delta");
+    let frames = encoder.frames();
+    let end = frames.last().expect("end frame").clone();
+
+    let mut decoder = StreamDecoder::new();
+    for frame in &frames[..frames.len() - 1] {
+        decoder.push_bytes(&frame.to_bytes()).expect("frame");
+    }
+    // A wrong declared size must not consume the pending delta.
+    let mut payload = end.payload.clone();
+    payload[32] ^= 0xFF;
+    let bad = Frame::new(FrameKind::End, end.sequence, payload);
+    let error = decoder.push_bytes(&bad.to_bytes()).expect_err("bad end");
+    assert!(error.code().starts_with("infinity/"), "{error}");
+
+    // The corrected end now succeeds and the annotation is present.
+    decoder
+        .push_bytes(&end.to_bytes())
+        .expect("a corrected end applies the pending delta");
+    let streamed = decoder.finish().expect("finish");
+    assert!(
+        streamed.module.annotations().iter().any(
+            |annotation| matches!(&annotation.kind, AnnotationKind::Intent(text) if text == "kept")
+        ),
+        "the pending annotation was lost"
+    );
+}
+
+#[test]
+fn a_dangling_annotation_expression_is_a_stream_delta() {
+    let base = base_module();
+    let root = base.root().expect("root");
+    let error = apply_delta(
+        &base,
+        &[DeltaOp::SetAnnotation {
+            node: root,
+            kind: AnnotationKind::Constraint {
+                source: "x".into(),
+                expr: NodeId(9_999),
+            },
+        }],
+    )
+    .expect_err("a dangling constraint expression is refused");
+    assert_eq!(error.code(), "infinity/stream-delta", "{error}");
+}
+
+#[test]
+fn a_chunk_that_cannot_fit_a_frame_is_refused() {
+    let base = base_module();
+    let error = encode_stream(&base, MAX_FRAME_PAYLOAD as usize)
+        .expect_err("a batch payload would exceed the frame ceiling");
+    assert_eq!(error.code(), "infinity/invalid-argument", "{error}");
+}
+
+#[test]
+fn a_delta_immutable_flag_of_two_is_refused() {
+    let base = base_module();
+    let frames = encode_stream(&base, 4096).expect("stream");
+    let last = frames.last().expect("frames").sequence;
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&1u32.to_le_bytes());
+    payload.push(5); // SetAnnotation
+    payload.extend_from_slice(&0u32.to_le_bytes()); // node 0
+    payload.push(2); // AiImmutable
+    payload.push(2); // out of range
+    let delta = Frame::new(FrameKind::Delta, last + 1, payload);
+    let mut bytes = Vec::new();
+    for frame in &frames {
+        bytes.extend_from_slice(&frame.to_bytes());
+    }
+    bytes.extend_from_slice(&delta.to_bytes());
+    let error = decode_stream(&bytes).expect_err("flag 2 is not canonical");
+    assert_eq!(error.code(), "infinity/stream-delta", "{error}");
+}
+
+#[test]
+fn a_newer_minor_generation_is_a_minor_version_error() {
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&active_infinity::FORMAT_MAJOR.to_le_bytes());
+    payload.extend_from_slice(&(active_infinity::FORMAT_MINOR + 1).to_le_bytes());
+    payload.extend_from_slice(&0u16.to_le_bytes());
+    payload.extend_from_slice(&0u16.to_le_bytes());
+    payload.extend_from_slice(&active_infinity::dialect_hash().to_le_bytes());
+    payload.extend_from_slice(&224u64.to_le_bytes());
+    let begin = Frame::new(FrameKind::Begin, 0, payload);
+    let mut decoder = StreamDecoder::new();
+    let error = decoder
+        .push_bytes(&begin.to_bytes())
+        .expect_err("a newer minor is refused");
+    assert_eq!(error.code(), "infinity/version-minor", "{error}");
 }

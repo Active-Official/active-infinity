@@ -96,7 +96,17 @@ pub struct Frame {
 }
 
 impl Frame {
+    /// # Panics
+    ///
+    /// Panics when `payload` is larger than [`MAX_FRAME_PAYLOAD`]: the frame
+    /// length is a `u32` and a larger payload cannot be represented, so the
+    /// infallible constructor refuses the caller bug instead of emitting a
+    /// corrupt frame.
     pub fn new(kind: FrameKind, sequence: u64, payload: Vec<u8>) -> Self {
+        assert!(
+            payload.len() <= MAX_FRAME_PAYLOAD as usize,
+            "frame payload exceeds MAX_FRAME_PAYLOAD"
+        );
         Frame {
             kind,
             sequence,
@@ -106,6 +116,10 @@ impl Frame {
 
     /// Serialize the frame with its header and checksum.
     pub fn to_bytes(&self) -> Vec<u8> {
+        assert!(
+            self.payload.len() <= MAX_FRAME_PAYLOAD as usize,
+            "frame payload exceeds MAX_FRAME_PAYLOAD"
+        );
         let mut out = Vec::with_capacity(FRAME_HEADER_SIZE + self.payload.len());
         out.extend_from_slice(&STREAM_MAGIC);
         out.push(STREAM_VERSION);
@@ -163,9 +177,12 @@ impl Frame {
         let payload_start = FRAME_HEADER_SIZE;
         let payload_end = payload_start + len as usize;
         if payload_end > buf.len() {
-            return Err(Error::StreamFrameLen {
-                declared: len,
-                available: (buf.len() - payload_start) as u64,
+            // A complete header whose payload has not fully arrived is a
+            // truncated read: `push_bytes` waits for more instead of treating an
+            // honest split as a fatal frame-length fault.
+            return Err(Error::Truncated {
+                needed: payload_end as u64,
+                found: buf.len() as u64,
             });
         }
         let payload = &buf[payload_start..payload_end];
@@ -204,8 +221,12 @@ pub fn encode_stream_with(
     chunk: usize,
     opts: EncodeOpts,
 ) -> Result<Vec<Frame>> {
-    if chunk == 0 {
-        return Err(Error::InvalidArgument("chunk size must be non-zero"));
+    // Batch payload = section id + count + chunk length + bytes (9 bytes of
+    // framing). A larger chunk would emit a frame the decoder refuses.
+    if chunk == 0 || chunk > MAX_FRAME_PAYLOAD as usize - 9 {
+        return Err(Error::InvalidArgument(
+            "chunk size must fit one frame payload",
+        ));
     }
     let image = encode_with(module, opts)?;
     let header = crate::layout::Header::parse(&image)?;
@@ -552,7 +573,15 @@ impl DeltaOp {
                         let expr = NodeId(take_u32(buf, cursor)?);
                         AnnotationKind::Constraint { source, expr }
                     }
-                    2 => AnnotationKind::AiImmutable(take_u8(buf, cursor)? != 0),
+                    2 => match take_u8(buf, cursor)? {
+                        0 => AnnotationKind::AiImmutable(false),
+                        1 => AnnotationKind::AiImmutable(true),
+                        _ => {
+                            return Err(Error::StreamDelta(
+                                "immutable annotation flag must be 0 or 1",
+                            ))
+                        }
+                    },
                     _ => return Err(Error::StreamDelta("unknown annotation kind")),
                 };
                 DeltaOp::SetAnnotation { node, kind }
@@ -659,6 +688,11 @@ pub fn apply_delta_in_place(module: &mut InfinityModule, ops: &[DeltaOp]) -> Res
                 if module.get(*node).is_none() {
                     return Err(Error::StreamDelta("annotation subject does not exist"));
                 }
+                if let AnnotationKind::Constraint { expr, .. } = kind {
+                    if module.get(*expr).is_none() {
+                        return Err(Error::StreamDelta("annotation expression does not exist"));
+                    }
+                }
                 module.annotate(*node, kind.clone());
             }
             DeltaOp::ClearAnnotations => module.clear_annotations(),
@@ -673,21 +707,28 @@ pub(crate) fn merge_fragment(
     fragment: &InfinityModule,
 ) -> Result<NodeId> {
     let base_count = base.node_count();
-    // A fragment can be as large as a frame allows, so the merged arena is the
-    // first place a hostile delta could wrap the u32 id space.
+    // A fragment can be as large as a frame allows. The merged arena is bounded
+    // by the default node ceiling (well below the u32 id space) so a stream of
+    // tiny fragments cannot turn a small wire budget into a huge arena and an
+    // expensive canonical encode.
+    let arena_limit = crate::layout::Limits::default().max_nodes as usize;
     let merged = base_count
         .checked_add(fragment.node_count())
-        .filter(|total| *total <= u32::MAX as usize)
+        .filter(|total| *total <= arena_limit)
         .ok_or(Error::Limit {
-            kind: "nodes",
-            limit: u32::MAX as u64,
+            kind: "stream arena nodes",
+            limit: arena_limit as u64,
         })?;
     let map: Vec<NodeId> = (base_count..merged)
         .map(|index| NodeId(index as u32))
         .collect();
+    // Remap every node first: a failure must leave the caller's arena untouched.
+    let mut remapped = Vec::with_capacity(fragment.node_count());
     for node in fragment.nodes() {
-        let remapped = remap_node(node, &map)?;
-        base.try_push(remapped)?;
+        remapped.push(remap_node(node, &map)?);
+    }
+    for node in remapped {
+        base.try_push(node)?;
     }
     let root = fragment
         .root()
@@ -764,8 +805,19 @@ impl StreamDecoder {
             }
             match Frame::parse(&self.partial) {
                 Ok((frame, consumed)) => {
-                    self.push(&frame)?;
-                    self.partial.drain(..consumed);
+                    // Drain the frame even when its semantics are refused: the
+                    // semantic state is rolled back inside `push`, and a caller
+                    // that retries with corrected bytes must not have the bad
+                    // frame replayed from the buffer first.
+                    match self.push(&frame) {
+                        Ok(()) => {
+                            self.partial.drain(..consumed);
+                        }
+                        Err(error) => {
+                            self.partial.drain(..consumed);
+                            return Err(error);
+                        }
+                    }
                 }
                 // A short buffer is not an error: wait for the rest of the
                 // frame. A declared length above the frame ceiling is a real
@@ -827,8 +879,11 @@ impl StreamDecoder {
                 }
                 let major = u16::from_le_bytes([frame.payload[0], frame.payload[1]]);
                 let minor = u16::from_le_bytes([frame.payload[2], frame.payload[3]]);
-                if major != crate::layout::FORMAT_MAJOR || minor > crate::layout::FORMAT_MINOR {
+                if major != crate::layout::FORMAT_MAJOR {
                     return Err(Error::VersionMajor(major));
+                }
+                if minor > crate::layout::FORMAT_MINOR {
+                    return Err(Error::VersionMinor(minor));
                 }
                 let flags = u16::from_le_bytes([frame.payload[4], frame.payload[5]]);
                 if flags & !crate::layout::FLAG_KNOWN_MASK != 0 {
@@ -982,10 +1037,6 @@ impl StreamDecoder {
                         .as_ref()
                         .ok_or(Error::StreamState("no module to patch"))?;
                     let updated = apply_delta(base, &self.pending_deltas)?;
-                    self.pending_deltas.clear();
-                    // The budget covers one generation's pending deltas; a
-                    // long-lived session must not accumulate across generations.
-                    self.pending_delta_bytes = 0;
                     let image = encode_with(&updated, EncodeOpts::default())?;
                     if image.len() as u64 != size {
                         return Err(Error::StreamDelta("delta changed the declared size"));
@@ -1002,6 +1053,12 @@ impl StreamDecoder {
                         },
                     )?;
                     let module = crate::decode::decode_validated(&validated)?;
+                    // Only a proven generation consumes the pending ops: a bad
+                    // hash or size must leave them for a corrected retry.
+                    self.pending_deltas.clear();
+                    // The budget covers one generation's pending deltas; a
+                    // long-lived session must not accumulate across generations.
+                    self.pending_delta_bytes = 0;
                     self.module = Some(module);
                     self.image = Some(image);
                     return Ok(());

@@ -1,7 +1,8 @@
 //! Marathon section I-05: the IR, secrets and units.
 
 use active_infinity::{
-    encode, AnnotationKind, InfinityModule, Inode, ProvKind, SchemaFieldSpec, SecretBytes, TypeSpec,
+    encode, AnnotationKind, InfinityModule, Inode, NodeId, ProvKind, Provenance, SchemaFieldSpec,
+    SecretBytes, TypeSpec, UnitTag,
 };
 
 fn base_module() -> InfinityModule {
@@ -94,4 +95,98 @@ fn the_reserved_provenance_kind_has_no_reader() {
         let kind = ProvKind::from_code(code).expect("a defined kind");
         assert_eq!(kind.code(), code);
     }
+}
+
+#[test]
+fn a_node_wider_than_the_ceiling_is_refused_before_it_is_walked() {
+    // A single array can declare an unbounded vector; `validate_structure` used
+    // to check only the node count, so the next pass cloned millions of ids.
+    let mut module = InfinityModule::new();
+    let elements = vec![NodeId(0); (1 << 24) + 1];
+    let array = module.push(Inode::Array { elements });
+    module.set_root(Some(array));
+    let error = module
+        .validate_structure(u64::MAX, 4096)
+        .expect_err("a node wider than the ceiling is refused");
+    assert_eq!(error.code(), "infinity/limit", "{error}");
+    assert!(error.to_string().contains("width"), "{error}");
+}
+
+#[test]
+fn an_empty_named_unit_is_refused_at_encode() {
+    let mut module = InfinityModule::new();
+    let value = module.push(Inode::Int(1));
+    let quantity = module.push(Inode::Quantity {
+        value,
+        unit: UnitTag::Named(String::new()),
+    });
+    module.set_root(Some(quantity));
+    let error = encode(&module).expect_err("an empty unit name cannot be encoded");
+    assert_eq!(error.code(), "infinity/encode", "{error}");
+}
+
+#[test]
+fn string_bytes_counts_bindings_annotations_and_provenance() {
+    let mut module = InfinityModule::new();
+    let root = module.push(Inode::Int(1));
+    module.set_root(Some(root));
+    module.bind("b".repeat(100), root);
+    module.annotate(root, AnnotationKind::Intent("i".repeat(50)));
+    module.set_provenance(Some(Provenance {
+        producer: Some("p".repeat(40)),
+        entries: vec![active_infinity::ProvEntry {
+            key: "k".repeat(10),
+            value: active_infinity::ProvValue::Text("v".repeat(20)),
+        }],
+        ..Provenance::default()
+    }));
+    // 100 binding + 50 intent + 40 producer + 10 key + 20 value.
+    assert!(
+        module.string_bytes() >= 220,
+        "the estimate omitted a heap: {}",
+        module.string_bytes()
+    );
+}
+
+#[test]
+fn an_annotation_expression_is_a_dependency_edge() {
+    let mut module = InfinityModule::new();
+    let subject = module.push(Inode::Int(1));
+    let expression = module.push(Inode::Int(2));
+    module.set_root(Some(subject));
+    module.annotate(
+        subject,
+        AnnotationKind::Constraint {
+            source: "x > 0".into(),
+            expr: expression,
+        },
+    );
+    let edges = module.edges();
+    assert!(
+        edges.contains(&(expression, subject)),
+        "the annotation edge is missing: {edges:?}"
+    );
+    let map = module.dependency_map();
+    assert!(
+        map.get(&subject)
+            .is_some_and(|deps| deps.contains(&expression)),
+        "the reverse map omits the annotation expression"
+    );
+}
+
+#[test]
+fn debug_of_a_large_module_prints_a_summary() {
+    let mut module = InfinityModule::new();
+    let root = module.push(Inode::Int(0));
+    module.set_root(Some(root));
+    for index in 0..70_000i64 {
+        module.push(Inode::Int(index));
+    }
+    let text = format!("{module:?}");
+    assert!(text.contains("large module"), "{text}");
+    assert!(
+        text.len() < 1_024,
+        "a large module must not be printed in full: {} bytes",
+        text.len()
+    );
 }

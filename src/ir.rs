@@ -25,6 +25,8 @@
 use std::collections::HashMap;
 use std::fmt;
 
+use crate::unit::UnitTag;
+
 /// Index into the module arena.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct NodeId(pub u32);
@@ -1076,6 +1078,18 @@ pub struct InfinityModule {
 /// bytes and has no safe renderer.
 impl fmt::Debug for InfinityModule {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Redacting a large module clones the arena and scans every text field
+        // against every secret. A debug print is not worth that cost, so a big
+        // module prints a summary instead of its contents.
+        if self.nodes.len() > 65_536 || self.string_bytes() > (1 << 20) {
+            return f
+                .debug_struct("InfinityModule")
+                .field("nodes", &self.nodes.len())
+                .field("bindings", &self.bindings.len())
+                .field("annotations", &self.annotations.len())
+                .field("omitted", &"large module")
+                .finish();
+        }
         let secrets = crate::interop::secret_texts(self);
         let redact = |text: &str| crate::canonical::redact_text(text, &secrets);
         let mut redacted = self.clone();
@@ -1437,6 +1451,13 @@ impl InfinityModule {
     /// Derived dependency edges, direction dependency → dependent, sorted and
     /// deduplicated. Nodes that reference where they are referenced from are
     /// normal; the graph is a DAG after [`Self::validate_structure`].
+    /// Dependency edges `(dependency, dependent)`.
+    ///
+    /// Node references plus the expression an annotation depends on: a
+    /// constraint annotation on a subject depends on its expression, and a graph
+    /// query that omitted it would report an incomplete dependency set. The wire
+    /// edge table is still derived from node references only; an annotation edge
+    /// is not a structural edge and does not participate in acyclicity.
     pub fn edges(&self) -> Vec<(NodeId, NodeId)> {
         let mut edges = Vec::new();
         for (index, node) in self.nodes.iter().enumerate() {
@@ -1445,16 +1466,29 @@ impl InfinityModule {
                 edges.push((child, dependent));
             }
         }
+        for annotation in &self.annotations {
+            if let AnnotationKind::Constraint { expr, .. } = &annotation.kind {
+                edges.push((*expr, annotation.node));
+            }
+        }
         edges.sort_unstable();
         edges.dedup();
         edges
     }
 
     /// Reverse adjacency (dependent → dependencies).
+    /// Reverse adjacency (`dependent` -> dependencies).
+    ///
+    /// Includes the expression an annotation depends on; see [`Self::edges`].
     pub fn dependency_map(&self) -> HashMap<NodeId, Vec<NodeId>> {
         let mut map: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
         for (index, node) in self.nodes.iter().enumerate() {
             map.insert(NodeId(index as u32), node.children());
+        }
+        for annotation in &self.annotations {
+            if let AnnotationKind::Constraint { expr, .. } = &annotation.kind {
+                map.entry(annotation.node).or_default().push(*expr);
+            }
         }
         map
     }
@@ -1498,6 +1532,44 @@ impl InfinityModule {
             }
             Ok(())
         };
+        // A single node can declare an unbounded vector (array elements, table
+        // fields, interpolation parts, enum members). `children()` would clone
+        // it and the encoder would walk it once per pass, so bound the width
+        // before any of that work.
+        const MAX_NODE_WIDTH: usize = 1 << 24;
+        for node in &self.nodes {
+            let width = match node {
+                Inode::Array { elements } => elements.len(),
+                Inode::Table { fields } | Inode::SchemaTable { fields, .. } => fields.len(),
+                Inode::Interpolate { parts } => parts.len(),
+                Inode::Constrained {
+                    constraint: Constraint::Enum(items),
+                    ..
+                } => items.len(),
+                Inode::SchemaField(spec) => match &spec.typ {
+                    TypeSpec::Enum(members) => members.len(),
+                    _ => 0,
+                },
+                _ => 0,
+            };
+            if width > MAX_NODE_WIDTH {
+                return Err(Error::Limit {
+                    kind: "node width",
+                    limit: MAX_NODE_WIDTH as u64,
+                });
+            }
+            if let Inode::Quantity {
+                unit: UnitTag::Named(name),
+                ..
+            } = node
+            {
+                if name.is_empty() {
+                    // The wire rejects an empty named unit, so the encoder must
+                    // not produce an image it cannot read back.
+                    return Err(Error::Encode("named unit has an empty name"));
+                }
+            }
+        }
         for (index, node) in self.nodes.iter().enumerate() {
             let id = NodeId(index as u32);
             for child in node.children() {
@@ -1708,12 +1780,50 @@ impl InfinityModule {
     }
 
     /// Total string payload bytes (heap size before deduplication).
+    /// Bytes of text the canonical string heap would carry.
+    ///
+    /// Covers node strings, binding names, annotation text and provenance text;
+    /// the encoder interns all of them. It is an estimate for budgeting, not a
+    /// wire size: interning deduplicates shared values.
     pub fn string_bytes(&self) -> u64 {
+        let mut total = 0u64;
         let mut strings = Vec::new();
         for node in &self.nodes {
             node.strings(&mut strings);
         }
-        strings.iter().map(|s| s.len() as u64).sum()
+        total = total.saturating_add(
+            strings
+                .iter()
+                .fold(0u64, |sum, text| sum.saturating_add(text.len() as u64)),
+        );
+        total = total.saturating_add(
+            self.bindings
+                .iter()
+                .fold(0u64, |sum, (name, _)| sum.saturating_add(name.len() as u64)),
+        );
+        for annotation in &self.annotations {
+            total = total.saturating_add(match &annotation.kind {
+                AnnotationKind::Intent(text) => text.len() as u64,
+                AnnotationKind::Constraint { source, .. } => source.len() as u64,
+                AnnotationKind::AiImmutable(_) => 0,
+            });
+        }
+        if let Some(provenance) = &self.provenance {
+            for text in [
+                provenance.producer.as_deref(),
+                provenance.model.as_deref(),
+                provenance.tool.as_deref(),
+            ] {
+                total = total.saturating_add(text.map_or(0, |text| text.len() as u64));
+            }
+            for entry in &provenance.entries {
+                total = total.saturating_add(entry.key.len() as u64);
+                if let ProvValue::Text(text) = &entry.value {
+                    total = total.saturating_add(text.len() as u64);
+                }
+            }
+        }
+        total
     }
 
     /// Rebuild a module from decoded parts (used by the decoder and the

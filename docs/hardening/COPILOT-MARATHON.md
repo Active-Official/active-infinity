@@ -15,7 +15,7 @@ the code → regression test first → minimal fix → targeted tests + clippy �
 | ID | Section | Paths | State | Findings (fixed / rejected / open) | Commits |
 |----|---------|-------|-------|------------------------------------|---------|
 | I-01 | layout / header | `src/layout.rs` | CLEAN (round 2 open items fixed) | 10 fixed, 1 rejected, 0 open | this commit |
-| I-02 | validate | `src/validate.rs` | in progress (slice A fixed; B–E pending) | 3 fixed, 2 rejected, 0 open | this commit |
+| I-02 | validate | `src/validate.rs` | in progress (slices A+B fixed; C–E pending) | 9 fixed, 2 rejected, 0 open | this commit |
 | I-03 | encode / canonical | `src/encode.rs`, `src/canonical.rs` | pending | — | — |
 | I-04 | decode / view | `src/decode.rs`, `src/view.rs` | pending | — | — |
 | I-05 | IR / units | `src/ir.rs`, `src/unit.rs` | pending | — | — |
@@ -97,3 +97,20 @@ Two behaviour changes were caught by existing tests during the fix: the strings
 length word was first read with the wrong stride (caught by the signature and
 compress round-trip tests) and a zeroed-header unit test now expects the
 `total-size` offset error. Both are in the committed suite.
+
+### I-02 validate, slice B (node records, ranges, edges) — 2026-10-31
+
+Six findings; five fixed, one rejected. Every fix has a test in
+`tests/marathon_validate_tests.rs`, and the four behavioural tests were confirmed
+to fail against the pre-fix tree.
+
+| # | Severity | Finding | Disposition |
+|---|---|---|---|
+| 1 | critical | bytes 2..4 of every 32-byte node record (spec §3 "reserved") were never checked; they are covered by the content hash, so an image carrying them validates while `encode(decode(..))` produces different bytes — two bytes per node of hidden data inside the module identity | **fixed** in `Validated::node`: a non-zero reserved byte is `infinity/node`; `a_non_zero_node_reserved_byte_is_refused` |
+| 2 | high | orphan `children`/`fields`/`parts`/`aux` entries were never value-checked, so unused entries (including impossible references) were hidden data | **fixed for the three range tables** by requiring sequential packing in node order (a hole, overlap or out-of-order range is `infinity/count`); `aux` coverage is left to slice D, where type entries also consume aux ranges |
+| 3 | high | unbounded sum of ranges: a small image with `nodes × children` claims made `check_nodes`/`check_edges` iterate 10^13 times | **fixed by the same packing rule**: the running end can never exceed the section count, so total work is bounded by the section size |
+| 4 | high | duplicate `MIN`/`MAX` constraint aux and duplicate schema aux decode last-wins, giving two hashes for one module | **fixed**: constraint `MIN_MAX` tags must be strictly ascending (one each, min then max), schema tags strictly ascending; both are what the encoder emits |
+| 5 | medium | a detached `Blob` (no payload) could declare any `size` | **fixed**: the declared size is held to `max_blob_bytes`; `a_detached_blob_size_is_held_to_the_ceiling` |
+| 6 | low | a self-referential edge was `infinity/edge` while spec §9 defines `infinity/cycle` for a dependency cycle | **fixed**: `from == to` is `Cycle { node }`; `a_self_loop_is_a_cycle` (the pre-existing redteam assertion was updated to the spec code) |
+
+Gate: clippy clean; `cargo test --all-features` 223 passed, 0 failed.

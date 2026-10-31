@@ -75,6 +75,139 @@ fn a_section_offset_past_the_buffer_is_refused_before_any_read() {
     );
 }
 
+fn rewrite_hash(bytes: &mut [u8]) {
+    let hash = active_infinity::encode::hash_image(bytes).expect("hash");
+    bytes[16..48].copy_from_slice(&hash);
+}
+
+/// A module with two sibling tables, so the fields table has two ranges.
+fn two_tables() -> Vec<u8> {
+    let mut module = InfinityModule::new();
+    let a_name = module.push(Inode::Str("a".to_string()));
+    let a_value = module.push(Inode::Int(1));
+    let first = module.push(Inode::Table {
+        fields: vec![("x".to_string(), a_name), ("y".to_string(), a_value)],
+    });
+    let b_name = module.push(Inode::Str("b".to_string()));
+    let b_value = module.push(Inode::Int(2));
+    let second = module.push(Inode::Table {
+        fields: vec![("x".to_string(), b_name), ("y".to_string(), b_value)],
+    });
+    let root = module.push(Inode::Table {
+        fields: vec![("first".to_string(), first), ("second".to_string(), second)],
+    });
+    module.set_root(Some(root));
+    encode(&module).expect("encode")
+}
+
+fn node_offset(bytes: &[u8], index: usize) -> usize {
+    Header::parse(bytes)
+        .expect("header")
+        .span(Section::Nodes)
+        .offset as usize
+        + index * active_infinity::layout::NODE_RECORD_SIZE
+}
+
+#[test]
+fn a_non_zero_node_reserved_byte_is_refused() {
+    // Bytes 2..4 of every 32-byte node record are reserved. They are hashed, so
+    // an image carrying them validates while re-encoding to different bytes:
+    // two bytes per node of data hidden inside the module identity.
+    for index in 0..3 {
+        let mut bytes = image();
+        let at = node_offset(&bytes, index);
+        bytes[at + 2] = 0xFF;
+        rewrite_hash(&mut bytes);
+        let error = validate(&bytes).expect_err("reserved byte is refused");
+        assert_eq!(error.code(), "infinity/node", "node {index}: {error:?}");
+    }
+}
+
+#[test]
+fn a_table_field_range_out_of_order_is_refused() {
+    // The fields table is packed in node order: the first table claims [0,2) and
+    // the second [2,4). Swapping the two starts keeps both ranges in bounds but
+    // breaks the packing, which is how unused or overlapping entries hide.
+    let mut bytes = two_tables();
+    let nodes = Header::parse(&bytes).expect("header").span(Section::Nodes);
+    let mut tables = Vec::new();
+    for index in 0..nodes.count as usize {
+        let at = nodes.offset as usize + index * active_infinity::layout::NODE_RECORD_SIZE;
+        let kind = bytes[at];
+        let len = u64::from_le_bytes(bytes[at + 16..at + 24].try_into().expect("len"));
+        if kind == 8 && len == 2 {
+            tables.push(at);
+        }
+    }
+    assert!(tables.len() >= 2, "the fixture has two two-field tables");
+    let first = tables[0];
+    let second = tables[1];
+    bytes[first + 8..first + 16].copy_from_slice(&2u64.to_le_bytes());
+    bytes[second + 8..second + 16].copy_from_slice(&0u64.to_le_bytes());
+    rewrite_hash(&mut bytes);
+    let error = validate(&bytes).expect_err("a non-packed field range is refused");
+    assert_eq!(error.code(), "infinity/count", "{error:?}");
+}
+
+#[test]
+fn a_duplicate_constraint_bound_is_refused() {
+    // `min` and `max` are separate aux tags; the same tag twice decodes to one
+    // value and re-encodes to one entry, so two hashes would name one module.
+    let mut module = InfinityModule::new();
+    let inner = module.push(Inode::Int(5));
+    let constrained = module.push(Inode::Constrained {
+        target: inner,
+        constraint: active_infinity::ir::Constraint::MinMax {
+            min: Some(1),
+            max: Some(9),
+        },
+    });
+    module.set_root(Some(constrained));
+    let mut bytes = encode(&module).expect("encode");
+    let header = Header::parse(&bytes).expect("header");
+    let aux = header.span(Section::Aux).offset as usize;
+    // The second aux entry's tag (max = 1) becomes min (0).
+    bytes[aux + 8..aux + 12].copy_from_slice(&0u32.to_le_bytes());
+    rewrite_hash(&mut bytes);
+    let error = validate(&bytes).expect_err("duplicate constraint tags are refused");
+    assert_eq!(error.code(), "infinity/node", "{error:?}");
+}
+
+#[test]
+fn a_self_loop_is_a_cycle() {
+    let mut bytes = two_tables();
+    let edges = Header::parse(&bytes).expect("header").span(Section::Edges);
+    assert!(edges.count > 0);
+    let at = edges.offset as usize;
+    let to = u32::from_le_bytes(bytes[at + 4..at + 8].try_into().expect("to"));
+    bytes[at..at + 4].copy_from_slice(&to.to_le_bytes());
+    rewrite_hash(&mut bytes);
+    let error = validate(&bytes).expect_err("a self-loop is a cycle");
+    assert_eq!(error.code(), "infinity/cycle", "{error:?}");
+}
+
+#[test]
+fn a_detached_blob_size_is_held_to_the_ceiling() {
+    // A blob that travels without bytes still declares its size. That claim is
+    // part of the module, so it cannot exceed the blob ceiling.
+    let mut module = InfinityModule::new();
+    let media = module.push(Inode::Str("application/octet-stream".to_string()));
+    let blob = module.push(Inode::Blob {
+        hash: [7u8; 32],
+        size: u64::MAX,
+        tainted: false,
+        media_type: "application/octet-stream".to_string(),
+        payload: None,
+    });
+    let root = module.push(Inode::Table {
+        fields: vec![("media".to_string(), media), ("blob".to_string(), blob)],
+    });
+    module.set_root(Some(root));
+    let bytes = encode(&module).expect("encode");
+    let error = validate(&bytes).expect_err("an impossible detached size is refused");
+    assert_eq!(error.code(), "infinity/limit", "{error:?}");
+}
+
 #[test]
 fn a_canonical_image_still_validates_under_strict_limits() {
     let opts = DecodeOpts {

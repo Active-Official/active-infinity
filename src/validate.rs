@@ -208,6 +208,16 @@ impl<'a> Validated<'a> {
         let offset =
             self.header.span(Section::Nodes).offset as usize + id.index() * NODE_RECORD_SIZE;
         let rec = &self.buf[offset..offset + NODE_RECORD_SIZE];
+        // Bytes 2..4 of a node record are reserved and must be zero. They are
+        // covered by the content hash, so an image with a non-zero reserved byte
+        // validates but cannot re-encode to itself: two bytes per node of hidden
+        // data inside the module's identity.
+        if rec[2] != 0 || rec[3] != 0 {
+            return Err(Error::Node {
+                id: id.0,
+                reason: "non-zero node reserved bytes",
+            });
+        }
         Ok(NodeRec {
             kind: rec[0],
             flags: rec[1],
@@ -985,6 +995,14 @@ impl<'a> Validated<'a> {
         let aux_count = self.header.span(Section::Aux).count;
         let blob_count = self.header.span(Section::Blobs).count;
         let secret_count = self.header.span(Section::Secrets).count;
+        // The three range tables are packed sequentially in node order: each
+        // node's range starts where the previous one ended. Enforcing that here
+        // bounds the total work by the section size (a wide alias used to make
+        // the validator iterate `nodes x table` entries) and closes the holes and
+        // overlaps that a canonical image never has.
+        let mut next_children = 0u64;
+        let mut next_fields = 0u64;
+        let mut next_parts = 0u64;
         for index in 0..count {
             let id = NodeId(index);
             let rec = self.node(id)?;
@@ -1016,6 +1034,21 @@ impl<'a> Validated<'a> {
                 }
                 Ok(())
             };
+            let packed =
+                |start: u64, len: u64, next: &mut u64, field: &'static str| -> Result<()> {
+                    if start != *next {
+                        // A hole before the range, an overlap with a previous node, or
+                        // an out-of-order range: all non-canonical and all hidden data.
+                        return Err(Error::Count {
+                            field,
+                            value: start,
+                        });
+                    }
+                    *next = next
+                        .checked_add(len)
+                        .ok_or(Error::Count { field, value: len })?;
+                    Ok(())
+                };
             let string = |value: u32| -> Result<()> {
                 if value >= string_count {
                     Err(Error::StringRef(value))
@@ -1102,6 +1135,7 @@ impl<'a> Validated<'a> {
                 }
                 7 => {
                     range(rec.a, rec.b, child_count, "array range out of bounds")?;
+                    packed(rec.a, rec.b, &mut next_children, "children")?;
                     if rec.aux != 0 || rec.c != 0 || rec.flags != 0 {
                         return Err(Error::Node {
                             id: index,
@@ -1115,6 +1149,7 @@ impl<'a> Validated<'a> {
                 }
                 8 | 20 => {
                     range(rec.a, rec.b, field_count, "field range out of bounds")?;
+                    packed(rec.a, rec.b, &mut next_fields, "fields")?;
                     if rec.aux != 0 || rec.c != 0 {
                         return Err(Error::Node {
                             id: index,
@@ -1186,6 +1221,7 @@ impl<'a> Validated<'a> {
                 }
                 14 => {
                     range(rec.a, rec.b, part_count, "part range out of bounds")?;
+                    packed(rec.a, rec.b, &mut next_parts, "parts")?;
                     if rec.aux != 0 || rec.c != 0 || rec.flags != 0 {
                         return Err(Error::Node {
                             id: index,
@@ -1277,11 +1313,18 @@ impl<'a> Validated<'a> {
                             }
                         }
                     }
+                    let ascending = seen_kinds.windows(2).all(|pair| pair[0] < pair[1]);
                     let expected_matches = match rec.aux {
-                        crate::layout::CONSTRAINT_KIND_MIN_MAX => seen_kinds.iter().all(|tag| {
-                            *tag == crate::layout::AUX_CONSTRAINT_MIN
-                                || *tag == crate::layout::AUX_CONSTRAINT_MAX
-                        }),
+                        // The encoder writes min then max; a duplicate or a
+                        // reversed pair decodes to the same value and re-encodes
+                        // differently, which would give two hashes for one module.
+                        crate::layout::CONSTRAINT_KIND_MIN_MAX => {
+                            ascending
+                                && seen_kinds.iter().all(|tag| {
+                                    *tag == crate::layout::AUX_CONSTRAINT_MIN
+                                        || *tag == crate::layout::AUX_CONSTRAINT_MAX
+                                })
+                        }
                         crate::layout::CONSTRAINT_KIND_ENUM => seen_kinds
                             .iter()
                             .all(|tag| *tag == crate::layout::AUX_CONSTRAINT_ENUM_ITEM),
@@ -1371,8 +1414,18 @@ impl<'a> Validated<'a> {
                             reason: "unused fields in SchemaField node",
                         });
                     }
+                    let mut previous_tag: Option<u32> = None;
                     for offset in rec.b..rec.b + rec.c {
                         let (tag, value) = self.aux(offset as u32)?;
+                        if let Some(previous) = previous_tag {
+                            if tag <= previous {
+                                return Err(Error::Node {
+                                    id: index,
+                                    reason: "schema aux tags are not strictly ascending",
+                                });
+                            }
+                        }
+                        previous_tag = Some(tag);
                         match tag {
                             crate::layout::AUX_SCHEMA_MIN
                             | crate::layout::AUX_SCHEMA_MAX
@@ -1435,6 +1488,16 @@ impl<'a> Validated<'a> {
                         });
                     }
                     let size = rec.b;
+                    // A detached blob (identity without bytes) may declare its full
+                    // size; that claim is part of the module, so it is held to the
+                    // same ceiling as a materialised payload. Otherwise a node could
+                    // assert a size no consumer could ever allocate.
+                    if size > limits.max_blob_bytes as u64 {
+                        return Err(Error::Limit {
+                            kind: "blob size",
+                            limit: limits.max_blob_bytes as u64,
+                        });
+                    }
                     if has_payload {
                         let payload = self.blob(rec.a as u32)?;
                         if payload.len() as u64 != size {
@@ -1469,6 +1532,15 @@ impl<'a> Validated<'a> {
                     }
                 }
                 _ => unreachable!("kind checked above"),
+            }
+        }
+        for (field, next, total) in [
+            ("children", next_children, child_count),
+            ("fields", next_fields, field_count),
+            ("parts", next_parts, part_count),
+        ] {
+            if next != total as u64 {
+                return Err(Error::Count { field, value: next });
             }
         }
         Ok(())
@@ -1513,7 +1585,12 @@ impl<'a> Validated<'a> {
         for index in 0..count {
             let from = read_u32(self.buf, base + index as usize * 8)?;
             let to = read_u32(self.buf, base + index as usize * 8 + 4)?;
-            if from >= node_count || to >= node_count || from == to {
+            if from == to {
+                // A node that depends on itself is a cycle, and the contract for
+                // a cycle names the node.
+                return Err(Error::Cycle { node: from });
+            }
+            if from >= node_count || to >= node_count {
                 return Err(Error::Edge { from, to });
             }
             if let Some(previous) = previous {

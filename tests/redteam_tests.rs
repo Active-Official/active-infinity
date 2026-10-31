@@ -108,7 +108,9 @@ fn threat_self_referential_edge_and_forged_graph() {
     forged[edge_at..edge_at + 4].copy_from_slice(&to.to_le_bytes());
     rewrite_hash(&mut forged);
     let error = validate(&forged).unwrap_err();
-    assert_eq!(error.code(), "infinity/edge");
+    // A node that depends on itself is a cycle (spec §9 names the node), not a
+    // malformed edge: agents branch on the code.
+    assert_eq!(error.code(), "infinity/cycle");
 }
 
 #[test]

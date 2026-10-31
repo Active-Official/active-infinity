@@ -1,5 +1,15 @@
 # Changelog - Active Infinity
 
+## Unreleased
+
+### Added
+
+- **Optional proof sidecars** (ADR-0014): `active_infinity::proof::Proof` records
+  the content hash, size, node/edge/secret counts, dialect and an optional
+  companion-schema hash, and verifies them against the canonical image
+  (`infinity/proof` on any mismatch). JSON sidecars round-trip, and
+  `active-infinity-cli proof issue|verify` writes and checks them.
+
 ## 2.2.0 - 2026-10-31
 
 Additive release from the Active Maturity Program. The `AINF` wire format is

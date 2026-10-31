@@ -273,3 +273,57 @@ fn store_put_and_get_round_trip() {
     // The stored image still decodes.
     decode(&bytes).expect("decode");
 }
+
+#[test]
+fn proof_issue_and_verify_round_trip() {
+    let dir = sandbox("proof");
+    let image = dir.join("image.ainf");
+    write(&image, &image_bytes_for_proof());
+    let proof = dir.join("proof.json");
+    let issued = run(&[
+        "proof",
+        "issue",
+        image.to_str().expect("utf8"),
+        "--output",
+        proof.to_str().expect("utf8"),
+    ]);
+    assert!(issued.status.success(), "{}", stderr(&issued));
+    let text = fs::read_to_string(&proof).expect("sidecar");
+    assert!(text.contains("active-infinity/proof/1"), "{text}");
+
+    let verified = run(&[
+        "proof",
+        "verify",
+        image.to_str().expect("utf8"),
+        proof.to_str().expect("utf8"),
+    ]);
+    assert!(verified.status.success(), "{}", stderr(&verified));
+    assert!(stdout(&verified).contains("ok hash="));
+
+    // A sidecar whose hash was edited must be refused.
+    let mut value: serde_json::Value = serde_json::from_str(&text).expect("json");
+    value["content_hash"] = serde_json::Value::String("00".repeat(32));
+    fs::write(&proof, value.to_string()).expect("tamper");
+    let refused = run(&[
+        "proof",
+        "verify",
+        image.to_str().expect("utf8"),
+        proof.to_str().expect("utf8"),
+    ]);
+    assert_eq!(refused.status.code(), Some(1));
+    assert!(
+        stderr(&refused).contains("infinity/proof"),
+        "{}",
+        stderr(&refused)
+    );
+}
+
+fn image_bytes_for_proof() -> Vec<u8> {
+    image(9)
+}
+
+#[test]
+fn proof_verify_without_a_sidecar_is_a_usage_error() {
+    let output = run(&["proof", "verify"]);
+    assert_eq!(output.status.code(), Some(2));
+}

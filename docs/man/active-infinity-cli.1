@@ -44,6 +44,14 @@ larger than the samples can support is refused.
 Compress with a dictionary, or decompress with an explicit output ceiling
 (default 64 MiB).
 .TP
+.B proof issue \fIimage\fR [--schema PATH] [--output PATH]
+Write a JSON sidecar recording the content hash, size, counts, secret count,
+dialect and an optional companion-schema hash.
+.TP
+.B proof verify \fIimage\fR \fIproof\fR [--schema PATH]
+Recompute every property and refuse any mismatch with
+.IR infinity/proof .
+.TP
 .B bench \fIencode|decode|validate|hash\fR \fIfile\fR [--iterations N]
 Local microbench; prints p50, p95 and p99 in nanoseconds.
 .TP
@@ -77,6 +85,8 @@ active-infinity-cli decode app.ainf
 active-infinity-cli dict train --output frames.dict tests/vectors/valid/*.ainf
 active-infinity-cli dict apply --dictionary frames.dict --output app.ainf.zst app.ainf
 active-infinity-cli bench validate app.ainf --iterations 100
+active-infinity-cli proof issue app.ainf --output app.proof.json
+active-infinity-cli proof verify app.ainf app.proof.json
 fi
 .SH NOTES
 Compression is transport and storage only: the content hash is always computed

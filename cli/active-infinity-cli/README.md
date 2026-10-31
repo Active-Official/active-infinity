@@ -17,6 +17,8 @@ active-infinity-cli <command> [options]
   store get <hash> [--root DIR] [--output PATH]
   dict train --output <dict> [--size N] <sample>...
   dict apply --dictionary <dict> [--decompress] [--level N] [--max-bytes N] <input>
+  proof issue <image> [--schema PATH] [--output PATH]
+  proof verify <image> <proof> [--schema PATH]
   bench <encode|decode|validate|hash> <file> [--iterations N]
   conformance run [--manifest PATH]
   doctor
@@ -37,6 +39,8 @@ Without `--output`, commands that emit bytes write to stdout.
 | `store put` / `store get` | Content-addressed local store (default root `.active-store`). `put` prints the hash. |
 | `dict train` | Train a zstd dictionary from representative images or frames. |
 | `dict apply` | Compress with a dictionary, or decompress with `--decompress` and an output ceiling. |
+| `proof issue` | Write a JSON sidecar: hash, size, counts, secret count, dialect and an optional companion-schema hash. |
+| `proof verify` | Recompute every property and refuse a mismatch with `infinity/proof`. |
 | `bench` | Local microbench; prints `p50_ns`, `p95_ns`, `p99_ns`. |
 | `conformance run` | Run the vector pack; prints a JSON scorecard and fails on any case. |
 | `doctor` | Version, compiled features, exit codes. |
@@ -71,6 +75,10 @@ active-infinity-cli dict apply --decompress --dictionary frames.dict \
 # Microbench and conformance
 active-infinity-cli bench validate app.ainf --iterations 100
 active-infinity-cli conformance run --manifest conformance/manifest.json
+
+# Proof sidecar
+active-infinity-cli proof issue app.ainf --output app.proof.json
+active-infinity-cli proof verify app.ainf app.proof.json
 ```
 
 ## Notes

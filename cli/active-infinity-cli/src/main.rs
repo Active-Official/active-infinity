@@ -13,7 +13,7 @@ use active_infinity::compress::{
 use active_infinity::stream::StreamDecoder;
 use active_infinity::{
     content_hash_hex, decode, encode, interop::from_active_source, validate, validate_canonical,
-    Limits, Store, VERSION,
+    Limits, Proof, Store, VERSION,
 };
 use serde_json::json;
 
@@ -79,6 +79,7 @@ fn run(args: Vec<String>) -> Result<(), String> {
         "stream" => stream_command(&args),
         "store" => store_command(&args),
         "dict" => dict_command(&args),
+        "proof" => proof_command(&args),
         "bench" => bench_command(&args),
         "conformance" => conformance(&args),
         "help" | "--help" | "-h" => {
@@ -181,6 +182,44 @@ fn flag_number(
         Some(value) => value
             .parse()
             .map_err(|_| format!("{name} expects a number")),
+    }
+}
+
+fn proof_command(args: &[String]) -> Result<(), String> {
+    let (positional, flags) = split_args(&args[1..]);
+    let usage = "usage: proof issue <image> [--schema PATH] [--output PATH]\n       proof verify <image> <proof> [--schema PATH]";
+    let action = positional.first().ok_or_else(|| usage.to_string())?;
+    let schema = match flags.get("--schema").filter(|path| !path.is_empty()) {
+        Some(path) => Some(read(path)?),
+        None => None,
+    };
+    match action.as_str() {
+        "issue" => {
+            let image = read(positional.get(1).ok_or_else(|| usage.to_string())?)?;
+            let proof = Proof::issue_with_schema(&image, schema.as_deref())
+                .map_err(|error| format!("{}: {error}", error.code()))?;
+            let json = proof.to_json();
+            write_output(args, json.as_bytes())
+        }
+        "verify" => {
+            let image = read(positional.get(1).ok_or_else(|| usage.to_string())?)?;
+            let proof_path = positional.get(2).ok_or_else(|| usage.to_string())?;
+            let text = fs::read_to_string(proof_path).map_err(|error| error.to_string())?;
+            let proof =
+                Proof::from_json(&text).map_err(|error| format!("{}: {error}", error.code()))?;
+            proof
+                .verify_with_schema(&image, schema.as_deref())
+                .map_err(|error| format!("{}: {error}", error.code()))?;
+            println!(
+                "ok hash={} size={} nodes={} secrets={}",
+                hex(&proof.content_hash),
+                proof.size,
+                proof.nodes,
+                proof.secrets
+            );
+            Ok(())
+        }
+        other => Err(format!("usage: unknown proof action {other}\n{usage}")),
     }
 }
 
@@ -532,6 +571,11 @@ usage: active-infinity-cli <command> [options]
   dict train --output <dict> [--size N] <sample>...
   dict apply --dictionary <dict> [--decompress] [--level N] [--max-bytes N] <input>
       Train or apply a zstd dictionary. Hashes stay over uncompressed bytes.
+  proof issue <image> [--schema PATH] [--output PATH]
+      Write a JSON sidecar: content hash, size, counts, secrets, dialect and an
+      optional companion-schema hash.
+  proof verify <image> <proof> [--schema PATH]
+      Recompute the properties and refuse any mismatch (infinity/proof).
   bench <encode|decode|validate|hash> <file> [--iterations N]
       Local microbench: prints p50/p95/p99 in nanoseconds.
   conformance run [--manifest PATH]

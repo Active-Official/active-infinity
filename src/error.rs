@@ -106,6 +106,8 @@ pub enum Error {
     Store(&'static str),
     /// Detached signature envelope is malformed or the signature is invalid.
     Signature(&'static str),
+    /// A proof sidecar does not match the image it describes.
+    Proof(&'static str),
 
     // ---- encoding ------------------------------------------------------
     /// A module cannot be encoded (dangling reference, duplicate key, ...).
@@ -179,6 +181,7 @@ impl Error {
             Error::Compression(_) => "infinity/compression",
             Error::Store(_) => "infinity/store",
             Error::Signature(_) => "infinity/signature",
+            Error::Proof(_) => "infinity/proof",
             Error::Encode(_) => "infinity/encode",
             Error::EncodeDangling(_) => "infinity/encode-dangling",
             Error::TooLarge => "infinity/too-large",
@@ -258,6 +261,7 @@ impl fmt::Display for Error {
             Error::Compression(reason) => write!(f, "compression failed: {reason}"),
             Error::Store(reason) => write!(f, "store failed: {reason}"),
             Error::Signature(reason) => write!(f, "signature envelope failed: {reason}"),
+            Error::Proof(reason) => write!(f, "proof sidecar rejected: {reason}"),
             Error::Encode(what) => write!(f, "cannot encode module: {what}"),
             Error::EncodeDangling(id) => write!(f, "cannot encode: dangling node {id}"),
             Error::TooLarge => write!(f, "module exceeds the 4 GiB addressable image"),

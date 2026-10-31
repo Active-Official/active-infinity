@@ -66,6 +66,7 @@ pub mod error;
 pub mod interop;
 pub mod ir;
 pub mod layout;
+pub mod proof;
 pub mod protobuf;
 pub mod schema;
 #[cfg(feature = "signatures")]
@@ -88,6 +89,7 @@ pub use layout::{
     dialect_hash, DecodeOpts, EncodeOpts, Limits, Meta, Section, FLAG_CANONICAL, FORMAT_MAJOR,
     FORMAT_MINOR, HEADER_SIZE,
 };
+pub use proof::Proof;
 pub use protobuf::to_protobuf;
 pub use schema::Schema;
 #[cfg(feature = "signatures")]

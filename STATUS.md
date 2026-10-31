@@ -24,7 +24,7 @@ has a test or a CI job behind it; residual risks are listed, not hidden.
 | C-7 speed and bakeoffs | complete | `docs/spec/performance.md`, `perf-gate` |
 | C-8 polyglot matrix (20 languages) | complete | `polyglot/STATUS.md`, `polyglot-rpc`, `polyglot-matrix` |
 | C-9 CLIs | complete | `active-infinity-cli` 0.3.0 on crates.io, man page, CLI tests |
-| C-10 hardening | complete | nightly fuzz, `polyglot-rpc` strict mode, supply-chain gates |
+| C-10 hardening | complete | nightly fuzz, `polyglot-rpc` strict mode, supply-chain gates, review rounds 27-28 |
 | C-11 innovations | complete | TTL caps and receipts (RPC), replay (RPC), WASM tools (RPC), proof sidecars, three-way merge, topics (RPC) |
 | C-12 interop | complete | `docs/spec/projection.md` authority rules, bridge spec in the RPC repository |
 | C-13 release | complete | this file, `docs/release-runbook.md`, dual-remote push, crates.io |
@@ -49,8 +49,11 @@ has a test or a CI job behind it; residual risks are listed, not hidden.
 2. **Projections are not authoritative.** JSON and Protobuf are views; a
    consumer must re-validate the AINF bytes to verify identity
    (`docs/spec/projection.md` §0).
-3. **Merge is field-level.** Conflicts are reported at the top-level field name;
-   nested conflict paths and automatic resolution are not implemented.
+3. **Merge is field-level and conservative.** Conflicts are reported at the
+   top-level field name; nested conflict paths and automatic resolution are not
+   implemented. Module metadata is compared by value and conflicts rather than
+   being combined, and a field whose subtree reaches a secret always conflicts
+   (no equality oracle).
 4. **Compression is transport/storage.** The content hash is always over the
    uncompressed canonical image; a compressed profile would need an ADR.
 5. **Facade crates** (`active-infinity-core/stream/interop/wasm` 0.1.x) are thin

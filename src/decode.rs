@@ -436,6 +436,9 @@ pub fn decode_annotations(bytes: &[u8]) -> Result<Vec<Annotation>> {
                 source: validated.string(a)?.to_string(),
                 expr: NodeId(b),
             },
+            // The validator accepts the immutable flag; the cheap accessor must
+            // agree with the full decoder (`decode_validated` reads `a`).
+            ANN_KIND_AI_IMMUTABLE => AnnotationKind::AiImmutable(a == 1),
             _ => {
                 return Err(Error::Annotation {
                     id: index,

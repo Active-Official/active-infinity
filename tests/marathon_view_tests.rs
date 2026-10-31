@@ -36,9 +36,11 @@ fn printing_a_view_never_prints_the_secret_heap() {
 }
 
 #[test]
-fn count_matches_children_for_every_kind() {
+fn count_covers_children_for_every_kind() {
     // `count()` returned zero for kinds that point at another node, so a caller
-    // sizing work by it skipped those references.
+    // sizing work by it skipped those references. It is an upper bound for a
+    // mixed record (literal interpolation parts, string aux entries, patch
+    // paths), never a smaller number than the node references.
     let mut module = InfinityModule::new();
     let value = module.push(Inode::Int(5));
     let quantity = module.push(Inode::Quantity {
@@ -78,9 +80,8 @@ fn count_matches_children_for_every_kind() {
         let id = NodeId(index);
         let node = view.node(id).expect("node");
         let children = view.children(id).expect("children");
-        assert_eq!(
-            node.count() as usize,
-            children.len(),
+        assert!(
+            children.len() <= node.count() as usize,
             "kind {} reports {} but carries {}",
             node.kind_name(),
             node.count(),
@@ -166,5 +167,41 @@ fn an_unknown_annotation_kind_is_refused_by_the_accessor() {
     assert!(
         active_infinity::view::InfinityView::with_opts(&bytes, opts).is_err(),
         "the validating path refuses it too"
+    );
+}
+
+#[test]
+fn the_cheap_annotation_reader_accepts_the_immutable_flag() {
+    let mut module = InfinityModule::new();
+    let value = module.push(Inode::Int(1));
+    module.set_root(Some(value));
+    module.annotate(value, active_infinity::AnnotationKind::AiImmutable(true));
+    let image = encode(&module).expect("encode");
+    let annotations = active_infinity::decode::decode_annotations(&image).expect("annotations");
+    assert_eq!(annotations.len(), 1);
+    assert_eq!(
+        annotations[0].kind,
+        active_infinity::AnnotationKind::AiImmutable(true)
+    );
+}
+
+#[test]
+fn hash_verification_is_reported_for_the_view() {
+    let image = image_with_secret();
+    let verified = InfinityView::new(&image, active_infinity::Limits::default()).expect("view");
+    assert!(verified.hash_verified(), "the default verifies the hash");
+    assert_eq!(
+        verified.content_hash(),
+        active_infinity::content_hash(&image).expect("hash")
+    );
+
+    let opts = active_infinity::DecodeOpts {
+        verify_hash: false,
+        ..active_infinity::DecodeOpts::default()
+    };
+    let unchecked = InfinityView::with_opts(&image, opts).expect("view");
+    assert!(
+        !unchecked.hash_verified(),
+        "verify_hash:false must be reported as an unverified claim"
     );
 }

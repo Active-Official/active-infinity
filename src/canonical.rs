@@ -412,10 +412,14 @@ fn normalize(node: &Inode) -> Inode {
         Inode::Constrained {
             target,
             constraint: Constraint::Enum(items),
-        } => Inode::Constrained {
-            target: *target,
-            constraint: Constraint::Enum(items.clone()),
-        },
+        } => {
+            let mut items = items.clone();
+            items.sort();
+            Inode::Constrained {
+                target: *target,
+                constraint: Constraint::Enum(items),
+            }
+        }
         other => other.clone(),
     }
 }
@@ -443,6 +447,15 @@ pub const SECRET_MARKER: &str = "***SECRET***";
 /// publish that secret as part of the text the image stores. There is no safe
 /// substitution, so the encode fails instead of writing it.
 pub(crate) fn try_redact_text(text: &str, secrets: &[String]) -> Result<String> {
+    // Every pass scans each secret once; a module with a million secrets and a
+    // megabyte of prose would otherwise spend hours inside the encoder. The
+    // estimate is charged before the first scan.
+    if redaction_cost(text, secrets) > MAX_REDACTION_SCAN_BYTES {
+        return Err(Error::Limit {
+            kind: "redaction scan bytes",
+            limit: MAX_REDACTION_SCAN_BYTES as u64,
+        });
+    }
     let marker_tainted = secrets
         .iter()
         .any(|secret| !secret.is_empty() && SECRET_MARKER.contains(secret.as_str()));
@@ -456,7 +469,24 @@ pub(crate) fn try_redact_text(text: &str, secrets: &[String]) -> Result<String> 
     Ok(redact_text(text, secrets))
 }
 
+/// Largest `secrets x text x passes` product one redaction may scan.
+pub(crate) const MAX_REDACTION_SCAN_BYTES: usize = 64 << 20;
+
+/// Upper bound on the comparisons one redaction performs.
+fn redaction_cost(text: &str, secrets: &[String]) -> usize {
+    const PASSES: usize = 8;
+    secrets
+        .len()
+        .saturating_mul(text.len())
+        .saturating_mul(PASSES)
+}
+
 pub(crate) fn redact_text(text: &str, secrets: &[String]) -> String {
+    // The infallible form is used by projections: when the scan would be
+    // unbounded, redact the whole value instead of scanning it.
+    if redaction_cost(text, secrets) > MAX_REDACTION_SCAN_BYTES {
+        return SECRET_MARKER.to_string();
+    }
     let marker_tainted = secrets
         .iter()
         .any(|secret| !secret.is_empty() && SECRET_MARKER.contains(secret.as_str()));
@@ -577,7 +607,16 @@ fn reject_secret_copies(
 }
 
 fn normalize_type(typ: &TypeSpec) -> TypeSpec {
-    typ.clone()
+    match typ {
+        // An enum is a set: sort once here so every later pass (the annotation
+        // key, the type table) sees one order.
+        TypeSpec::Enum(members) => {
+            let mut members = members.clone();
+            members.sort();
+            TypeSpec::Enum(members)
+        }
+        other => other.clone(),
+    }
 }
 
 /// Move secret-only string literals into the secret heap (see step 1b above).
@@ -739,7 +778,18 @@ pub fn remap_node(node: &Inode, remap: &[NodeId]) -> Result<Inode> {
             media_type: map(*media_type)?,
             data: map(*data)?,
         },
-        other => other.clone(),
+        // Leaf variants: no node references. Listed explicitly so a new
+        // child-bearing variant fails to compile instead of being cloned with
+        // its old ids.
+        Inode::Null
+        | Inode::Bool(_)
+        | Inode::Int(_)
+        | Inode::Float(_)
+        | Inode::Str(_)
+        | Inode::DurationMs(_)
+        | Inode::Secret(_)
+        | Inode::Ident(_)
+        | Inode::Blob { .. } => node.clone(),
     };
     Ok(out)
 }
@@ -812,7 +862,18 @@ fn remap_node_in_place(node: &mut Inode, remap: &[NodeId]) -> Result<()> {
             map(media_type, remap)?;
             map(data, remap)?;
         }
-        _ => {}
+        // Leaf variants and the path-only patch ops: no node references.
+        // Listed explicitly so a new child-bearing variant fails to compile.
+        Inode::Null
+        | Inode::Bool(_)
+        | Inode::Int(_)
+        | Inode::Float(_)
+        | Inode::Str(_)
+        | Inode::DurationMs(_)
+        | Inode::Secret(_)
+        | Inode::Ident(_)
+        | Inode::Blob { .. }
+        | Inode::Patch(PatchOp::Remove { .. } | PatchOp::Rename { .. }) => {}
     }
     Ok(())
 }
@@ -825,165 +886,236 @@ fn remap_node_in_place(node: &mut Inode, remap: &[NodeId]) -> Result<()> {
 /// (already canonical) order and writes every non-reference payload; references
 /// are followed, never printed as ids. Secrets contribute a fixed marker, never
 /// their bytes.
-fn content_key(nodes: &[crate::ir::Inode], id: NodeId) -> String {
-    fn render(nodes: &[crate::ir::Inode], id: NodeId, out: &mut String, depth: u32) {
-        if depth > 32 || out.len() > 4096 {
-            out.push('~');
-            return;
+///
+/// The render is exact up to [`KEY_BYTES`]: it never truncates, because a
+/// truncated key would fall back to id order and let arena construction leak
+/// into the hash again. A subtree past the byte or depth budget is refused
+/// (`infinity/limit`); an annotation subject that size is not schema.
+fn content_key(nodes: &[crate::ir::Inode], id: NodeId) -> Result<String> {
+    const KEY_BYTES: usize = 1 << 20;
+    const KEY_DEPTH: u32 = 256;
+
+    fn text(out: &mut String, value: &str) -> Result<()> {
+        if out.len().saturating_add(value.len()) > KEY_BYTES {
+            return Err(Error::Limit {
+                kind: "annotation key bytes",
+                limit: KEY_BYTES as u64,
+            });
+        }
+        out.push_str(value);
+        Ok(())
+    }
+
+    fn ch(out: &mut String, value: char) -> Result<()> {
+        if out.len() >= KEY_BYTES {
+            return Err(Error::Limit {
+                kind: "annotation key bytes",
+                limit: KEY_BYTES as u64,
+            });
+        }
+        out.push(value);
+        Ok(())
+    }
+
+    fn render(nodes: &[crate::ir::Inode], id: NodeId, out: &mut String, depth: u32) -> Result<()> {
+        if depth > KEY_DEPTH {
+            return Err(Error::Limit {
+                kind: "annotation key depth",
+                limit: KEY_DEPTH as u64,
+            });
         }
         let Some(node) = nodes.get(id.index()) else {
-            out.push('?');
-            return;
+            return Err(Error::EncodeDangling(id.0));
         };
         use crate::ir::Inode as I;
         match node {
-            I::Null => out.push('n'),
-            I::Bool(value) => out.push(if *value { 't' } else { 'f' }),
+            I::Null => ch(out, 'n')?,
+            I::Bool(value) => ch(out, if *value { 't' } else { 'f' })?,
             I::Int(value) => {
-                out.push('i');
-                out.push_str(&value.to_string());
+                ch(out, 'i')?;
+                text(out, &value.to_string())?;
             }
             I::Float(value) => {
-                out.push('d');
-                out.push_str(&value.to_bits().to_string());
+                ch(out, 'd')?;
+                text(out, &value.to_bits().to_string())?;
             }
-            I::Str(text) => {
-                out.push('s');
-                out.push_str(&text.len().to_string());
-                out.push(':');
-                out.push_str(text);
+            I::Str(value) => {
+                ch(out, 's')?;
+                text(out, &value.len().to_string())?;
+                ch(out, ':')?;
+                text(out, value)?;
             }
             I::DurationMs(ms) => {
-                out.push('m');
-                out.push_str(&ms.to_string());
+                ch(out, 'm')?;
+                text(out, &ms.to_string())?;
             }
             I::Quantity { value, unit } => {
-                out.push('q');
-                out.push_str(&unit.discriminant().to_string());
-                out.push(':');
-                render(nodes, *value, out, depth + 1);
+                ch(out, 'q')?;
+                text(out, &unit.discriminant().to_string())?;
+                ch(out, ':')?;
+                render(nodes, *value, out, depth + 1)?;
             }
             I::Array { elements } => {
-                out.push('[');
+                ch(out, '[')?;
                 for element in elements {
-                    render(nodes, *element, out, depth + 1);
-                    out.push(',');
+                    render(nodes, *element, out, depth + 1)?;
+                    ch(out, ',')?;
                 }
-                out.push(']');
+                ch(out, ']')?;
             }
             I::Table { fields } => {
-                out.push('{');
+                ch(out, '{')?;
                 for (name, value) in fields {
-                    out.push_str(&name.len().to_string());
-                    out.push(':');
-                    out.push_str(name);
-                    out.push('=');
-                    render(nodes, *value, out, depth + 1);
-                    out.push(',');
+                    text(out, &name.len().to_string())?;
+                    ch(out, ':')?;
+                    text(out, name)?;
+                    ch(out, '=')?;
+                    render(nodes, *value, out, depth + 1)?;
+                    ch(out, ',')?;
                 }
-                out.push('}');
+                ch(out, '}')?;
             }
             // A secret's content is never part of any key.
-            I::Secret(_) => out.push_str("SECRET"),
+            I::Secret(_) => text(out, "SECRET")?,
             I::SecretRef { locator } => {
-                out.push('S');
-                render(nodes, *locator, out, depth + 1);
+                ch(out, 'S')?;
+                render(nodes, *locator, out, depth + 1)?;
             }
             I::Ref(target) => {
-                out.push('R');
-                render(nodes, *target, out, depth + 1);
+                ch(out, 'R')?;
+                render(nodes, *target, out, depth + 1)?;
             }
             I::Env { name, default } => {
-                out.push('E');
-                out.push_str(name);
-                out.push(':');
+                ch(out, 'E')?;
+                text(out, name)?;
+                ch(out, ':')?;
                 if let Some(default) = default {
-                    render(nodes, *default, out, depth + 1);
+                    render(nodes, *default, out, depth + 1)?;
                 }
             }
             I::Ident(name) => {
-                out.push('I');
-                out.push_str(name);
+                ch(out, 'I')?;
+                text(out, name)?;
             }
             I::Interpolate { parts } => {
-                out.push('T');
+                ch(out, 'T')?;
                 for part in parts {
                     match part {
-                        crate::ir::InterpPart::Literal(text) => {
-                            out.push('l');
-                            out.push_str(&text.len().to_string());
-                            out.push(':');
-                            out.push_str(text);
+                        crate::ir::InterpPart::Literal(literal) => {
+                            ch(out, 'l')?;
+                            text(out, &literal.len().to_string())?;
+                            ch(out, ':')?;
+                            text(out, literal)?;
                         }
                         crate::ir::InterpPart::Expr(expr) => {
-                            out.push('e');
-                            render(nodes, *expr, out, depth + 1);
+                            ch(out, 'e')?;
+                            render(nodes, *expr, out, depth + 1)?;
                         }
                     }
                 }
-                out.push('t');
+                ch(out, 't')?;
             }
             I::Binary { op, lhs, rhs } => {
-                out.push('b');
-                out.push_str(op.as_str());
-                out.push(':');
-                render(nodes, *lhs, out, depth + 1);
-                render(nodes, *rhs, out, depth + 1);
+                ch(out, 'b')?;
+                text(out, op.as_str())?;
+                ch(out, ':')?;
+                render(nodes, *lhs, out, depth + 1)?;
+                render(nodes, *rhs, out, depth + 1)?;
             }
             I::Unary { op, expr } => {
-                out.push('u');
-                out.push_str(op.as_str());
-                out.push(':');
-                render(nodes, *expr, out, depth + 1);
+                ch(out, 'u')?;
+                text(out, op.as_str())?;
+                ch(out, ':')?;
+                render(nodes, *expr, out, depth + 1)?;
             }
             I::Constrained { target, constraint } => {
-                out.push('c');
-                out.push_str(&format!("{constraint:?}"));
-                out.push(':');
-                render(nodes, *target, out, depth + 1);
+                ch(out, 'c')?;
+                // `Constraint`'s Debug redacts enum members and pattern text to
+                // a fixed marker, which would give two different constraints the
+                // same ordering key. Render the payload instead.
+                match constraint {
+                    crate::ir::Constraint::MinMax { min, max } => {
+                        ch(out, 'M')?;
+                        for bound in [min, max] {
+                            match bound {
+                                Some(value) => {
+                                    ch(out, 'v')?;
+                                    text(out, &value.to_string())?;
+                                }
+                                None => ch(out, '-')?,
+                            }
+                        }
+                    }
+                    crate::ir::Constraint::Enum(items) => {
+                        ch(out, 'e')?;
+                        // The encoder sorts enum members; the key must too.
+                        let mut ordered: Vec<&String> = items.iter().collect();
+                        ordered.sort();
+                        for item in ordered {
+                            text(out, &item.len().to_string())?;
+                            ch(out, ':')?;
+                            text(out, item)?;
+                        }
+                    }
+                    crate::ir::Constraint::Pattern(pattern) => {
+                        ch(out, 'p')?;
+                        text(out, &pattern.len().to_string())?;
+                        ch(out, ':')?;
+                        text(out, pattern)?;
+                    }
+                    crate::ir::Constraint::Odd => ch(out, 'o')?,
+                    crate::ir::Constraint::Custom(value) => {
+                        ch(out, 'x')?;
+                        text(out, &value.len().to_string())?;
+                        ch(out, ':')?;
+                        text(out, value)?;
+                    }
+                }
+                render(nodes, *target, out, depth + 1)?;
             }
             I::Patch(op) => {
-                out.push('p');
+                ch(out, 'p')?;
                 match op {
                     crate::ir::PatchOp::Set { path, value } => {
-                        out.push('s');
-                        out.push_str(path);
-                        render(nodes, *value, out, depth + 1);
+                        ch(out, 's')?;
+                        text(out, path)?;
+                        render(nodes, *value, out, depth + 1)?;
                     }
                     crate::ir::PatchOp::Remove { path } => {
-                        out.push('r');
-                        out.push_str(path);
+                        ch(out, 'r')?;
+                        text(out, path)?;
                     }
                     crate::ir::PatchOp::Rename { from, to } => {
-                        out.push('n');
-                        out.push_str(from);
-                        out.push_str(to);
+                        ch(out, 'n')?;
+                        text(out, from)?;
+                        text(out, to)?;
                     }
                 }
             }
             I::SchemaField(spec) => {
-                // Every id-bearing field is followed; only the type itself and the
-                // textual fields are written.
-                out.push('F');
-                // The type is rendered field by field: `Debug` redacts enum
-                // members to a count, which would give two different types the
-                // same ordering key.
+                // Every id-bearing field is followed; only the type itself and
+                // the textual fields are written.
+                ch(out, 'F')?;
                 match &spec.typ {
                     crate::ir::TypeSpec::Enum(members) => {
-                        out.push('E');
-                        for member in members {
-                            out.push_str(&member.len().to_string());
-                            out.push(':');
-                            out.push_str(member);
+                        ch(out, 'E')?;
+                        // The encoder sorts members before interning, so the key
+                        // sorts them too: insertion order must not reach the hash.
+                        let mut ordered: Vec<&String> = members.iter().collect();
+                        ordered.sort();
+                        for member in ordered {
+                            text(out, &member.len().to_string())?;
+                            ch(out, ':')?;
+                            text(out, member)?;
                         }
                     }
                     crate::ir::TypeSpec::Table { closed } => {
-                        out.push('T');
-                        out.push(if *closed { '1' } else { '0' });
+                        ch(out, 'T')?;
+                        ch(out, if *closed { '1' } else { '0' })?;
                     }
-                    other => out.push_str(&format!("{other:?}")),
+                    other => text(out, &format!("{other:?}"))?,
                 }
-                for id in [
+                for optional in [
                     spec.min,
                     spec.max,
                     spec.min_len,
@@ -994,35 +1126,35 @@ fn content_key(nodes: &[crate::ir::Inode], id: NodeId) -> String {
                 .into_iter()
                 .flatten()
                 {
-                    render(nodes, id, out, depth + 1);
+                    render(nodes, optional, out, depth + 1)?;
                 }
-                if let Some(text) = &spec.deprecated {
-                    out.push('!');
-                    out.push_str(text);
+                if let Some(spec_text) = &spec.deprecated {
+                    ch(out, '!')?;
+                    text(out, spec_text)?;
                 }
             }
             I::SchemaTable { fields, closed } => {
-                out.push('G');
-                out.push(if *closed { '1' } else { '0' });
+                ch(out, 'G')?;
+                ch(out, if *closed { '1' } else { '0' })?;
                 for (name, value) in fields {
-                    out.push_str(name);
-                    out.push('=');
-                    render(nodes, *value, out, depth + 1);
+                    text(out, name)?;
+                    ch(out, '=')?;
+                    render(nodes, *value, out, depth + 1)?;
                 }
             }
             I::SchemaArray { element } => {
-                out.push('A');
-                render(nodes, *element, out, depth + 1);
+                ch(out, 'A')?;
+                render(nodes, *element, out, depth + 1)?;
             }
             I::Semantic { tag, inner } => {
-                out.push('y');
-                out.push_str(tag.as_str());
-                render(nodes, *inner, out, depth + 1);
+                ch(out, 'y')?;
+                text(out, tag.as_str())?;
+                render(nodes, *inner, out, depth + 1)?;
             }
             I::ContentAddressed { media_type, data } => {
-                out.push('C');
-                render(nodes, *media_type, out, depth + 1);
-                render(nodes, *data, out, depth + 1);
+                ch(out, 'C')?;
+                render(nodes, *media_type, out, depth + 1)?;
+                render(nodes, *data, out, depth + 1)?;
             }
             I::Blob {
                 hash,
@@ -1031,20 +1163,22 @@ fn content_key(nodes: &[crate::ir::Inode], id: NodeId) -> String {
                 media_type,
                 payload,
             } => {
-                out.push('B');
-                out.push_str(&crate::ir::hash_hex(hash));
-                out.push_str(&size.to_string());
-                out.push(if *tainted { '1' } else { '0' });
-                out.push_str(media_type);
+                ch(out, 'B')?;
+                text(out, &crate::ir::hash_hex(hash))?;
+                text(out, &size.to_string())?;
+                ch(out, if *tainted { '1' } else { '0' })?;
+                text(out, media_type)?;
                 if let Some(payload) = payload {
-                    out.push_str(&payload.len().to_string());
+                    text(out, &payload.len().to_string())?;
                 }
             }
         }
+        Ok(())
     }
+
     let mut out = String::new();
-    render(nodes, id, &mut out, 0);
-    out
+    render(nodes, id, &mut out, 0)?;
+    Ok(out)
 }
 
 /// Deterministic pre-order numbering over the reachable graph.
@@ -1068,18 +1202,19 @@ fn canonical_order(nodes: &[Inode], module: &InfinityModule) -> Result<Vec<NodeI
     let mut subjects: Vec<(String, NodeId)> = module
         .annotations()
         .iter()
-        .map(|annotation| (content_key(nodes, annotation.node), annotation.node))
-        .collect();
+        .map(|annotation| Ok((content_key(nodes, annotation.node)?, annotation.node)))
+        .collect::<Result<Vec<_>>>()?;
     subjects.sort();
     roots.extend(subjects.into_iter().map(|(_, id)| id));
     let mut exprs: Vec<(String, NodeId)> = module
         .annotations()
         .iter()
         .filter_map(|annotation| match &annotation.kind {
-            AnnotationKind::Constraint { expr, .. } => Some((content_key(nodes, *expr), *expr)),
+            AnnotationKind::Constraint { expr, .. } => Some(*expr),
             _ => None,
         })
-        .collect();
+        .map(|expr| Ok((content_key(nodes, expr)?, expr)))
+        .collect::<Result<Vec<_>>>()?;
     exprs.sort();
     roots.extend(exprs.into_iter().map(|(_, id)| id));
 

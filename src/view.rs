@@ -40,6 +40,12 @@ impl NodeView {
     /// Every kind that carries references reports them here; a caller that sizes
     /// or bounds work by `count()` must not skip the children of a scalar that
     /// points at another node.
+    /// Number of child entries the record declares.
+    ///
+    /// This is an **upper bound** on node references for a mixed record: an
+    /// `Interpolate` counts its literal parts, a `Constrained` counts every aux
+    /// entry (some are strings), a `Patch` counts path aux entries. Use
+    /// [`InfinityView::children`] for the node references themselves.
     pub fn count(&self) -> u64 {
         match self.kind {
             7 | 8 | 14 | 20 => self.b,
@@ -95,8 +101,18 @@ impl<'a> InfinityView<'a> {
         self.validated.meta()
     }
 
+    /// The header's content hash.
+    ///
+    /// With [`InfinityView::with_opts`] and `verify_hash: false` this is a
+    /// claim the reader did not check; [`InfinityView::hash_verified`] reports
+    /// which case applies.
     pub fn content_hash(&self) -> [u8; 32] {
         self.validated.header().content_hash
+    }
+
+    /// Whether [`InfinityView::content_hash`] was recomputed and checked.
+    pub fn hash_verified(&self) -> bool {
+        self.validated.hash_verified()
     }
 
     pub fn content_hash_hex(&self) -> String {

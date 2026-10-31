@@ -4,7 +4,10 @@
 //! the wire rules; this file covers identity: the same logical module must encode
 //! to the same bytes whatever order its arena was built in.
 
-use active_infinity::{encode, InfinityModule, Inode};
+use active_infinity::{
+    encode, AnnotationKind, Constraint, InfinityModule, Inode, NodeId, SchemaFieldSpec,
+    SecretBytes, TypeSpec,
+};
 
 /// The same logical module: a table `{a: 1}` plus two values reachable only
 /// through bindings (`y` → 8, `z` → 9), with those values pushed in opposite
@@ -158,4 +161,116 @@ fn the_canonical_encoding_is_stable_across_repetition() {
     );
     active_infinity::validate_canonical(&image, active_infinity::Limits::default())
         .expect("the encoding is canonical");
+}
+
+fn schema_field(module: &mut InfinityModule, members: &[&str]) -> NodeId {
+    module.push(Inode::SchemaField(SchemaFieldSpec {
+        typ: TypeSpec::Enum(members.iter().map(|member| (*member).to_string()).collect()),
+        min: None,
+        max: None,
+        min_len: None,
+        max_len: None,
+        pattern: None,
+        default: None,
+        deprecated: None,
+    }))
+}
+
+fn annotated_enum_module(first: &[&str], second: &[&str], forward: bool) -> Vec<u8> {
+    let mut module = InfinityModule::new();
+    let root = module.push(Inode::Int(0));
+    module.set_root(Some(root));
+    let a = schema_field(&mut module, first);
+    let b = schema_field(&mut module, second);
+    if forward {
+        module.annotate(a, AnnotationKind::Intent("a".into()));
+        module.annotate(b, AnnotationKind::Intent("b".into()));
+    } else {
+        module.annotate(b, AnnotationKind::Intent("b".into()));
+        module.annotate(a, AnnotationKind::Intent("a".into()));
+    }
+    encode(&module).expect("encode")
+}
+
+#[test]
+fn enum_member_order_does_not_change_the_canonical_bytes() {
+    // The annotation key used to render enum members in insertion order, while
+    // the encoder sorts them. Two logically identical modules then numbered
+    // their annotation subjects differently and hashed differently.
+    let forward = annotated_enum_module(&["a", "z"], &["b", "c"], true);
+    // Same logical sets, members listed backwards, annotations added in the
+    // opposite order.
+    let mut module = InfinityModule::new();
+    let root = module.push(Inode::Int(0));
+    module.set_root(Some(root));
+    let b = schema_field(&mut module, &["c", "b"]);
+    let a = schema_field(&mut module, &["z", "a"]);
+    module.annotate(b, AnnotationKind::Intent("b".into()));
+    module.annotate(a, AnnotationKind::Intent("a".into()));
+    let backward = encode(&module).expect("encode");
+    assert_eq!(forward, backward, "member order leaked into the image");
+}
+
+fn pattern_node(module: &mut InfinityModule, pattern: &str) -> NodeId {
+    let target = module.push(Inode::Int(1));
+    module.push(Inode::Constrained {
+        target,
+        constraint: Constraint::Pattern(pattern.to_string()),
+    })
+}
+
+#[test]
+fn pattern_text_does_not_change_the_canonical_bytes() {
+    // `Constraint`'s Debug redacts a pattern to a constant, so two pattern
+    // subjects used to share an ordering key and tie-break on arena order.
+    let build = |first: &str, second: &str, forward: bool| {
+        let mut module = InfinityModule::new();
+        let root = module.push(Inode::Int(0));
+        module.set_root(Some(root));
+        let a = pattern_node(&mut module, first);
+        let b = pattern_node(&mut module, second);
+        // The annotation text names the subject, not the insertion position.
+        let (a_text, b_text) = if first == "aaa" {
+            ("a", "b")
+        } else {
+            ("b", "a")
+        };
+        if forward {
+            module.annotate(a, AnnotationKind::Intent(a_text.into()));
+            module.annotate(b, AnnotationKind::Intent(b_text.into()));
+        } else {
+            module.annotate(b, AnnotationKind::Intent(b_text.into()));
+            module.annotate(a, AnnotationKind::Intent(a_text.into()));
+        }
+        encode(&module).expect("encode")
+    };
+    assert_eq!(
+        build("aaa", "zzz", true),
+        build("zzz", "aaa", false),
+        "pattern text leaked into the image"
+    );
+}
+
+#[test]
+fn an_unbounded_redaction_scan_is_refused() {
+    // 1,000 secrets x 10 KiB of annotation text x 8 passes is far past the
+    // scan budget; the encoder refuses instead of stalling.
+    let mut module = InfinityModule::new();
+    let mut fields = Vec::new();
+    for index in 0..1_000 {
+        let secret = module.push(Inode::Secret(SecretBytes::from(format!(
+            "secret-{index:04}"
+        ))));
+        fields.push((format!("s{index:04}"), secret));
+    }
+    let root = module.push(Inode::Table { fields });
+    module.set_root(Some(root));
+    let subject = module.push(Inode::Str("subject".into()));
+    module.annotate(subject, AnnotationKind::Intent("x".repeat(10 << 10)));
+    let error = match encode(&module) {
+        Ok(_) => panic!("the redaction scan is bounded"),
+        Err(error) => error,
+    };
+    assert_eq!(error.code(), "infinity/limit", "{error}");
+    assert!(error.to_string().contains("redaction"), "{error}");
 }

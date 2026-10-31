@@ -94,7 +94,42 @@ pub fn encode_into_with(
     opts: EncodeOpts,
 ) -> Result<()> {
     let prepared = prepare(module)?;
+    // Fail fast when the payloads alone cannot fit the 4 GiB address space.
+    // The final `u32::try_from(image.len())` still guards the exact size; this
+    // check runs before the encoder allocates the heaps.
+    estimate_image_size(&prepared)?;
     encode_prepared_into(&prepared, opts, out)
+}
+
+/// Reject an image whose payloads cannot fit the u32 offset space before
+/// allocating it.
+fn estimate_image_size(prepared: &crate::canonical::Prepared) -> Result<()> {
+    let mut total: u64 = HEADER_SIZE as u64;
+    total = total.saturating_add(prepared.nodes.len() as u64 * NODE_RECORD_SIZE as u64);
+    total = total.saturating_add(prepared.types.len() as u64 * 16);
+    total = total.saturating_add(prepared.units.len() as u64 * 8);
+    total = total.saturating_add(prepared.numbers.len() as u64 * 8);
+    total = total.saturating_add(prepared.hashes.len() as u64 * 32);
+    total = total.saturating_add(prepared.bindings.len() as u64 * 8);
+    total = total.saturating_add(
+        prepared
+            .strings
+            .iter()
+            .fold(0u64, |sum, text| sum.saturating_add(text.len() as u64 + 4)),
+    );
+    total = total.saturating_add(prepared.blobs.iter().fold(0u64, |sum, blob| {
+        sum.saturating_add(blob.payload.as_ref().map_or(0, |bytes| bytes.len() as u64) + 40)
+    }));
+    total = total.saturating_add(prepared.secrets.iter().fold(0u64, |sum, bytes| {
+        sum.saturating_add(bytes.len() as u64 + 8)
+    }));
+    total = total.saturating_add(prepared.extensions.iter().fold(0u64, |sum, (_, payload)| {
+        sum.saturating_add(payload.len() as u64 + 16)
+    }));
+    if total > u32::MAX as u64 {
+        return Err(Error::TooLarge);
+    }
+    Ok(())
 }
 
 /// Encode a batch, reusing the capacity of every output buffer.
@@ -898,7 +933,9 @@ fn encode_extensions(
     if extensions.is_empty() {
         return Ok(());
     }
-    let dir_size = EXT_DIR_SIZE * extensions.len();
+    let dir_size = EXT_DIR_SIZE
+        .checked_mul(extensions.len())
+        .ok_or(Error::TooLarge)?;
     let mut payload_offset = start + dir_size;
     let mut directory = Vec::with_capacity(dir_size);
     for (tag, payload) in extensions {

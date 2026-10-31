@@ -34,6 +34,8 @@ pub struct Validated<'a> {
     header: Header,
     ends: [u64; SECTION_COUNT],
     limits: Limits,
+    /// Whether the stored content hash was recomputed and checked.
+    hash_verified: bool,
 }
 
 /// Printing a validated image never prints its bytes: the buffer carries the
@@ -74,6 +76,7 @@ impl<'a> Validated<'a> {
             header,
             ends,
             limits,
+            hash_verified: opts.verify_hash,
         };
 
         if header.flags & FLAG_ANNOTATIONS != 0 && validated.span(Section::Annotations).count == 0 {
@@ -169,6 +172,15 @@ impl<'a> Validated<'a> {
             }
         }
         Ok(validated)
+    }
+
+    /// Whether [`Validated::content_hash`] was recomputed and checked.
+    ///
+    /// With `DecodeOpts { verify_hash: false }` the header's hash is a claim
+    /// the reader never checked; a consumer that uses the hash as identity must
+    /// require this to be `true`.
+    pub fn hash_verified(&self) -> bool {
+        self.hash_verified
     }
 
     pub fn buf(&self) -> &'a [u8] {

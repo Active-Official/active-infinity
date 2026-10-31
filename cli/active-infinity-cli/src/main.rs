@@ -551,11 +551,16 @@ fn conformance(args: &[String]) -> Result<(), String> {
     let manifest = read_text(&manifest_path, MAX_MANIFEST_BYTES)?;
     let manifest: serde_json::Value = serde_json::from_str(&manifest)
         .map_err(|error| format!("manifest is not JSON: {error}"))?;
-    // The manifest's own directory is the base for its relative case paths.
+    // Case paths resolve against the manifest's `base` (relative to the
+    // manifest's own directory; the repository manifest uses `..` because its
+    // paths are repository-relative). A case path itself may not be absolute
+    // or climb out with `..`.
+    let base = manifest["base"].as_str().unwrap_or(".");
     let base = Path::new(&manifest_path)
         .parent()
         .filter(|path| !path.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
+        .unwrap_or_else(|| Path::new("."))
+        .join(base);
     let cases = manifest["cases"]
         .as_array()
         .ok_or_else(|| "manifest has no cases array".to_string())?;

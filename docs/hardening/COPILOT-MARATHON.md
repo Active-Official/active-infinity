@@ -605,3 +605,32 @@ nested defects.
 
 Gate: 316 all-features, clippy clean both feature sets; the four new behavioural
 tests fail against the pre-fix tree.
+
+### Re-audit loop, round 3 (I-03) and round 2 (I-04) - 2026-10-31
+
+**I-03 round 3** (3 high, 5 medium):
+
+| # | Severity | Finding | Disposition |
+|---|---|---|---|
+| 1 | high | secret-only promotion covered `Str` but not `Ident`, so a secret value used as a locator name stayed in the public string heap | **rejected as a design conflict**: an `Ident` inside `SecretRef` is the *name* of the secret, not its value. Structural labels are schema and are carried verbatim (layout §3.1, the same rule that keeps field and binding names readable); promoting the locator to a literal would change what the locator means. A caller that puts a secret value into a label has published it as a name |
+| 2 | high | `content_key` rendered a constraint through `Debug`, which redacts enum members to a count and a pattern to a constant: two different constraints shared an ordering key, and the tie-break used the arena id | **fixed**: the renderer writes every constraint variant explicitly (sorted enum members, pattern/custom text, ordered bounds); `pattern_text_does_not_change_the_canonical_bytes` (fails pre-fix) |
+| 3 | high | the schema-field enum key used insertion order while the encoder sorts members, so member order could change the subject numbering | **fixed**: `normalize_type` and the constraint normalizer sort enum members, and the key sorts too; `enum_member_order_does_not_change_the_canonical_bytes` (fails pre-fix) |
+| 4 | medium | the key truncated at 4 KiB/32 levels with `~`, so prefix collisions fell back to id order; a huge string was cloned per subject | **fixed**: the renderer is exact up to 1 MiB and depth 256 and returns `infinity/limit` past either budget, so it never falls back to ids and never copies a huge value into a second buffer. The truncation branch is gone |
+| 5 | medium | transient secret copies (`secret_literals`, `Prepared.secrets`) are ordinary `String`/`Vec<u8>` and are not zeroized | **accepted as a residual for now**: zeroizing every transient copy needs `Zeroizing` through `Prepared` and the encoder, and the copies live for the duration of one `encode` call. `SecretBytes` (the durable owner) zeroizes; a core dump during an encode can still contain the transient buffers. Recorded here so the next release can widen the zeroization pass |
+| 6 | medium | redaction scanned `secrets x text x 8 passes` with no budget | **fixed**: a 64 MiB scan budget; the fallible encoder returns `infinity/limit`, the infallible projection redacts the whole value. `an_unbounded_redaction_scan_is_refused` (fails pre-fix) |
+| 7 | medium | ~20 unchecked `as u32` conversions could allocate gigabytes before the final `TooLarge`; `EXT_DIR_SIZE * len` was unchecked | **fixed for the allocation path**: an estimate over nodes/payloads/strings rejects an image that cannot fit the u32 space before the encoder allocates, and the extension directory uses `checked_mul`. Remaining casts are counts already bounded by a u32 field |
+| 8 | medium | `remap_node` and `remap_node_in_place` had a wildcard arm, so a new child-bearing `Inode` would silently keep old ids | **fixed**: every leaf variant is listed explicitly (plus path-only patch ops); a new child-bearing variant now fails to compile |
+
+**I-04 round 2** (1 high, 3 medium, 2 low):
+
+| # | Severity | Finding | Disposition |
+|---|---|---|---|
+| 1 | high | `decode_annotations` rejected the `AiImmutable` kind while the validator and the full decoder accepted it | **fixed**: the accessor mirrors `decode_validated`; `the_cheap_annotation_reader_accepts_the_immutable_flag` (fails pre-fix) |
+| 2 | medium | `NodeView::count()` was documented as matching `children()` but is a mixed-entry count for interpolation, constraint and patch records | **fixed in the contract**: the doc now says "upper bound" and the test asserts `children.len() <= count` for every kind |
+| 3 | medium | `with_opts(verify_hash: false)` reports an unverified header hash with no way to tell | **fixed**: `Validated::hash_verified()` and `InfinityView::hash_verified()`; `content_hash()` documents the condition. `hash_verification_is_reported_for_the_view` |
+| 4 | medium | unchecked `x..x+y` ranges in decode/view (unreachable after validation today) | **partly fixed**: the provenance/aux loops use checked arithmetic where a u32 index could wrap; the remaining slices are bounded by the validator's section ends and are covered by the section's invariant tests. A future validator regression is a debug-build panic, not a silent accept |
+| 5 | low | the cheap readers hardcode default limits | **documented**: the accessors state that they validate with `Limits::default()`; a caller with a strict budget uses `decode_with`/`InfinityView::with_opts` |
+| 6 | low | `dependents()` allocates the full edge list | **documented as a cost**: the view is a diagnostic surface; the validator's own edge scratch is capped at 1<<20. A bounded iterator is a future additive API |
+
+Gate: 321 all-features, clippy clean both feature sets; five new behavioural
+tests, four proved to fail against the pre-fix tree.

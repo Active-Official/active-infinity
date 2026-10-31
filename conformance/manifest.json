@@ -2,6 +2,7 @@
   "format": "active-conformance/1",
   "version": "2026-10-29",
   "generated": "2026-10-31T01:29:29Z",
+  "base": "..",
   "cases": [
     {
       "kind": "valid",

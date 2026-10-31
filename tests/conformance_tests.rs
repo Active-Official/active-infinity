@@ -70,6 +70,25 @@ const NON_IMAGE_CLASSES: &[(&str, &str)] = &[
         "infinity/too-large",
         "requires an image above the 4 GiB address space",
     ),
+    (
+        "infinity/evaluation",
+        "Active evaluator refusal; the module is valid bytes",
+    ),
+    ("infinity/ok", "C ABI status, not a failure class"),
+    ("infinity/null-input", "C ABI caller condition"),
+    ("infinity/null-output", "C ABI caller condition"),
+    ("infinity/null-name", "C ABI caller condition"),
+    ("infinity/null-out-len", "C ABI caller condition"),
+    ("infinity/out-len-misaligned", "C ABI caller condition"),
+    ("infinity/name-too-long", "C ABI caller condition"),
+    (
+        "infinity/buffer-too-small",
+        "C ABI output-negotiation status, not a byte-image class",
+    ),
+    (
+        "infinity/panic",
+        "C ABI panic translation, not a byte-image class",
+    ),
 ];
 
 struct Entry {

@@ -899,7 +899,8 @@ fn header_try_write_refuses_a_short_buffer_without_panicking() {
     let header = active_infinity::layout::Header::parse(&image).expect("header");
     let mut short = [0u8; 8];
     let error = header.try_write(&mut short).expect_err("short buffer");
-    assert_eq!(error.code(), "infinity/encode");
+    // A short caller buffer is an argument fault, not an encoding fault.
+    assert_eq!(error.code(), "infinity/invalid-argument", "{error}");
     let mut full = vec![0u8; active_infinity::HEADER_SIZE];
     header.try_write(&mut full).expect("full buffer");
     assert_eq!(&full[0..4], b"AINF");

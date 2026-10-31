@@ -6,19 +6,32 @@
  *
  * Calling convention
  * ------------------
- * - Return 0 on success, -1 on invalid input, -2 when the output buffer is too
- *   small, -3 on an internal panic (never aborts across the boundary).
- * - After a non-zero return, active_infinity_last_error() gives the stable
- *   `infinity/...` code for the calling thread. The pointer is valid until the
- *   next failing call on that thread.
+ * - Return 0 on success, -1 on invalid input or a refused operation, -2 when
+ *   the output buffer is too small, -3 on an internal panic (never aborts
+ * across the boundary).
+ * - After every call, active_infinity_last_error() gives the stable
+ *   `infinity/...` code for the calling thread (`infinity/ok` on success).
+ *   Copy the string immediately: the pointer is owned by the library and is
+ *   released by the next call on that thread. Never keep it.
  * - Output functions take `out` and `out_len`. On entry `*out_len` is the
  *   capacity of `out`; on success it is the bytes written; on -2 it is the
- *   required size.
+ *   required size. `out_len` must be aligned for `size_t`; a misaligned pointer
+ *   is refused with `infinity/out-len-misaligned` rather than dereferenced.
  * - A null pointer with a non-zero length is invalid input, never undefined
- *   behaviour.
+ *   behaviour. A null output with a zero capacity is the documented size query.
+ * - `active_infinity_content_hash` writes exactly 32 bytes; there is no length
+ *   negotiation for that output.
+ *
+ * Allocation
+ * ----------
+ * `active_infinity_alloc` refuses more than 1 GiB (`infinity/limit`) and
+ * returns NULL rather than aborting. Every buffer carries a private tag, and
+ * `active_infinity_free` checks it: a wrong length is a no-op instead of a heap
+ * corruption. A double free, a foreign pointer or a pointer used after free is
+ * still undefined behaviour in the C ABI; null the pointer after freeing it.
  *
  * The library is thread-safe; `last_error` is thread-local. No function
- * retains a pointer after it returns.
+ * retains a caller pointer after it returns.
  */
 
 #ifndef ACTIVE_INFINITY_H
@@ -33,6 +46,15 @@ extern "C" {
 
 #define ACTIVE_INFINITY_ABI_VERSION 1u
 
+/* Largest single active_infinity_alloc request. */
+#define ACTIVE_INFINITY_MAX_ALLOC_BYTES (1024u * 1024u * 1024u)
+
+/* Largest module name accepted by active_infinity_from_active. */
+#define ACTIVE_INFINITY_MAX_NAME_BYTES 4096u
+
+/* Largest Active source accepted by active_infinity_from_active. */
+#define ACTIVE_INFINITY_MAX_SOURCE_BYTES (16u * 1024u * 1024u)
+
 typedef enum active_infinity_status {
   ACTIVE_INFINITY_OK = 0,
   ACTIVE_INFINITY_INVALID = -1,
@@ -43,19 +65,25 @@ typedef enum active_infinity_status {
 /* ABI version of the loaded library. */
 uint32_t active_infinity_abi_version(void);
 
-/* Library version, e.g. "2.1.0". Static storage. */
+/* Codec version, e.g. "2.3.0" (not the shim's version). Static storage. */
 const char *active_infinity_version(void);
 
-/* Stable error code from the last failing call on this thread. */
+/* Shim version, e.g. "0.1.0". Static storage. */
+const char *active_infinity_ffi_version(void);
+
+/* Stable error code from the last call on this thread. Copy immediately. */
 const char *active_infinity_last_error(void);
 
 /* Allocate/free a linear-memory buffer (WASM hosts and callers that want the
- * library to own the allocation). Free with the same length. */
+ * library to own the allocation). Free with the same length; see above. */
 uint8_t *active_infinity_alloc(size_t len);
 void active_infinity_free(uint8_t *ptr, size_t len);
 
 /* Validate an AINF image. Returns 0 for a structurally valid image. */
 int32_t active_infinity_validate(const uint8_t *ptr, size_t len);
+
+/* Validate and prove the canonical form (re-encodes to the same bytes). */
+int32_t active_infinity_validate_canonical(const uint8_t *ptr, size_t len);
 
 /* Compute the 32-byte Blake3 content hash of a valid image. */
 int32_t active_infinity_content_hash(const uint8_t *ptr, size_t len,
@@ -65,7 +93,8 @@ int32_t active_infinity_content_hash(const uint8_t *ptr, size_t len,
 int32_t active_infinity_reencode(const uint8_t *ptr, size_t len, uint8_t *out,
                                  size_t *out_len);
 
-/* Compile Active text (UTF-8) into canonical AINF. `name` is NUL-terminated. */
+/* Compile Active text (UTF-8) into canonical AINF. `name` is NUL-terminated
+ * and at most ACTIVE_INFINITY_MAX_NAME_BYTES long. */
 int32_t active_infinity_from_active(const uint8_t *source, size_t source_len,
                                     const char *name, uint8_t *out,
                                     size_t *out_len);

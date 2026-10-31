@@ -1192,7 +1192,11 @@ impl StreamEncoder {
 fn write_string(out: &mut Vec<u8>, text: &str) -> Result<()> {
     let bytes = text.as_bytes();
     if bytes.len() > u16::MAX as usize {
-        return Err(Error::TooLarge);
+        // This helper only writes delta payloads (annotation and provenance
+        // ops), so the fault is the delta's, not the image address space.
+        return Err(Error::StreamDelta(
+            "delta string exceeds the u16 length space",
+        ));
     }
     out.extend_from_slice(&(bytes.len() as u16).to_le_bytes());
     out.extend_from_slice(bytes);
@@ -1272,9 +1276,7 @@ fn take_string(buf: &[u8], cursor: &mut usize) -> Result<String> {
         return Err(Error::StreamDelta("truncated delta payload"));
     }
     let text = std::str::from_utf8(&buf[*cursor..*cursor + len])
-        .map_err(|_| Error::Utf8 {
-            offset: *cursor as u64,
-        })?
+        .map_err(|_| Error::StreamDelta("invalid UTF-8 in a delta string"))?
         .to_string();
     *cursor += len;
     Ok(text)

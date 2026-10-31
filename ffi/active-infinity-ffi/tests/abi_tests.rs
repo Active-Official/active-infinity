@@ -5,7 +5,8 @@ use std::ffi::CString;
 use active_infinity_ffi::{
     active_infinity_abi_version, active_infinity_content_hash, active_infinity_from_active,
     active_infinity_last_error, active_infinity_redacted_json, active_infinity_reencode,
-    active_infinity_validate, EXPORTS,
+    active_infinity_validate, active_infinity_validate_canonical, EXPORTS, MAX_ALLOC_BYTES,
+    MAX_NAME_BYTES, MAX_SOURCE_BYTES,
 };
 
 fn vector(name: &str) -> Vec<u8> {
@@ -191,4 +192,154 @@ fn redacted_json_never_contains_a_secret_canary() {
     // The canary used by the Rust redaction suite must not survive a projection.
     assert!(!json.contains("CANARY_SECRET_"));
     assert!(json.contains("***SECRET***") || !json.contains("secret"));
+}
+
+#[test]
+fn the_header_and_the_export_list_agree_in_both_directions() {
+    let header = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("include/active_infinity.h"),
+    )
+    .expect("header");
+    let mut declared: Vec<String> = Vec::new();
+    for line in header.lines() {
+        if !line.contains('(') {
+            continue;
+        }
+        for symbol in EXPORTS {
+            if line.contains(symbol) {
+                declared.push((*symbol).to_string());
+            }
+        }
+    }
+    declared.sort();
+    declared.dedup();
+    let mut expected: Vec<String> = EXPORTS.iter().map(|name| (*name).to_string()).collect();
+    expected.sort();
+    assert_eq!(
+        declared, expected,
+        "the header and EXPORTS must be identical"
+    );
+}
+
+#[test]
+fn version_reports_the_codec_and_the_shim() {
+    let codec = unsafe { std::ffi::CStr::from_ptr(active_infinity_ffi::active_infinity_version()) };
+    assert_eq!(codec.to_str().expect("utf8"), active_infinity::VERSION);
+    let shim =
+        unsafe { std::ffi::CStr::from_ptr(active_infinity_ffi::active_infinity_ffi_version()) };
+    assert_eq!(shim.to_str().expect("utf8"), env!("CARGO_PKG_VERSION"));
+}
+
+#[test]
+fn alloc_refuses_an_impossible_request() {
+    use active_infinity_ffi::active_infinity_alloc;
+
+    let pointer = active_infinity_alloc(MAX_ALLOC_BYTES + 1);
+    assert!(pointer.is_null(), "an oversized allocation returns null");
+    assert_eq!(last_error(), "infinity/limit");
+}
+
+#[test]
+fn free_checks_the_length_it_is_given() {
+    use active_infinity_ffi::{active_infinity_alloc, active_infinity_free};
+
+    let pointer = active_infinity_alloc(16);
+    assert!(!pointer.is_null());
+    // SAFETY: the allocation is 16 bytes; the wrong length must be a no-op.
+    unsafe { active_infinity_free(pointer, 17) };
+    // SAFETY: same pointer and the length it was allocated with.
+    unsafe { active_infinity_free(pointer, 16) };
+}
+
+#[test]
+fn a_misaligned_out_len_is_refused() {
+    let bytes = vector("empty.ainf");
+    let mut raw = [0u8; 2 * std::mem::size_of::<usize>()];
+    // SAFETY: the offset keeps the pointer inside `raw`; the shim must refuse it
+    // before reading or writing through it.
+    let misaligned = unsafe { raw.as_mut_ptr().add(1) as *mut usize };
+    let status = unsafe {
+        active_infinity_reencode(
+            bytes.as_ptr(),
+            bytes.len(),
+            std::ptr::null_mut(),
+            misaligned,
+        )
+    };
+    assert_eq!(status, -1);
+    assert_eq!(last_error(), "infinity/out-len-misaligned");
+}
+
+#[test]
+fn success_reports_ok_after_a_failure() {
+    let junk = [0xffu8; 8];
+    // SAFETY: junk is readable.
+    let status = unsafe { active_infinity_validate(junk.as_ptr(), junk.len()) };
+    assert_eq!(status, -1);
+    assert_ne!(last_error(), "infinity/ok");
+
+    // The output path is the one that used to keep the stale failure.
+    let good = vector("empty.ainf");
+    let mut out = vec![0u8; good.len()];
+    let mut out_len = out.len();
+    // SAFETY: buffers follow the calling convention.
+    let status = unsafe {
+        active_infinity_reencode(good.as_ptr(), good.len(), out.as_mut_ptr(), &mut out_len)
+    };
+    assert_eq!(status, 0, "{}", last_error());
+    assert_eq!(last_error(), "infinity/ok");
+}
+
+#[test]
+fn validate_canonical_is_stricter_than_validate() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/vectors/invalid/not_canonical.ainf");
+    let bytes = std::fs::read(path).expect("vector");
+    // SAFETY: the vector is readable.
+    let structural = unsafe { active_infinity_validate(bytes.as_ptr(), bytes.len()) };
+    assert_eq!(structural, 0, "{}", last_error());
+    // SAFETY: the vector is readable.
+    let canonical = unsafe { active_infinity_validate_canonical(bytes.as_ptr(), bytes.len()) };
+    assert_eq!(canonical, -1);
+    assert_eq!(last_error(), "infinity/not-canonical");
+}
+
+#[test]
+fn an_unterminated_name_is_refused_without_an_unbounded_scan() {
+    let source = b"port = 1\n";
+    let name = vec![b'a'; MAX_NAME_BYTES + 1];
+    let mut out = vec![0u8; 4096];
+    let mut out_len = out.len();
+    // SAFETY: both buffers are live for the call.
+    let status = unsafe {
+        active_infinity_from_active(
+            source.as_ptr(),
+            source.len(),
+            name.as_ptr().cast(),
+            out.as_mut_ptr(),
+            &mut out_len,
+        )
+    };
+    assert_eq!(status, -1);
+    assert_eq!(last_error(), "infinity/name-too-long");
+}
+
+#[test]
+fn an_oversized_source_is_refused_before_parsing() {
+    let source = vec![b' '; MAX_SOURCE_BYTES + 1];
+    let name = CString::new("big.active").expect("name");
+    let mut out = vec![0u8; 64];
+    let mut out_len = out.len();
+    // SAFETY: the source buffer is live and exactly as long as `source_len`.
+    let status = unsafe {
+        active_infinity_from_active(
+            source.as_ptr(),
+            source.len(),
+            name.as_ptr(),
+            out.as_mut_ptr(),
+            &mut out_len,
+        )
+    };
+    assert_eq!(status, -1);
+    assert_eq!(last_error(), "infinity/limit");
 }

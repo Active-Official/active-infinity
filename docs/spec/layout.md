@@ -577,6 +577,7 @@ messages. Every code below is part of the contract.
 | `infinity/depth` | nesting deeper than the configured limit |
 | `infinity/limit` | a configured `Limits` ceiling was exceeded |
 | `infinity/invalid-argument` | caller-supplied argument outside its range |
+| `infinity/evaluation` | the Active evaluator refused the module; `Error::sub_code()` carries the evaluator's stable class (`S001`, `T001`, `X00n`, ...) |
 | `infinity/schema` | companion schema rejected the instance shape |
 | `infinity/compression` | optional zstd compression failed or exceeded its bound |
 | `infinity/store` | local content-addressed store failed |
@@ -597,6 +598,33 @@ messages. Every code below is part of the contract.
 
 Messages never echo payload bytes, so a malformed buffer cannot turn an error
 report into a leak channel.
+
+`Error::is_fatal()` classifies a failure for a caller that holds the input
+buffer: a *fatal* error (framing, structure, hash, canonical form, stream frame)
+means the bytes cannot be trusted and must be dropped; a *non-fatal* one
+(`limit`, `invalid-argument`, `evaluation`, `schema`, `compression`, `store`,
+`signature`, `proof`, `encode`, `stream-delta`, `stream-state`) says the
+operation failed for a reason a different limit, a different companion file or a
+retry may fix. The classification is a convenience for callers; branching on
+`code()` is always correct.
+
+### 9.1 C ABI annex
+
+The FFI shim (`ffi/active-infinity-ffi`) adds codes for conditions only a C
+caller can create. They never replace a codec code; a refusal from the codec is
+forwarded unchanged.
+
+| Code | Condition |
+|------|-----------|
+| `infinity/ok` | the last call on this thread succeeded |
+| `infinity/null-input` | a null input pointer with a non-zero length |
+| `infinity/null-output` | a null mandatory output pointer |
+| `infinity/null-name` | a null module name |
+| `infinity/null-out-len` | a null `out_len` |
+| `infinity/out-len-misaligned` | `out_len` is not aligned for `size_t` |
+| `infinity/name-too-long` | the module name is not NUL-terminated within 4096 bytes |
+| `infinity/buffer-too-small` | the output buffer is smaller than the result; `*out_len` carries the required size |
+| `infinity/panic` | an internal panic was caught before it crossed the boundary |
 
 A *hand-built* module whose provenance keys collide after metadata redaction is
 refused by the encoder with `infinity/encode` (reason `provenance keys collide

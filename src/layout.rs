@@ -370,7 +370,11 @@ impl Header {
     /// buffer: the failure is a value, not a panic.
     pub fn try_write(&self, out: &mut [u8]) -> crate::Result<()> {
         if out.len() < HEADER_SIZE {
-            return Err(crate::Error::Encode("header buffer is too short"));
+            // A short output buffer is the caller's argument fault, not an
+            // encoding fault in the module.
+            return Err(crate::Error::InvalidArgument(
+                "header buffer is shorter than 224 bytes",
+            ));
         }
         self.write(out);
         Ok(())

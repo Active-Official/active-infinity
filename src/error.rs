@@ -197,12 +197,78 @@ impl Error {
         }
     }
 
+    /// The evaluator's subordinate code, when this error carries one.
+    ///
+    /// `Error::Evaluation` wraps the Active evaluator's stable diagnostic class
+    /// (`S001`, `T001`, `X00n`, ...). The outer [`Error::code`] stays
+    /// `infinity/evaluation` so every evaluator failure is one branch; this
+    /// accessor exposes the class without parsing [`std::fmt::Display`]. Every
+    /// other variant returns `None`.
+    pub const fn sub_code(&self) -> Option<&'static str> {
+        match self {
+            Error::Evaluation(code) => Some(code),
+            _ => None,
+        }
+    }
+
     /// True when the failure means the input is untrusted or corrupt.
     ///
-    /// All decode-side failures are fatal for the buffer: callers must drop
-    /// it rather than retrying with a different configuration.
+    /// A fatal error means the bytes cannot be trusted: drop the buffer rather
+    /// than retrying with a different configuration. Structure, framing, hash,
+    /// canonical-form and stream-frame faults are fatal.
+    ///
+    /// A non-fatal error says the operation failed for a reason a different
+    /// limit, a different companion file or a retry may fix: `limit` (raise the
+    /// ceiling), `invalid-argument`, `evaluation` (the module is valid; the
+    /// program failed), `schema`, `compression` and `store` (transient or
+    /// media-dependent), `signature` and `proof` (the sidecar, not the image),
+    /// `encode` (the caller's own module), `stream-delta` and `stream-state`
+    /// (the caller's protocol state).
     pub const fn is_fatal(&self) -> bool {
-        !matches!(self, Error::InvalidArgument(_))
+        matches!(
+            self,
+            Error::Magic
+                | Error::VersionMajor(_)
+                | Error::VersionMinor(_)
+                | Error::HeaderTruncated
+                | Error::HeaderSize(_)
+                | Error::UnknownFlags(_)
+                | Error::ReservedNonZero { .. }
+                | Error::Offset { .. }
+                | Error::Truncated { .. }
+                | Error::TrailingBytes { .. }
+                | Error::Count { .. }
+                | Error::Padding { .. }
+                | Error::HashMismatch
+                | Error::DialectMismatch(_)
+                | Error::NotCanonical
+                | Error::StringRef(_)
+                | Error::NodeRef(_)
+                | Error::Node { .. }
+                | Error::Utf8 { .. }
+                | Error::UnknownUnit(_)
+                | Error::UnitRef(_)
+                | Error::Type { .. }
+                | Error::Edge { .. }
+                | Error::Annotation { .. }
+                | Error::Provenance(_)
+                | Error::Extension { .. }
+                | Error::Blob { .. }
+                | Error::SecretEntry(_)
+                | Error::DuplicateField { .. }
+                | Error::DuplicateBinding
+                | Error::Cycle { .. }
+                | Error::Depth { .. }
+                | Error::EncodeDangling(_)
+                | Error::TooLarge
+                | Error::StreamMagic
+                | Error::StreamVersion(_)
+                | Error::StreamFrameLen { .. }
+                | Error::StreamFrameKind(_)
+                | Error::StreamSequence { .. }
+                | Error::StreamHashMismatch
+                | Error::StreamUnterminated
+        )
     }
 }
 
@@ -294,7 +360,179 @@ impl fmt::Display for Error {
 impl std::error::Error for Error {}
 
 impl From<std::str::Utf8Error> for Error {
-    fn from(_: std::str::Utf8Error) -> Self {
-        Error::Utf8 { offset: 0 }
+    fn from(error: std::str::Utf8Error) -> Self {
+        // `valid_up_to` is the byte offset of the first invalid sequence, which
+        // is what a caller needs to locate the fault. Hardcoding zero would
+        // turn any future `?` into a misleading report.
+        Error::Utf8 {
+            offset: error.valid_up_to() as u64,
+        }
+    }
+}
+
+#[cfg(test)]
+mod code_tests {
+    use super::*;
+
+    /// Every variant of [`Error`], so a code can be checked for uniqueness and
+    /// documentation without a running parser.
+    ///
+    /// A new variant must be added here: this list is also the reverse gate that
+    /// `docs/spec/layout.md` documents every code the crate can return.
+    fn every_variant() -> Vec<Error> {
+        vec![
+            Error::Magic,
+            Error::VersionMajor(2),
+            Error::VersionMinor(9),
+            Error::HeaderTruncated,
+            Error::HeaderSize(1),
+            Error::UnknownFlags(1),
+            Error::ReservedNonZero {
+                section: "header",
+                offset: 0,
+            },
+            Error::Offset {
+                section: "nodes",
+                offset: 0,
+            },
+            Error::Truncated {
+                needed: 1,
+                found: 0,
+            },
+            Error::TrailingBytes { at: 0 },
+            Error::Count {
+                field: "nodes",
+                value: 1,
+            },
+            Error::Padding { offset: 0 },
+            Error::HashMismatch,
+            Error::DialectMismatch(1),
+            Error::NotCanonical,
+            Error::StringRef(0),
+            Error::NodeRef(0),
+            Error::Node {
+                id: 0,
+                reason: "test",
+            },
+            Error::Utf8 { offset: 0 },
+            Error::UnknownUnit(0),
+            Error::UnitRef(0),
+            Error::Type {
+                id: 0,
+                reason: "test",
+            },
+            Error::Edge { from: 0, to: 1 },
+            Error::Annotation {
+                id: 0,
+                reason: "test",
+            },
+            Error::Provenance("test"),
+            Error::Extension {
+                tag: 0,
+                reason: "test",
+            },
+            Error::Blob {
+                id: 0,
+                reason: "test",
+            },
+            Error::SecretEntry(0),
+            Error::DuplicateField { node: 0 },
+            Error::DuplicateBinding,
+            Error::Cycle { node: 0 },
+            Error::Depth { limit: 1 },
+            Error::Limit {
+                kind: "test",
+                limit: 1,
+            },
+            Error::InvalidArgument("test"),
+            Error::Evaluation("S001"),
+            Error::Schema("test"),
+            Error::Compression("test"),
+            Error::Store("test"),
+            Error::Signature("test"),
+            Error::Proof("test"),
+            Error::Encode("test"),
+            Error::EncodeDangling(0),
+            Error::TooLarge,
+            Error::StreamMagic,
+            Error::StreamVersion(9),
+            Error::StreamFrameLen {
+                declared: 1,
+                available: 0,
+            },
+            Error::StreamFrameKind(9),
+            Error::StreamSequence {
+                expected: 1,
+                found: 2,
+            },
+            Error::StreamState("test"),
+            Error::StreamHashMismatch,
+            Error::StreamDelta("test"),
+            Error::StreamUnterminated,
+        ]
+    }
+
+    #[test]
+    fn codes_are_unique_and_every_code_is_documented() {
+        let spec = include_str!("../docs/spec/layout.md");
+        let mut seen = std::collections::BTreeSet::new();
+        for error in every_variant() {
+            let code = error.code();
+            assert!(
+                seen.insert(code),
+                "two variants share the code {code}: {error:?}"
+            );
+            assert!(
+                spec.contains(code),
+                "docs/spec/layout.md must document {code}"
+            );
+        }
+        assert!(
+            seen.len() >= 51,
+            "the variant list should cover the whole surface, found {}",
+            seen.len()
+        );
+    }
+
+    #[test]
+    fn the_fatal_classification_matches_its_documented_rule() {
+        for fatal in [
+            Error::Magic,
+            Error::NotCanonical,
+            Error::NodeRef(0),
+            Error::HashMismatch,
+            Error::StreamHashMismatch,
+            Error::TooLarge,
+        ] {
+            assert!(fatal.is_fatal(), "{fatal:?} is a corrupt-input fault");
+        }
+        for recoverable in [
+            Error::InvalidArgument("test"),
+            Error::Limit {
+                kind: "test",
+                limit: 1,
+            },
+            Error::Evaluation("S001"),
+            Error::Schema("test"),
+            Error::Compression("test"),
+            Error::Store("test"),
+            Error::Signature("test"),
+            Error::Proof("test"),
+            Error::Encode("test"),
+            Error::StreamDelta("test"),
+            Error::StreamState("test"),
+        ] {
+            assert!(
+                !recoverable.is_fatal(),
+                "{recoverable:?} does not mean the bytes are corrupt"
+            );
+        }
+    }
+
+    #[test]
+    fn only_an_evaluation_error_carries_a_sub_code() {
+        assert_eq!(Error::Evaluation("T001").sub_code(), Some("T001"));
+        assert_eq!(Error::Magic.sub_code(), None);
+        assert_eq!(Error::Schema("shape").sub_code(), None);
     }
 }

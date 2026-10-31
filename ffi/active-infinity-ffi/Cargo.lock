@@ -29,6 +29,7 @@ dependencies = [
  "blake3",
  "serde_json",
  "thiserror",
+ "zeroize",
 ]
 
 [[package]]

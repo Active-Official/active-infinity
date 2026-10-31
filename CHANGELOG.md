@@ -35,6 +35,28 @@
 - **Secrets**: `SecretBytes` zeroes its buffer with `zeroize` on drop (a volatile
   write the optimizer cannot elide), `has_secret()` recognises `SecretRef`, and
   `TypeSpec::name()` no longer echoes enum members.
+- **Errors** (`error.rs`, `stream.rs`, `layout.rs`): `infinity/evaluation` is a
+  documented code with `Error::sub_code()` exposing the evaluator's class
+  (`S001`, `T001`, ...) without parsing the message; `is_fatal()` now matches its
+  documented rule (a `limit`, `evaluation`, `schema`, `compression`, `store`,
+  `signature`, `proof`, `encode` or `stream-delta/state` failure does not mean
+  the bytes are corrupt). A delta string over the u16 length space and invalid
+  UTF-8 in a delta string report `infinity/stream-delta` (they used to report
+  `infinity/too-large` and `infinity/utf8`, codes of a different layer), and
+  `From<Utf8Error>` carries `valid_up_to` instead of a hardcoded zero.
+  `Header::try_write` on a short buffer is `infinity/invalid-argument`. A unit
+  test pins code uniqueness and that every variant's code appears in
+  `docs/spec/layout.md`; the spec now has a C ABI code annex.
+- **FFI** (`ffi/active-infinity-ffi`): `alloc` caps a request at 1 GiB, returns
+  NULL on an impossible size and catches a panic; every buffer carries a tag so
+  `free` with the wrong length is a no-op instead of a heap corruption; the
+  module name is scanned to a 4096-byte bound instead of `CStr::from_ptr`
+  (an unterminated name used to read past the buffer); Active source is capped
+  at 16 MiB; `validate_canonical` is exported; `version()` reports the codec
+  version and `ffi_version()` the shim; a misaligned `out_len` is refused with
+  `infinity/out-len-misaligned`; success sets `infinity/ok` on every output
+  path; the WASM random fill never calls the host for an empty buffer; the
+  header/EXPORTS tripwire checks both directions.
 - **Interop / projections** (`interop.rs`, `protobuf.rs`): the `active-core`
   bridge refuses a secret-bearing module instead of lowering `Inode::Secret` to
   a plain `CoreValue::Secret` string (a full plaintext export that bypassed

@@ -26,8 +26,8 @@ the code → regression test first → minimal fix → targeted tests + clippy �
 | I-10 | signature / proof | `src/signature.rs`, `src/proof.rs` | **CLEAN** | 6 fixed, 2 rejected/documented | this commit |
 | I-11 | merge | `src/merge.rs` | **CLEAN** | 7 fixed, 1 rejected | this commit |
 | I-12 | interop / protobuf | `src/interop.rs`, `src/protobuf.rs` | **CLEAN** | 6 fixed, 1 rejected | this commit |
-| I-13 | error codes | `src/error.rs` | pending | — | — |
-| I-14 | FFI | `ffi/**` | pending | — | — |
+| I-13 | error codes | `src/error.rs` | **CLEAN** | 6 fixed, 2 rejected | this commit |
+| I-14 | FFI | `ffi/**` | **CLEAN** | 12 fixed, 3 documented | this commit |
 | I-15 | CLI | `cli/active-infinity-cli/**` | pending | — | — |
 | I-16 | fuzz targets | `fuzz/**` | pending | — | — |
 
@@ -481,3 +481,51 @@ fixpoint.
 
 Gate: Infinity 302 all-features / 242 no-default, CLI 15, clippy clean both
 feature sets, doc gates green.
+
+### I-13 error codes - 2026-10-31
+
+| # | Severity | Finding | Disposition |
+|---|---|---|---|
+| 1 | high | `infinity/evaluation` was returned by `code()` but missing from the spec table and the waiver list; the evaluator's class was hidden in `Display`, forcing message parsing | **fixed**: the code is documented in `layout.md` §9, `Error::sub_code()` returns the class, and the code is waived in the conformance gate as a non-image class. `only_an_evaluation_error_carries_a_sub_code` |
+| 2 | high | `is_fatal()` was `!InvalidArgument`, so `Limit`, `Store`, `Encode` and `Evaluation` were reported as corrupt-input faults | **fixed**: an explicit match implements the documented rule (structure/framing/hash/canonical/stream-frame faults are fatal; limit, argument, evaluation, schema, compression, store, signature, proof, encode and stream protocol are not). `the_fatal_classification_matches_its_documented_rule` (fails pre-fix) |
+| 3 | medium | a delta string with invalid UTF-8 reported `infinity/utf8`, a string-heap code | **fixed**: `infinity/stream-delta`; `invalid_utf8_in_a_delta_string_is_a_stream_delta` (fails pre-fix) |
+| 4 | medium | `From<Utf8Error>` discarded the offset and always reported 0 | **fixed**: `valid_up_to()` is carried |
+| 5 | medium | a delta annotation string over the u16 space reported `infinity/too-large` ("4 GiB address space") | **fixed**: `infinity/stream-delta` with a delta-specific message; `an_oversized_delta_annotation_is_a_stream_delta` (fails pre-fix) |
+| 6 | low | `Header::try_write` on a short buffer reported `infinity/encode` | **fixed**: `infinity/invalid-argument`; `a_short_header_buffer_is_an_invalid_argument` (fails pre-fix) |
+| 7 | low | an unreferenced aux entry reports `infinity/count` | **rejected**: the aux table's declared count and its referenced set disagree, which is a count/coverage fault; the message names the table. A dedicated variant would add a public enum arm for a diagnostic nuance |
+| 8 | medium | the code gates were one-directional (25 of 51 codes checked, no uniqueness test) | **fixed**: a unit test enumerates every variant, asserts code uniqueness and that each code appears in `layout.md`; the conformance gate now covers the new codes and the FFI annex |
+| 9 | low | a frame checksum reports `infinity/hash-mismatch`, a frame flag fault `infinity/flags` | **rejected with a documentation note**: the streaming spec assigns those codes deliberately so a file and a stream share one vocabulary; the caller knows which layer it is reading |
+
+Gate: 5 integration tests (3 fail pre-fix) plus 3 new unit tests (fatal
+classification fails pre-fix); Infinity suite green in both feature sets.
+
+### I-14 FFI - 2026-10-31
+
+| # | Severity | Finding | Disposition |
+|---|---|---|---|
+| 1 | high | `alloc(len)` had no cap, no `try_reserve` and no panic guard: `SIZE_MAX` panicked into C or aborted | **fixed**: 1 GiB cap, `try_reserve_exact`, `catch_unwind` returning NULL with `infinity/limit` / `infinity/panic`. `alloc_refuses_an_impossible_request` |
+| 2 | high | `CStr::from_ptr(name)` scanned without a bound: an unterminated name read past the caller's buffer | **fixed**: a byte-wise scan bounded at 4096, `infinity/name-too-long`; `an_unterminated_name_is_refused_without_an_unbounded_scan` (fails pre-fix) |
+| 3 | high | `free` reconstructed the `Vec` with the caller's length; a wrong length or a double free was heap UB | **partially fixed as far as a C ABI allows**: `alloc` writes a 16-byte tag (magic + length) ahead of the payload, `free` verifies it and refuses a wrong length (leaking one buffer instead of corrupting the heap), and clears it before freeing. A double free, a foreign pointer or use-after-free remains UB, which the header now states together with the null-after-free rule. `free_checks_the_length_it_is_given` |
+| 4 | medium | an output call that succeeded left the previous failure in `last_error` | **fixed**: `infinity/ok` on every output success; `success_reports_ok_after_a_failure` (fails pre-fix) |
+| 5 | medium | `last_error` lifetime was described as "until the next failing call", inviting a retained pointer | **fixed in the header and crate docs**: copy immediately, the pointer is released by the next call on the thread |
+| 6 | medium | a misaligned `out_len` was dereferenced | **fixed**: `infinity/out-len-misaligned` before any access; `a_misaligned_out_len_is_refused` |
+| 7 | medium | `from_active` parsed an unbounded source | **fixed**: 16 MiB ceiling (`infinity/limit`); `an_oversized_source_is_refused_before_parsing` (fails pre-fix) |
+| 8 | medium | the FFI had no canonical-proof entry point, so dedup and signature consumers could not ask the question | **fixed**: `active_infinity_validate_canonical` exported and in the header; `validate_canonical_is_stricter_than_validate` |
+| 9 | medium | `version()` reported the shim's 0.1.0, not the codec version | **fixed**: `version()` returns the codec version, `ffi_version()` the shim; `version_reports_the_codec_and_the_shim` (fails pre-fix) |
+| 10 | medium | FFI-only codes were undocumented | **fixed**: `layout.md` §9.1 lists every shim code and the conformance gate waives them as non-image classes |
+| 11 | medium | `alloc` and the error setter were outside the panic guard | **fixed for `alloc`** (catch_unwind); `set_error` still allocates, and an allocation failure aborts the process in stable Rust. Documented as a residual |
+| 12 | low | a zero-length output with a null buffer reported `buffer-too-small` | **fixed**: empty output is `0` with `infinity/ok` |
+| 13 | low | `(null, 0)` reports `header-truncated`, `(null, 16)` reports `null-input` | **documented, not unified**: an empty buffer really is a truncated image, and a null pointer with a non-zero length really is a caller fault; the two conditions differ |
+| 14 | low | `content_hash` has a fixed 32-byte output with no negotiation | **documented** in the header: the ABI fixes the width, and the caller must provide 32 bytes |
+| 15 | low | the WASM fill called the host import for an empty buffer with a dangling pointer | **fixed**: empty fill returns without importing |
+| 16 | low | the header/EXPORTS tripwire only checked one direction | **fixed**: both directions are compared exactly; `the_header_and_the_export_list_agree_in_both_directions` |
+
+Residuals: the FFI pins the default (non-paranoid) `Limits` and has no
+`*_with_limits` variant; a WASM trap or a C++ exception bypasses the `-3`
+contract (neither is a Rust panic); stable codes remain an adaptive-probing aid
+by design. `set_error` allocation failure aborts.
+
+Gate: 18 FFI tests (the version, success-ok, unterminated-name, oversized-source
+and fatal-classification cases fail against the pre-fix shim; the alloc-cap test
+cannot be run pre-fix because it allocates a gigabyte). WASM
+`wasm32-unknown-unknown` release build green; Infinity suite green.

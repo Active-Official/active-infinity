@@ -117,10 +117,31 @@ node), `2` ai-immutable (`0`/`1`).
   `infinity/stream-state`, and a `Delta` with `op_count == 0` is
   `infinity/stream-delta`, because either one would re-encode and re-validate
   the whole module for no new content.
-- The decoder's work is bounded across generations, not only within one: every
-  completed generation adds its image size to a counter that may not exceed 64x
-  `Limits::max_total_bytes` (`infinity/limit`, kind `stream generation work`).
-  A delta merge also runs under the decoder's own `max_nodes`, not the
+- The decoder's work is bounded across generations, not only within one: a
+  generation is charged **before** the assembly, merge and encode, against a
+  counter that may not exceed 64x `Limits::max_total_bytes` (`infinity/limit`,
+  kind `stream generation work`). A tripped ceiling latches: every later frame
+  is refused before any work, so replaying one refused frame cannot buy another
+  encode. A wrong-hash `End` stays retryable, and the retry is charged.
+- A delta must change the module. A `Delta` whose ops re-encode to the image
+  already held (`SetRoot` to the current root, `RemoveBinding` of an absent
+  name, `SetProvenance(None)` on a module without provenance) is refused with
+  `infinity/stream-delta`: it would still cost a clone, a merge and a full
+  encode for no new content.
+- The closing `End` carries the image size, and the content hash covers that
+  field. A size that disagrees with the re-encoded image is reported as
+  `infinity/stream-hash`, never as a distinct size fault: separate codes would
+  let a peer recover the receiver's exact image size one bit at a time.
+- A wire boolean is exactly `0` or `1`; any other tag is
+  `infinity/stream-delta`. Two encodings of one operation would make a
+  re-encoding inspector and the receiver disagree.
+- The public `apply_delta_in_place` is fail-closed: the ops run against a clone
+  and the caller's module is replaced only when every op succeeded. A refused
+  list leaves the module byte-identical.
+- `push_bytes` is recoverable per frame, not per buffer: a refused frame is
+  consumed and its semantic state is rolled back, so the caller can correct
+  that frame; bytes already consumed before a fault are not replayed.
+- A delta merge also runs under the decoder's own `max_nodes`, not the
   defaults, so a strict caller is never made to allocate a larger arena than it
   declared.
 

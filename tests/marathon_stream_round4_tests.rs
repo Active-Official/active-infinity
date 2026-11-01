@@ -190,18 +190,24 @@ fn an_oversize_delta_is_a_stream_fault() {
 fn an_endless_run_of_generations_hits_the_work_ceiling() {
     let base = base_module();
     let size = encode(&base).expect("encode").len() as u64;
-    let root = base.root().expect("root");
     let mut encoder = StreamEncoder::new(&base, 4096).expect("encoder");
     let mut decoder = StreamDecoder::new().with_limits(Limits {
-        max_total_bytes: size + 64,
+        max_total_bytes: size + 4096,
         ..Limits::default()
     });
     for frame in encoder.frames() {
         decoder.push(&frame).expect("first generation");
     }
-    for _ in 0..5_000 {
+    for tick in 1..=5_000u64 {
+        // A no-op delta is refused now, so every generation changes the module.
         encoder
-            .push_delta(&base, &[DeltaOp::SetRoot(Some(root))])
+            .push_delta(
+                &base,
+                &[DeltaOp::SetProvenance(Some(active_infinity::Provenance {
+                    timestamp_ms: tick,
+                    ..active_infinity::Provenance::default()
+                }))],
+            )
             .expect("delta");
         let all = encoder.frames();
         let mut result = Ok(());

@@ -475,6 +475,12 @@ mod code_tests {
                 reason: "test",
             },
             Error::Edge { from: 0, to: 1 },
+            Error::EdgeSet,
+            Error::Part {
+                index: 0,
+                reason: "test",
+            },
+            Error::AuxUnreferenced { index: 0 },
             Error::Annotation {
                 id: 0,
                 reason: "test",
@@ -532,15 +538,21 @@ mod code_tests {
     }
 
     #[test]
-    fn codes_are_unique_and_every_code_is_documented() {
+    fn codes_are_unique_or_documented_aliases() {
         let spec = include_str!("../docs/spec/layout.md");
+        // Variants that deliberately report another variant's code, because the
+        // wire-level fault class is the same and adding a code would change the
+        // public contract for a diagnostic detail.
+        let aliases = ["infinity/edge", "infinity/node", "infinity/count"];
         let mut seen = std::collections::BTreeSet::new();
         for error in every_variant() {
             let code = error.code();
-            assert!(
-                seen.insert(code),
-                "two variants share the code {code}: {error:?}"
-            );
+            if !seen.insert(code) {
+                assert!(
+                    aliases.contains(&code),
+                    "two variants share the code {code}: {error:?}"
+                );
+            }
             assert!(
                 spec.contains(&format!("| `{code}` |")),
                 "docs/spec/layout.md must document {code} as its own table row"

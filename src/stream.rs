@@ -629,17 +629,17 @@ impl DeltaOp {
             }
             6 => DeltaOp::ClearAnnotations,
             7 => {
-                if take_u8(buf, cursor)? == 0 {
+                if !take_bool(buf, cursor)? {
                     DeltaOp::SetProvenance(None)
                 } else {
                     let producer = take_opt_string(buf, cursor)?;
                     let model = take_opt_string(buf, cursor)?;
                     let tool = take_opt_string(buf, cursor)?;
                     let timestamp_ms = take_u64(buf, cursor)?;
-                    let parent = if take_u8(buf, cursor)? == 0 {
-                        None
-                    } else {
+                    let parent = if take_bool(buf, cursor)? {
                         Some(take_hash(buf, cursor)?)
+                    } else {
+                        None
                     };
                     let count = take_u32(buf, cursor)?;
                     if count > limits.max_prov_entries {
@@ -656,7 +656,7 @@ impl DeltaOp {
                         let value = match take_u8(buf, cursor)? {
                             0 => crate::ir::ProvValue::Text(take_string(buf, cursor)?),
                             1 => crate::ir::ProvValue::Int(take_i64(buf, cursor)?),
-                            2 => crate::ir::ProvValue::Flag(take_u8(buf, cursor)? != 0),
+                            2 => crate::ir::ProvValue::Flag(take_bool(buf, cursor)?),
                             3 => crate::ir::ProvValue::Hash(take_hash(buf, cursor)?),
                             _ => return Err(Error::StreamDelta("unknown provenance value kind")),
                         };
@@ -693,7 +693,7 @@ pub fn apply_delta_with_limits(
     limits: crate::layout::Limits,
 ) -> Result<InfinityModule> {
     let mut out = module.clone();
-    apply_delta_in_place_with_limits(&mut out, ops, limits)?;
+    apply_ops(&mut out, ops, limits)?;
     Ok(out)
 }
 
@@ -708,7 +708,22 @@ pub fn apply_delta_in_place(module: &mut InfinityModule, ops: &[DeltaOp]) -> Res
 }
 
 /// [`apply_delta_in_place`] under an explicit node ceiling.
+///
+/// Fail-closed: the ops run against a clone and the caller's module is replaced
+/// only when every op succeeded, so a refused list cannot leave a partial
+/// mutation behind.
 pub fn apply_delta_in_place_with_limits(
+    module: &mut InfinityModule,
+    ops: &[DeltaOp],
+    limits: crate::layout::Limits,
+) -> Result<()> {
+    let mut updated = module.clone();
+    apply_ops(&mut updated, ops, limits)?;
+    *module = updated;
+    Ok(())
+}
+
+fn apply_ops(
     module: &mut InfinityModule,
     ops: &[DeltaOp],
     limits: crate::layout::Limits,
@@ -758,7 +773,25 @@ pub fn apply_delta_in_place_with_limits(
                 module.annotate(*node, kind.clone());
             }
             DeltaOp::ClearAnnotations => module.clear_annotations(),
-            DeltaOp::SetProvenance(prov) => module.set_provenance(prov.clone()),
+            DeltaOp::SetProvenance(prov) => {
+                if let Some(provenance) = prov {
+                    for text in [
+                        provenance.producer.as_deref(),
+                        provenance.model.as_deref(),
+                        provenance.tool.as_deref(),
+                    ]
+                    .into_iter()
+                    .flatten()
+                    {
+                        if text.is_empty() {
+                            // The encoder refuses an empty provenance text; a
+                            // delta must report the same fault in stream terms.
+                            return Err(Error::StreamDelta("empty provenance text"));
+                        }
+                    }
+                }
+                module.set_provenance(prov.clone());
+            }
         }
     }
     Ok(())
@@ -843,6 +876,9 @@ pub struct StreamDecoder {
     pending_delta_bytes: u64,
     /// Image bytes of every completed generation in this decoder.
     generation_work: u64,
+    /// Set when the work ceiling fired; every later frame is refused without
+    /// doing the work again.
+    generation_stopped: bool,
     frames: u64,
     partial: Vec<u8>,
     cursor: usize,
@@ -881,6 +917,7 @@ impl StreamDecoder {
             pending_deltas: Vec::new(),
             pending_delta_bytes: 0,
             generation_work: 0,
+            generation_stopped: false,
             frames: 0,
             partial: Vec::new(),
             cursor: 0,
@@ -896,13 +933,31 @@ impl StreamDecoder {
 
     /// Feed raw frame bytes. Frames may be split across calls and several may
     /// arrive in one call; partial frames are buffered.
+    ///
+    /// A refused frame is consumed and the semantic state is rolled back, so a
+    /// caller can fix that frame and send it again. The decoder is not rewound:
+    /// a fault that ends the call is permanent for the bytes already consumed,
+    /// which is why `stream-state` and `stream-delta` are documented as
+    /// recoverable *per frame*, not per buffer.
     pub fn push_bytes(&mut self, buf: &[u8]) -> Result<()> {
         self.partial.extend_from_slice(buf);
         // Parse against an offset and compact once: draining per frame moves the
         // remaining tail, which made this quadratic in frames per call.
         let mut consumed_total = 0usize;
         loop {
-            if self.partial.len() - consumed_total < FRAME_HEADER_SIZE {
+            let remaining = self.partial.len() - consumed_total;
+            if remaining < 4 {
+                break;
+            }
+            if self.partial[consumed_total..consumed_total + 4] != STREAM_MAGIC {
+                // A wrong magic in a 4..31-byte tail would otherwise be reported
+                // as a truncation and make the caller wait forever.
+                if consumed_total > 0 {
+                    self.partial.drain(..consumed_total);
+                }
+                return Err(Error::StreamMagic);
+            }
+            if remaining < FRAME_HEADER_SIZE {
                 break;
             }
             match Frame::parse(&self.partial[consumed_total..]) {
@@ -969,6 +1024,14 @@ impl StreamDecoder {
     }
 
     fn push_inner(&mut self, frame: &Frame) -> Result<()> {
+        if self.generation_stopped {
+            // The ceiling is a latch: a peer must not be able to buy the same
+            // assembly/encode work again by replaying one refused frame.
+            return Err(Error::Limit {
+                kind: "stream generation work",
+                limit: self.work_limit(),
+            });
+        }
         // `Frame` fields are public, so `push` must enforce the wire ceiling
         // that `Frame::parse` enforces; otherwise a caller-built frame can carry
         // bytes no peer could ever send to this decoder.
@@ -1173,16 +1236,30 @@ impl StreamDecoder {
                     return Err(Error::StreamState("end without delta"));
                 }
                 if self.ended {
-                    // Incremental generation: apply pending deltas first.
+                    // Incremental generation: charge before the clone, merge
+                    // and encode, using the current image size as the estimate.
+                    let estimate = self.image.as_ref().map(|image| image.len()).unwrap_or(0);
+                    self.charge_generation(estimate)?;
                     let base = self
                         .module
                         .as_ref()
                         .ok_or(Error::StreamState("no module to patch"))?;
                     let updated = apply_delta_with_limits(base, &self.pending_deltas, self.limits)?;
                     let image = encode_with(&updated, EncodeOpts::default())?;
-                    self.charge_generation(image.len())?;
+                    if image.len() > estimate {
+                        self.charge_generation(image.len() - estimate)?;
+                    }
+                    if self.image.as_ref() == Some(&image) {
+                        // A delta that changes nothing still costs a full
+                        // clone, merge and encode: refuse it (also closes the
+                        // `SetRoot(current)` / `RemoveBinding(absent)` bypass).
+                        return Err(Error::StreamDelta("delta did not change the module"));
+                    }
                     if image.len() as u64 != size {
-                        return Err(Error::StreamDelta("delta changed the declared size"));
+                        // The hash covers `total_size`, so a separate size fault
+                        // would be a one-bit oracle over the receiver's private
+                        // module (its exact encoded size, secret heap included).
+                        return Err(Error::StreamHashMismatch);
                     }
                     if hash_image(&image)? != hash {
                         return Err(Error::StreamHashMismatch);
@@ -1206,8 +1283,10 @@ impl StreamDecoder {
                     self.image = Some(image);
                     return Ok(());
                 }
+                // Charge the declared size before assembling: a wrong-hash
+                // `End` is retryable, and the retry must not be free.
+                self.charge_generation(size as usize)?;
                 let image = self.assemble(size)?;
-                self.charge_generation(image.len())?;
                 if hash_image(&image)? != hash {
                     return Err(Error::StreamHashMismatch);
                 }
@@ -1228,16 +1307,23 @@ impl StreamDecoder {
         Ok(())
     }
 
-    /// Charge one completed generation against the stream's work ceiling.
+    /// Bytes of generation work this decoder may still do.
+    fn work_limit(&self) -> u64 {
+        self.limits.max_total_bytes.saturating_mul(64)
+    }
+
+    /// Charge one generation against the stream's work ceiling.
     ///
     /// Every generation applies the pending deltas, re-encodes and fully
-    /// re-validates the module. A stream of tiny incremental frames is legal,
-    /// but an endless one is unbounded CPU from a few bytes each; the ceiling
-    /// is 64x the declared total bytes.
+    /// re-validates the module, so the charge is taken *before* that work: a
+    /// replay of a refused frame costs the ceiling, not another encode. A
+    /// tripped ceiling latches (`generation_stopped`), and every later frame is
+    /// refused before it can do anything.
     fn charge_generation(&mut self, bytes: usize) -> Result<()> {
+        let limit = self.work_limit();
         self.generation_work = self.generation_work.saturating_add(bytes as u64);
-        let limit = self.limits.max_total_bytes.saturating_mul(64);
         if self.generation_work > limit {
+            self.generation_stopped = true;
             return Err(Error::Limit {
                 kind: "stream generation work",
                 limit,
@@ -1441,6 +1527,15 @@ fn write_opt_string(out: &mut Vec<u8>, text: Option<&str>) -> Result<()> {
             out.push(1);
             write_string(out, text)
         }
+    }
+}
+
+/// A wire boolean is exactly 0 or 1; any other byte is a delta fault.
+fn take_bool(buf: &[u8], cursor: &mut usize) -> Result<bool> {
+    match take_u8(buf, cursor)? {
+        0 => Ok(false),
+        1 => Ok(true),
+        _ => Err(Error::StreamDelta("invalid boolean tag")),
     }
 }
 

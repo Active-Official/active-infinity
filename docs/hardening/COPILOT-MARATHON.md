@@ -1191,3 +1191,41 @@ ceiling is a policy choice.
 
 Gate after round 7: 397 library/integration tests (9 new), 42 CLI, 27 FFI,
 clippy clean on both feature sets, `cargo fmt --check` clean.
+
+### Re-audit round 8 (I-12) - 2026-10-31
+
+Reviewer: DeepSeek V4.1. It confirmed most round-7 fixes and found one **high**
+incomplete fix, two **high**, five **medium** and one **low** (spec). All are
+fixed; eight behavioural tests were proved to fail against `8fb6caa`.
+
+**Round-7 verification:** `content_key` memo and total budget, the four export
+budgets, annotation roots, the node-count locator bound, F7, F8, the JSON-only
+`$` escape and the taint pass are present. Two claims were **incomplete**:
+interpolated locator promotion covered only the resolved endpoint (F1), and
+`layout.md` §2 still said structural names including interpolation parts are
+"carried verbatim" (F9).
+
+| # | Sev | Finding | Disposition |
+|---|-----|---------|-------------|
+| F1 | high | promotion marked only the node `resolve_locator` returned, so a locator that is a `Binary`/`Unary`/... left its `Str` and interpolated parts in the public string heap (`secret(pw + "-canary-${name}")` published `-canary-`) | **fixed**: the whole locator subtree is marked from one shared visited set; every `Str` and every interpolation part is promoted; `locator_literals` collects from the subtree; `a_binary_wrapped_interpolated_locator_is_promoted` (fails pre-fix) |
+| F2 | high | spent-budget saturation called `hiding_placeholder(secrets)` per value: 200k secrets x 5k fields measured 16.1 s, and the "bounded by the budget" comment was false | **fixed**: the placeholder is computed once per export; capped helpers return `Option` and never rescan; `a_spent_export_budget_does_not_rescan_the_secret_table` (fails pre-fix) |
+| F3 | high | `value_paths` built dotted paths with no byte or depth cap (depth-400 comb: 480 800 bytes, longest 2 399; tens of GB at the permitted depth) | **fixed**: `MAX_EXPORT_PATH_BYTES` 16 MiB and `MAX_EXPORT_PATH_DEPTH` 64, then `@node[id]`; `a_deep_path_chain_stays_bounded` (fails pre-fix) |
+| F4 | medium | the module root was pushed before the annotation roots, so an annotation's synthetic label won over the real dotted path | **fixed**: annotations are pushed first, the root last; `an_annotated_subtree_keeps_its_real_path` (fails pre-fix) |
+| F5 | medium | the post-order taint pass marked a cycle member done before its taint arrived, so a secret reachable only through a back edge was reported untainted | **fixed**: propagate over `dependents` from every secret (one pass per edge, cycle-safe); `a_secret_behind_a_cycle_back_edge_is_reported` (fails pre-fix) |
+| F6 | medium | budget exhaustion was routed through the collision path: `provenance_json_for` returned `None` and the line codec emitted a fabricated `***SECRET***=` key | **fixed**: values saturate to the placeholder, keys stop the entry list, JSON never reports the block absent; `a_spent_budget_never_fabricates_a_provenance_key` (fails pre-fix) |
+| F7 | medium | replacing the 8-hop cap with a node-count walk made locator resolution unmemoized (200k refs sharing a 4k chain: `provenance_lines` 8.3 s) | **fixed**: one cache per export; measured 106 ms; `shared_locator_chains_resolve_once` (fails pre-fix) |
+| F8 | medium | promoting interpolated parts put fragments in the stored-metadata redaction set, so `secret("S${name}")` rewrote every `S` in prose and refused the module when the marker contains it | **fixed**: stored metadata is redacted against whole secrets only; fragments stay in the export set; `layout.md` §2 and `§11` document the split; `an_interpolated_one_byte_part_does_not_rewrite_metadata` (fails pre-fix) |
+| F9 | low | `layout.md` §2 said an interpolation's literal parts are "carried verbatim", and §3 described the mechanism loosely | **fixed**: both paragraphs describe promotion and the metadata split |
+
+Measured on this host (release test profile, same machine):
+
+| Shape | Before | After |
+|---|---|---|
+| `value_paths`, 200k secrets x 5k fields | 16.09 s | 54 ms |
+| `provenance_lines`, 200k refs x 4k-hop chain | 8.30 s | 106 ms |
+| `value_paths`, depth-400 comb | 401 paths / 480 800 bytes / longest 2 399 | 65 paths / 12 416 bytes / longest 383 |
+| provenance 3k secrets x 12 x 4 KiB | 2 lines incl. a fabricated key, JSON `None` | 1 line, JSON present |
+| `encode`, 200k refs x 4k-hop chain | 4.39 s | 4.48 s (unchanged: the cost is not locator resolution; logged as a perf follow-up) |
+
+Gate: 406 library/integration tests, 42 CLI, 27 FFI, clippy clean on both
+feature sets, `cargo fmt --check` clean.

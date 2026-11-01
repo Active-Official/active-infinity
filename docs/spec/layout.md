@@ -179,11 +179,20 @@ re-encoded module equal its source without revealing whether two secrets match.
 enumerated by any projection.
 
 Redaction covers free text: annotation text and provenance keys, values,
-producer, model and tool. Structural names — table field names, binding names,
-unit names, an env variable's name and an interpolation's literal parts — are
-schema, not free text, and are carried verbatim; a module that puts secret
-material into a name publishes that name, just as the secret table carries the
-secret itself.
+producer, model and tool. Structural names - table field names, binding names,
+unit names and an env variable's name - are schema, not free text, and are
+carried verbatim; a module that puts secret material into a name publishes that
+name, just as the secret table carries the secret itself. An interpolation's
+literal parts are *not* schema: they are secret material and move to the secret
+heap (step 2 below).
+
+Stored metadata is redacted against **whole secrets** only. An interpolated
+locator contributes fragments (`"S"`, `"hunter-"`); rewriting every occurrence
+of a one-byte fragment in prose would destroy the annotation, and a fragment
+inside `***SECRET***` could not be marked at all. The fragments are still
+removed from the public string heap and still hidden by every export; a consumer
+that wants prose-level redaction of fragments applies the projection rule to the
+decoded module (`interop::secret_texts`).
 
 ### 3.1a Reachability
 
@@ -428,7 +437,10 @@ canonical image reproduces it byte for byte:
 2. **Promote secret locators.** A string that is reachable only through a secret
    node (a secret is a barrier: its locator material is not public) and is not a
    root is re-encoded as a `Secret` node, so the literal — an env fallback, an
-   interpolated part — moves out of the public string heap.
+   interpolated part — moves out of the public string heap. Every literal the
+   locator reaches is covered, including one inside an expression such as
+   `secret(pw + "-suffix")`; a plain string becomes a `Secret` node and an
+   interpolated part becomes a new `Secret` referenced from the interpolation.
 3. **Number nodes.** Pre-order depth-first from the roots — the module root,
    then bindings in name order, then annotation subjects and their constraint
    expressions. Children are visited in node order (§3.1), which is itself
@@ -665,7 +677,10 @@ ceiling applies to **every** root (module root, bindings, annotation subjects) �
 a second shallow root cannot hide a deep chain. Defaults accept
 real modules (millions of nodes) and refuse bombs; `Limits::strict()` is the
 profile for adversarial surfaces. There is no unlimited mode: `0` in a ceiling
-is rejected with `infinity/invalid-argument`.
+is rejected with `infinity/invalid-argument`. Canonicalization may add up to one
+node per interpolated locator part (promotion, §2 step 2); an image produced
+from a module at the node ceiling can therefore exceed it, which the validator
+reports as its node/edge ceiling error.
 
 ---
 

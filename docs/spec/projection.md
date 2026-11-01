@@ -290,7 +290,16 @@ Two resource ceilings turn a hostile module into a refusal instead of a stall:
   `infinity/limit`;
 - the non-projection exports — `provenance_lines`, `provenance_json_for`,
   `value_paths` and `intents` — share one `EXPORT_REDACTION_BUDGET` (64 MiB of
-  scan bytes). They return text rather than a `Result`, so past the budget every
-  remaining value and key saturates to the marker: the output stays
-  conservative and the work stays bounded. A caller that needs a refusal uses
-  the JSON or Protobuf projection.
+  scan bytes). They return text rather than a `Result`, so the placeholder is
+  computed once per export and every remaining value saturates to it. A key has
+  no substitute that keeps its meaning, so the provenance exports stop emitting
+  entries when the budget is spent; a spent budget never invents a key and never
+  reports the provenance block absent. A caller that needs a refusal uses the
+  JSON or Protobuf projection.
+- `value_paths` bounds its own material: at most `MAX_EXPORT_PATH_BYTES`
+  (16 MiB) of dotted-path text and `MAX_EXPORT_PATH_DEPTH` (64) segments, then
+  a node keeps a short `@node[id]` label. A path copies its parent's prefix, so
+  a deep comb is otherwise quadratic.
+- annotation ordering keys are bounded in total (`MAX_ANNOTATION_KEY_BYTES`,
+  64 MiB of rendered subtree); past it the encoder refuses with
+  `infinity/limit`. See `layout.md` §3.

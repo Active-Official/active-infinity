@@ -91,25 +91,26 @@ pub(crate) fn prepare(module: &InfinityModule) -> Result<Prepared> {
     // 1. Normalize node contents in place (field order, float bits).
     let canonical_nodes: Vec<Inode> = module.nodes().iter().map(normalize).collect();
 
+    // Secret material that must not survive inside free text metadata. Read it
+    // *before* promotion, and take whole secrets only: an interpolated locator
+    // contributes fragments (`"S"`, `"hunter-"`), and rewriting every occurrence
+    // of such a fragment in prose would destroy the annotation. A fragment that
+    // is a substring of `***SECRET***` would refuse the module outright. The
+    // fragments stay in the export redaction set (`interop::secret_texts`), so
+    // no projection or text export publishes them.
+    let secret_literals = storage_secret_texts(&canonical_nodes);
+
     // 1b. Promote secret locators out of the public string heap.
     //
     // `active-core` models `secret("literal")` as a `Secret { locator }` node
     // whose locator is an ordinary string literal. Left alone, that literal
     // would land in the string heap and a naive `strings module.ainf` would
-    // read it back. A literal string that is referenced *only* by secret nodes
-    // and not exposed as a root is therefore re-encoded as a structural secret:
-    // the bytes move to the secret heap, which no projection enumerates.
+    // read it back. Every literal a secret locator reaches — a plain string, an
+    // interpolated part, or either one inside an expression such as
+    // `secret(pw + "-suffix")` — is re-encoded as a structural secret (or a
+    // `Secret` reference from an interpolation): the bytes move to the secret
+    // heap, which no projection enumerates.
     let canonical_nodes = promote_secret_locators(canonical_nodes, module);
-
-    // Secret material that must not survive inside free text metadata. Read it
-    // before the nodes are consumed by the renumbering pass below.
-    let secret_literals: Vec<String> = canonical_nodes
-        .iter()
-        .filter_map(|node| match node {
-            Inode::Secret(secret) => Some(String::from_utf8_lossy(secret.expose()).into_owned()),
-            _ => None,
-        })
-        .collect();
 
     // 2. Pre-order numbering from the roots.
     let order = canonical_order(&canonical_nodes, module)?;
@@ -660,6 +661,34 @@ fn normalize_type(typ: &TypeSpec) -> TypeSpec {
     }
 }
 
+/// Whole secrets that stored metadata prose is redacted against.
+///
+/// A `Secret` node's bytes, plus a `SecretRef` whose locator resolves to one
+/// `Str`/`Ident`. An interpolated locator contributes fragments of the secret
+/// expression; those are hidden from the string heap by promotion and from
+/// every export by `interop`, but they are not stored-metadata redaction
+/// targets: a one-byte fragment would rewrite any prose that contains that
+/// byte, and a fragment inside `***SECRET***` would refuse the module.
+fn storage_secret_texts(nodes: &[Inode]) -> Vec<String> {
+    let mut out = Vec::new();
+    for node in nodes {
+        match node {
+            Inode::Secret(secret) => {
+                out.push(String::from_utf8_lossy(secret.expose()).into_owned());
+            }
+            Inode::SecretRef { locator } => {
+                if let Some(index) = resolve_locator(nodes, *locator) {
+                    if let Inode::Str(text) | Inode::Ident(text) = &nodes[index] {
+                        out.push(text.clone());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
 /// Move secret-only string literals into the secret heap (see step 1b above).
 fn promote_secret_locators(mut nodes: Vec<Inode>, module: &InfinityModule) -> Vec<Inode> {
     if nodes.is_empty() {
@@ -676,15 +705,28 @@ fn promote_secret_locators(mut nodes: Vec<Inode>, module: &InfinityModule) -> Ve
     // would store the secret's bytes in the public string heap.
     let public_from_root = reachable(&nodes, module.root(), count);
 
-    // Every literal a `SecretRef` resolves to (a `Str`, or the literal parts of
-    // an `Interpolate`).
+    // Every node a `SecretRef` locator reaches is locator material: a `Str`
+    // literal, an `Interpolate`, and everything inside a `Binary`/`Unary`/...
+    // expression that builds the locator. Resolving only the endpoint missed
+    // `secret(pw + "-canary-${name}")`, whose `Str` and interpolation are
+    // children of a `Binary`. One shared visited set keeps the walk linear when
+    // many refs share a chain.
     let mut locator_material = vec![false; count];
-    for node in &nodes {
-        if let Inode::SecretRef { locator } = node {
-            if let Some(index) = resolve_locator(&nodes, *locator) {
-                locator_material[index] = true;
-            }
+    let mut visited = vec![false; count];
+    let mut stack: Vec<NodeId> = nodes
+        .iter()
+        .filter_map(|node| match node {
+            Inode::SecretRef { locator } => Some(*locator),
+            _ => None,
+        })
+        .collect();
+    while let Some(id) = stack.pop() {
+        if id.index() >= count || visited[id.index()] {
+            continue;
         }
+        visited[id.index()] = true;
+        locator_material[id.index()] = true;
+        stack.extend(nodes[id.index()].children());
     }
 
     let mut referenced = vec![false; count];

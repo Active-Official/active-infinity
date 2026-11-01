@@ -14,6 +14,8 @@ use active_infinity::{
 
 #[cfg(feature = "json")]
 use active_infinity::interop::{provenance_json_for, SECRET_MARKER};
+#[cfg(feature = "json")]
+use active_infinity::InterpPart;
 
 /// A secret-bearing module with `count` secrets and a root `Int(0)`.
 fn many_secrets(count: usize) -> InfinityModule {
@@ -222,4 +224,268 @@ fn a_long_locator_chain_stays_redacted() {
     assert!(!lines.contains(literal), "{lines}");
     let json = provenance_json_for(&module).expect("provenance");
     assert!(!json.to_string().contains(literal), "{json}");
+}
+
+// ---------------------------------------------------------------------------
+// Round 8: deeper locator shapes, the spent-budget path, and pathological
+// path text.
+// ---------------------------------------------------------------------------
+
+/// A locator may be an expression, not just a literal: `secret(pw + "-suffix")`
+/// keeps its `Str` and its interpolated part in the public string heap unless
+/// the whole locator subtree is promoted.
+#[cfg(feature = "json")]
+#[test]
+fn a_binary_wrapped_interpolated_locator_is_promoted() {
+    use active_infinity::interop::to_redacted_json;
+
+    let literal = "-canary-";
+    let mut module = InfinityModule::new();
+    let pw = module.push(Inode::Str("hunter2".into()));
+    let name = module.push(Inode::Str("svc".into()));
+    let interp = module.push(Inode::Interpolate {
+        parts: vec![InterpPart::Expr(name), InterpPart::Literal(literal.into())],
+    });
+    let sum = module.push(Inode::Binary {
+        op: active_infinity::BinOp::Add,
+        lhs: pw,
+        rhs: interp,
+    });
+    let secret = module.push(Inode::SecretRef { locator: sum });
+    let root = module.push(Inode::Table {
+        fields: vec![("password".into(), secret)],
+    });
+    module.set_root(Some(root));
+
+    // The literal must leave the public string heap: `secret(pw + "-canary-${name}")`
+    // hides every string in the locator subtree, not only a resolved endpoint.
+    // (The bytes still exist in the image's secret section, by design.)
+    let image = encode(&module).expect("encode");
+    let decoded = active_infinity::decode(&image).expect("decode");
+    for node in decoded.nodes() {
+        match node {
+            Inode::Str(text) => assert!(!text.contains(literal), "public string: {text}"),
+            Inode::Interpolate { parts } => {
+                for part in parts {
+                    if let InterpPart::Literal(text) = part {
+                        assert!(!text.contains(literal), "interpolated part: {text}");
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // A public copy of the fragment is redacted by every export, because the
+    // in-memory secret table resolves the whole locator subtree.
+    let copy = module.push(Inode::Str(format!("copy {literal} here")));
+    let root = module.push(Inode::Table {
+        fields: vec![("password".into(), secret), ("copy".into(), copy)],
+    });
+    module.set_root(Some(root));
+    let json = to_redacted_json(&module).expect("project");
+    assert!(!json.contains(literal), "{json}");
+    let lines = provenance_lines(&module).join("\n");
+    assert!(!lines.contains(literal), "{lines}");
+    let notes = intents(&module, root).join(" ");
+    assert!(!notes.contains(literal), "{notes}");
+}
+
+/// Once the export budget is spent, the saturating path must not rescan the
+/// secret table per value: 200 000 secrets and 5 000 fields measured 16 s
+/// before the placeholder was computed once per export.
+#[test]
+fn a_spent_export_budget_does_not_rescan_the_secret_table() {
+    let mut module = InfinityModule::new();
+    let root = module.push(Inode::Int(0));
+    module.set_root(Some(root));
+    for index in 0..200_000 {
+        module.push(Inode::Secret(SecretBytes::from(format!(
+            "SECRET{index:06}"
+        ))));
+    }
+    let mut fields = Vec::new();
+    for field in 0..5_000 {
+        let value = module.push(Inode::Int(field));
+        fields.push((format!("field{field:05}"), value));
+    }
+    let table = module.push(Inode::Table { fields });
+    module.set_root(Some(table));
+
+    let start = std::time::Instant::now();
+    let paths = value_paths(&module);
+    let elapsed = start.elapsed();
+    assert_eq!(paths.len(), 5_001);
+    assert!(
+        elapsed < std::time::Duration::from_secs(10),
+        "value_paths took {elapsed:?}"
+    );
+    assert!(
+        paths.values().any(|path| path == "***SECRET***"),
+        "the budget never saturated a key"
+    );
+}
+
+/// A dotted path copies its parent's prefix, so a deep comb builds quadratic
+/// text (depth 400 measured 480 800 bytes, longest 2 399). Past the cap a node
+/// gets a short identity label instead.
+#[test]
+fn a_deep_path_chain_stays_bounded() {
+    let mut module = InfinityModule::new();
+    let mut current = module.push(Inode::Int(1));
+    for _ in 0..400 {
+        current = module.push(Inode::Table {
+            fields: vec![("field".into(), current)],
+        });
+    }
+    module.set_root(Some(current));
+    let paths = value_paths(&module);
+    let total: usize = paths.values().map(|path| path.len()).sum();
+    let longest = paths.values().map(|path| path.len()).max().unwrap_or(0);
+    assert!(
+        paths.len() <= 70,
+        "{} paths for a depth-400 comb",
+        paths.len()
+    );
+    assert!(total < 64 * 1024, "{total} bytes of path text");
+    assert!(longest < 1024, "longest path is {longest} bytes");
+}
+
+/// The module root wins over an annotation's synthetic label: a real dotted
+/// path is what an agent needs, and the root's own path stays empty.
+#[test]
+fn an_annotated_subtree_keeps_its_real_path() {
+    let mut module = InfinityModule::new();
+    let leaf = module.push(Inode::Int(1));
+    let inner = module.push(Inode::Table {
+        fields: vec![("field".into(), leaf)],
+    });
+    let root = module.push(Inode::Table {
+        fields: vec![("annotated".into(), inner)],
+    });
+    module.set_root(Some(root));
+    module.annotate(inner, AnnotationKind::Intent("note".into()));
+    module.annotate(root, AnnotationKind::Intent("note".into()));
+
+    let paths = value_paths(&module);
+    assert_eq!(paths.get(&root).map(String::as_str), Some(""));
+    assert_eq!(paths.get(&inner).map(String::as_str), Some("annotated"));
+    assert_eq!(
+        paths.get(&leaf).map(String::as_str),
+        Some("annotated.field")
+    );
+}
+
+/// A secret reachable only through a back edge still taints its ancestors. A
+/// post-order walk marked the cycle member done before the taint arrived.
+#[test]
+fn a_secret_behind_a_cycle_back_edge_is_reported() {
+    let mut module = InfinityModule::new();
+    let secret = module.push(Inode::Secret(SecretBytes::from("hidden")));
+    // `a.next` is a `Ref` so the cycle closes without mutating a pushed node:
+    // a -> ref -> b -> a. The arena is deterministic here: secret=0, ref=1,
+    // a=2, b=3.
+    let next = module.push(Inode::Ref(active_infinity::NodeId(3)));
+    let a = module.push(Inode::Table {
+        fields: vec![("s".into(), secret), ("next".into(), next)],
+    });
+    let b = module.push(Inode::Table {
+        fields: vec![("back".into(), a)],
+    });
+    assert_eq!(b, active_infinity::NodeId(3));
+    module.set_root(Some(a));
+    let paths = secret_tainted_paths(&module);
+    assert!(paths.contains(&"next".to_string()), "{paths:?}");
+}
+
+/// A spent budget ends the provenance entry list instead of inventing a marker
+/// key (the line codec) or reporting the whole block absent (the JSON one).
+#[cfg(feature = "json")]
+#[test]
+fn a_spent_budget_never_fabricates_a_provenance_key() {
+    use active_infinity::interop::provenance_json_for;
+    use active_infinity::{ProvEntry, ProvValue};
+
+    let mut module = many_secrets(3_000);
+    module.set_provenance(Some(Provenance {
+        entries: (0..12)
+            .map(|index| ProvEntry {
+                key: format!("k{index:02}"),
+                value: ProvValue::Text("z".repeat(4096)),
+            })
+            .collect(),
+        ..Provenance::default()
+    }));
+    let lines = provenance_lines(&module);
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(lines[0].starts_with("k00="), "{lines:?}");
+    let json = provenance_json_for(&module).expect("provenance must stay present");
+    assert!(json["entries"].get("k00").is_some(), "{json}");
+}
+
+/// Many refs that share one long locator chain resolve it once: 200 000 refs
+/// over a 4 000-hop chain measured 8.3 s before the memo.
+#[test]
+fn shared_locator_chains_resolve_once() {
+    let mut module = InfinityModule::new();
+    let mut current = module.push(Inode::Str("shared-chain-literal".into()));
+    for _ in 0..4_000 {
+        current = module.push(Inode::Ref(current));
+    }
+    let mut fields = Vec::new();
+    for index in 0..200_000 {
+        let secret = module.push(Inode::SecretRef { locator: current });
+        fields.push((format!("s{index:06}"), secret));
+    }
+    let root = module.push(Inode::Table { fields });
+    module.set_root(Some(root));
+    module.set_provenance(Some(Provenance {
+        producer: Some("agent".into()),
+        ..Provenance::default()
+    }));
+    let start = std::time::Instant::now();
+    let lines = provenance_lines(&module);
+    let elapsed = start.elapsed();
+    assert_eq!(lines, vec!["producer=agent".to_string()]);
+    assert!(
+        elapsed < std::time::Duration::from_secs(2),
+        "provenance_lines took {elapsed:?}"
+    );
+}
+
+/// Fragments of an interpolated locator are hidden from the public heap and
+/// from exports, but they are not stored-metadata redaction targets: a
+/// one-byte part would rewrite every occurrence of that byte in the prose (and
+/// a part inside `***SECRET***` refused the module outright).
+#[cfg(feature = "json")]
+#[test]
+fn an_interpolated_one_byte_part_does_not_rewrite_metadata() {
+    let mut module = InfinityModule::new();
+    let name = module.push(Inode::Str("svc".into()));
+    let interp = module.push(Inode::Interpolate {
+        parts: vec![InterpPart::Literal("S".into()), InterpPart::Expr(name)],
+    });
+    let secret = module.push(Inode::SecretRef { locator: interp });
+    let root = module.push(Inode::Table {
+        fields: vec![("password".into(), secret)],
+    });
+    module.set_root(Some(root));
+    module.annotate(root, AnnotationKind::Intent("S note".into()));
+    module.set_provenance(Some(Provenance {
+        producer: Some("agent S run".into()),
+        ..Provenance::default()
+    }));
+
+    let image = encode(&module).expect("a one-byte fragment must not refuse the module");
+    let decoded = active_infinity::decode(&image).expect("decode");
+    assert_eq!(
+        decoded
+            .provenance()
+            .and_then(|prov| prov.producer.as_deref()),
+        Some("agent S run"),
+        "stored prose must survive"
+    );
+    // The export still hides the fragment.
+    let lines = provenance_lines(&decoded).join("\n");
+    assert!(!lines.contains('S'), "{lines}");
 }

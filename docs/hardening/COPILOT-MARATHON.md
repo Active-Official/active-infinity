@@ -714,3 +714,21 @@ re-check only.
 
 Gate: 342 all-features, clippy clean both feature sets, Linux Docker store suite
 12/12; 10 new schema tests and 3 store tests proved to fail pre-fix.
+
+### Re-audit round 2 (I-10) - 2026-10-31
+
+Reviewer scope: `src/signature.rs`, `src/proof.rs`, the sidecar JSON surface.
+Findings: 1 high, 3 medium, 3 low.
+
+| # | Severity | Finding | Disposition |
+|---|---|---|---|
+| 1 | high | `parse_hex32` sliced the 64-byte string by byte index, so a 64-byte string with a two-byte character at an odd boundary aborted the verifier with a char-boundary panic | **fixed**: the parser rejects non-ASCII and converts bytes through a `digit` closure; `a_non_ascii_hash_is_refused_without_panicking` panics pre-fix with `end byte index 2 is not a char boundary` and returns `infinity/proof` after |
+| 2 | medium | `from_bytes` copied the image into a `Vec` before proving it canonical, doubling the transient memory for an input about to be refused | **fixed**: a free `verify_parts` proves the borrowed `&bytes[HEADER..]`; the copy runs only after the proof |
+| 3 | medium | the image-fault mapping collapsed `infinity/limit` into `infinity/signature`, hiding a resource ceiling from a caller that budgets on it | **fixed**: `Limit` is passed through; `a_ceiling_fault_keeps_the_limit_code` (fails pre-fix, `infinity/signature`) |
+| 4 | medium | `SignedImage::content_hash` leaked the codec's own fault code for a malformed image | **fixed**: envelope faults are `infinity/signature`, ceilings pass through; `content_hash_reports_the_envelope_code_for_a_corrupt_image` (fails pre-fix, `infinity/magic`) |
+| 5 | low | a numeric sidecar string accepted `+42`, `007` and the empty string via `str::parse` | **fixed**: canonical decimal only (no sign, no leading zero, non-empty); `a_numeric_string_must_be_canonical_decimal` (fails pre-fix on `007`) |
+| 6 | low | `verify_parts` rebuilt the signed message even when the key bytes were invalid | **rejected as a non-issue**: `VerifyingKey::from_bytes` runs before the message is built |
+| 7 | low | the sidecar parser accepts a `null` schema hash and a missing one as the same value | **rejected**: both mean "no schema"; the contract says absent-or-null, and `to_json` writes `null` |
+
+Gate: 346 all-features (4 new), clippy clean both feature sets; every new test
+proved to fail against the pre-fix tree by stashing the implementation file.

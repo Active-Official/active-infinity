@@ -77,24 +77,21 @@ impl SignedImage {
     ///
     /// The image must be canonical: a signature certifies bytes that re-encode
     /// to themselves. Any image fault is reported as `infinity/signature`, the
-    /// envelope's code.
+    /// envelope's code; a resource ceiling (`infinity/limit`) is passed through
+    /// so a caller counting on that code still sees it.
     pub fn verify(&self) -> Result<()> {
-        validate_canonical(&self.image, Limits::default())
-            .map_err(|_| Error::Signature("the signed image does not validate"))?;
-        let key = VerifyingKey::from_bytes(&self.public_key)
-            .map_err(|_| Error::Signature("invalid public key"))?;
-        let signature = Signature::from_bytes(&self.signature);
-        let mut message = Vec::with_capacity(DOMAIN.len() + self.image.len());
-        message.extend_from_slice(DOMAIN);
-        message.extend_from_slice(&self.image);
-        key.verify(&message, &signature)
-            .map_err(|_| Error::Signature("signature does not verify"))?;
-        Ok(())
+        verify_parts(&self.image, &self.public_key, &self.signature)
     }
 
     /// Content hash of the signed image.
+    ///
+    /// A malformed image is an envelope fault (`infinity/signature`); a
+    /// resource ceiling is passed through.
     pub fn content_hash(&self) -> Result<[u8; 32]> {
-        crate::content_hash(&self.image)
+        crate::content_hash(&self.image).map_err(|error| match error {
+            Error::Limit { .. } => error,
+            _ => Error::Signature("the envelope's image does not validate"),
+        })
     }
 
     /// Serialize the detached envelope.
@@ -132,14 +129,38 @@ impl SignedImage {
         public_key.copy_from_slice(&bytes[5..37]);
         let mut signature = [0u8; 64];
         signature.copy_from_slice(&bytes[37..101]);
-        let envelope = Self {
-            image: bytes[HEADER..].to_vec(),
+        // Verify the borrowed image first: copying a gigabyte-scale envelope
+        // before the canonical proof would double the transient memory for an
+        // input that is about to be refused.
+        let image = &bytes[HEADER..];
+        verify_parts(image, &public_key, &signature)?;
+        Ok(Self {
+            image: image.to_vec(),
             public_key,
             signature,
-        };
-        envelope.verify()?;
-        Ok(envelope)
+        })
     }
+}
+
+/// Verify an image, key and signature without owning the image.
+///
+/// Split out so [`SignedImage::from_bytes`] can prove a borrowed slice before
+/// copying it. Every image fault is `infinity/signature` except a resource
+/// ceiling, which keeps `infinity/limit`.
+fn verify_parts(image: &[u8], public_key: &[u8; 32], signature: &[u8; 64]) -> Result<()> {
+    validate_canonical(image, Limits::default()).map_err(|error| match error {
+        Error::Limit { .. } => error,
+        _ => Error::Signature("the signed image does not validate"),
+    })?;
+    let key =
+        VerifyingKey::from_bytes(public_key).map_err(|_| Error::Signature("invalid public key"))?;
+    let signature = Signature::from_bytes(signature);
+    let mut message = Vec::with_capacity(DOMAIN.len() + image.len());
+    message.extend_from_slice(DOMAIN);
+    message.extend_from_slice(image);
+    key.verify(&message, &signature)
+        .map_err(|_| Error::Signature("signature does not verify"))?;
+    Ok(())
 }
 
 /// Largest envelope accepted: the codec's image ceiling plus the fixed header
@@ -185,5 +206,43 @@ mod tests {
         let last = tampered.len() - 1;
         tampered[last] ^= 0x01;
         assert!(SignedImage::from_bytes(&tampered).is_err());
+    }
+
+    /// A resource ceiling is a caller-facing contract, not an envelope fault.
+    /// The verifier keeps `infinity/limit` so a caller that budgets on that code
+    /// still sees it; every other image fault collapses to `infinity/signature`.
+    #[test]
+    fn a_ceiling_fault_keeps_the_limit_code() {
+        let key = SigningKey::from_bytes(&[7u8; 32]);
+        let mut doctored = image();
+        // The node count is the second word of the first section descriptor,
+        // right after the 64-byte fixed prefix. Declaring u32::MAX nodes trips
+        // `validate_counts` before the content hash is recomputed.
+        doctored[68..72].copy_from_slice(&u32::MAX.to_le_bytes());
+        let mut message = DOMAIN.to_vec();
+        message.extend_from_slice(&doctored);
+        let signature = key.sign(&message);
+        let mut bytes = MAGIC.to_vec();
+        bytes.push(VERSION);
+        bytes.extend_from_slice(&key.verifying_key().to_bytes());
+        bytes.extend_from_slice(&signature.to_bytes());
+        bytes.extend_from_slice(&doctored);
+        let error = SignedImage::from_bytes(&bytes).expect_err("the image is refused");
+        assert_eq!(error.code(), "infinity/limit", "{error}");
+    }
+
+    /// `content_hash` reports envelope faults under the envelope's code, so a
+    /// caller that matches on `infinity/signature` does not miss a malformed
+    /// image behind a different error.
+    #[test]
+    fn content_hash_reports_the_envelope_code_for_a_corrupt_image() {
+        let key = SigningKey::from_bytes(&[7u8; 32]);
+        let signed = SignedImage {
+            image: b"not an image".to_vec(),
+            public_key: key.verifying_key().to_bytes(),
+            signature: [0u8; 64],
+        };
+        let error = signed.content_hash().expect_err("the image is refused");
+        assert_eq!(error.code(), "infinity/signature", "{error}");
     }
 }

@@ -151,3 +151,48 @@ fn a_u64_field_may_arrive_as_a_decimal_string() {
     let parsed = Proof::from_json(&value.to_string()).expect("a decimal string parses");
     assert_eq!(parsed, proof);
 }
+
+/// A 64-byte string whose bytes are not all ASCII used to slice mid-character and
+/// abort the verifier. The length check counts bytes, so only an ASCII guard can
+/// keep the hex parser on whole characters.
+#[cfg(feature = "json")]
+#[test]
+fn a_non_ascii_hash_is_refused_without_panicking() {
+    use active_infinity::Proof;
+
+    let proof = Proof::issue(&encode(&module()).expect("encode")).expect("issue");
+    let mut value: serde_json::Value = serde_json::from_str(&proof.to_json()).expect("json");
+    // One ASCII byte, 31 two-byte characters and a closing ASCII byte: 64
+    // bytes total, with a character boundary that falls on every odd index.
+    let hash = format!("a{}a", "\u{e9}".repeat(31));
+    assert_eq!(hash.len(), 64, "the probe is 64 bytes wide");
+    value["content_hash"] = serde_json::Value::String(hash);
+    let error = Proof::from_json(&value.to_string()).expect_err("a non-ASCII hash is refused");
+    assert_eq!(error.code(), "infinity/proof", "{error}");
+}
+
+/// A canonical decimal has no sign and no leading zero. Accepting either would
+/// make two spellings of one value hash differently across implementations.
+#[cfg(feature = "json")]
+#[test]
+fn a_numeric_string_must_be_canonical_decimal() {
+    use active_infinity::Proof;
+
+    let proof = Proof::issue(&encode(&module()).expect("encode")).expect("issue");
+    let mut value: serde_json::Value = serde_json::from_str(&proof.to_json()).expect("json");
+    value["dialect_hash"] = serde_json::Value::String("007".into());
+    let error = Proof::from_json(&value.to_string()).expect_err("a leading zero is refused");
+    assert_eq!(error.code(), "infinity/proof", "{error}");
+
+    value["dialect_hash"] = serde_json::Value::String("+42".into());
+    let error = Proof::from_json(&value.to_string()).expect_err("a sign is refused");
+    assert_eq!(error.code(), "infinity/proof", "{error}");
+
+    value["dialect_hash"] = serde_json::Value::String(String::new());
+    let error = Proof::from_json(&value.to_string()).expect_err("an empty string is refused");
+    assert_eq!(error.code(), "infinity/proof", "{error}");
+
+    value["dialect_hash"] = serde_json::Value::String("0".into());
+    let parsed = Proof::from_json(&value.to_string()).expect("zero is canonical");
+    assert_eq!(parsed.dialect_hash, 0);
+}

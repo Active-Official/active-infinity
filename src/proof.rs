@@ -214,9 +214,22 @@ impl Proof {
                 Some(serde_json::Value::Number(number)) => number
                     .as_u64()
                     .ok_or(Error::Proof("numeric field is not an unsigned integer")),
-                Some(serde_json::Value::String(text)) => text
-                    .parse()
-                    .map_err(|_| Error::Proof("numeric string is not an unsigned integer")),
+                Some(serde_json::Value::String(text)) => {
+                    // Canonical decimal only: no sign, no leading zeros. A
+                    // stricter producer never emits them, and a cross-language
+                    // verifier that parses with a different library would
+                    // otherwise disagree about the same bytes.
+                    if text.is_empty()
+                        || !text.bytes().all(|byte| byte.is_ascii_digit())
+                        || (text.len() > 1 && text.starts_with('0'))
+                    {
+                        return Err(Error::Proof(
+                            "numeric string is not a canonical unsigned integer",
+                        ));
+                    }
+                    text.parse()
+                        .map_err(|_| Error::Proof("numeric string is out of range"))
+                }
                 _ => Err(Error::Proof("missing numeric field")),
             }
         };
@@ -270,13 +283,24 @@ fn hex(bytes: &[u8]) -> String {
 
 #[cfg(feature = "json")]
 fn parse_hex32(text: &str) -> Result<[u8; 32]> {
-    if text.len() != 64 {
-        return Err(Error::Proof("hash must be 64 hex characters"));
+    // `text.len()` counts bytes. Slicing a `str` by byte index panics when the
+    // index is not a char boundary, so a 64-byte non-ASCII string used to abort
+    // the verifier. Parse bytes instead.
+    if text.len() != 64 || !text.is_ascii() {
+        return Err(Error::Proof("hash must be 64 ASCII hex characters"));
     }
+    let bytes = text.as_bytes();
+    let digit = |byte: u8| -> Result<u8> {
+        match byte {
+            b'0'..=b'9' => Ok(byte - b'0'),
+            b'a'..=b'f' => Ok(byte - b'a' + 10),
+            b'A'..=b'F' => Ok(byte - b'A' + 10),
+            _ => Err(Error::Proof("hash is not hex")),
+        }
+    };
     let mut out = [0u8; 32];
     for (index, slot) in out.iter_mut().enumerate() {
-        *slot = u8::from_str_radix(&text[index * 2..index * 2 + 2], 16)
-            .map_err(|_| Error::Proof("hash is not hex"))?;
+        *slot = digit(bytes[index * 2])? * 16 + digit(bytes[index * 2 + 1])?;
     }
     Ok(out)
 }

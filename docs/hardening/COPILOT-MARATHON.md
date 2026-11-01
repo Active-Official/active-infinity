@@ -22,7 +22,7 @@ the code → regression test first → minimal fix → targeted tests + clippy �
 | I-06 | stream and delta | `src/stream.rs` | CLEAN | 7 fixed, 2 rejected, 0 open | this commit |
 | I-07 | schema class | `src/schema.rs` | CLEAN | 6 fixed, 1 rejected | this commit |
 | I-08 | store | `src/store.rs` | **CLEAN** | 7 fixed, 1 rejected | this commit |
-| I-09 | compress | `src/compress.rs`, CLI `dict` | **CLEAN** | 6 fixed, 4 rejected/documented | this commit |
+| I-09 | compress | `src/compress.rs`, CLI `dict` | **CLEAN** (round 2: 5 more fixed) | 11 fixed, 4 rejected/documented | this commit |
 | I-10 | signature / proof | `src/signature.rs`, `src/proof.rs` | **CLEAN** | 6 fixed, 2 rejected/documented | this commit |
 | I-11 | merge | `src/merge.rs` | **CLEAN** | 7 fixed, 1 rejected | this commit |
 | I-12 | interop / protobuf | `src/interop.rs`, `src/protobuf.rs` | **CLEAN** | 6 fixed, 1 rejected | this commit |
@@ -732,3 +732,21 @@ Findings: 1 high, 3 medium, 3 low.
 
 Gate: 346 all-features (4 new), clippy clean both feature sets; every new test
 proved to fail against the pre-fix tree by stashing the implementation file.
+
+### Re-audit round 2 (I-09) - 2026-10-31
+
+Reviewer scope: `src/compress.rs`, the CLI `dict` surface, `docs/spec/streaming.md`.
+Findings: 1 high, 2 medium, 2 low.
+
+| # | Severity | Finding | Disposition |
+|---|---|---|---|
+| 1 | high | `train_dictionary` passed `max_size` straight to `zstd::dict::from_samples`; a large enough capacity makes zstd's allocator abort the process (0xc0000409), an uncatchable failure for an input the caller controls | **fixed**: a size above `Limits::max_total_bytes` is `infinity/invalid-argument` before the call; `train_refuses_a_dictionary_size_above_the_codec_ceiling` (pre-fix: `infinity/compression`) |
+| 2 | medium | `--level` parsed as `usize`, so the whole fast half of the advertised range (`-131072..=-1`) was unreachable from the CLI; `--size`/`--max-bytes` reported a negative value as "expects a number" | **fixed**: `flag_signed` parses `i64`, `flag_number` refuses a negative with a precise message, `--level` is range-checked as `i64`; `dict_apply_accepts_a_negative_level_and_refuses_one_below_the_range` (fails pre-fix) |
+| 3 | medium | `dict train` read every sample before any total check; only a per-file ceiling applied, so N hostile paths committed N files of memory and the saturating `total` hid the overflow | **fixed**: declared sizes are summed with `checked_add` and refused above `input_ceiling()` before a byte is read; `dict_train_refuses_samples_over_the_input_ceiling_before_reading_them` (fails pre-fix) |
+| 4 | low | `dict apply` silently ignored a mode-irrelevant flag (`--level` with `--decompress`, `--max-bytes` when compressing) | **fixed**: both are usage errors; `dict_apply_refuses_a_flag_that_the_mode_cannot_use` (fails pre-fix) |
+| 5 | low | an input of skippable frames only decoded to an empty success, indistinguishable from an empty payload | **fixed**: `carries_content_frame` walks the frame headers and refuses an input with no content frame (`infinity/compression`), while a skippable frame before content still decodes; `skippable_only_input_is_refused` (fails pre-fix), `a_skippable_frame_before_content_still_decompresses`; documented in `docs/spec/streaming.md` section 6 |
+
+Gate: 349 library/integration tests plus 26 CLI tests, clippy clean both
+feature sets and the CLI package; each new test proved to fail against the
+pre-fix tree (library tests by stashing `src/compress.rs`, CLI tests by stashing
+`cli/active-infinity-cli/src/main.rs`).

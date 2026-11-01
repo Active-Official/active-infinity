@@ -130,10 +130,17 @@ frame grammar and it does not move identity:
   that expands past it is infinity/compression.
 - An empty input is refused: an empty file is not a zstd frame, and returning an
   empty buffer for it would read as a successful decode.
+- An input that holds only skippable frames is refused with infinity/compression.
+  Skippable frames are legal zstd and carry nothing; decoding them to an empty
+  buffer would be indistinguishable from an empty payload. A content frame after
+  any number of skippable frames decodes normally.
 - Compression levels outside the build's zstd range (-131072..=22 for current
   zstd) are infinity/invalid-argument; they are never silently clamped.
 - A trained dictionary is a **hint**. zstd decompresses a frame that does not
   use the supplied dictionary, so a successful dictionary decode says nothing
   about the producer or the dictionary. Authenticity comes only from a
   SignedImage envelope or the content hash.
-- Dictionary training takes an allocation ceiling (max_size); zero is refused.
+- Dictionary training takes an allocation ceiling (max_size); zero is refused, and
+  a size above Limits::max_total_bytes is infinity/invalid-argument. zstd's
+  allocator aborts the process rather than returning an error for a large enough
+  capacity, so the ceiling is enforced before the call.

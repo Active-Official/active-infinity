@@ -21,7 +21,7 @@
 //! - Levels outside the build's zstd range are refused instead of being clamped
 //!   silently, so a caller's intent is never replaced by a different level.
 
-use crate::{Error, Result};
+use crate::{Error, Limits, Result};
 
 /// Compression levels this build's zstd accepts, inclusive.
 pub fn level_range() -> (i32, i32) {
@@ -41,6 +41,44 @@ fn check_level(level: i32) -> Result<()> {
     Ok(())
 }
 
+/// zstd frame magic: a frame that carries content.
+const FRAME_MAGIC: u32 = 0xFD2F_B528;
+/// Skippable-frame magic, with the low nibble of the last byte masked off.
+const SKIPPABLE_MAGIC: u32 = 0x184D_2A50;
+const SKIPPABLE_MASK: u32 = 0xFFFF_FFF0;
+
+/// Whether the stream contains a frame that carries content.
+///
+/// A skippable frame is legal zstd and decodes to nothing, so an input made of
+/// skippable frames only would decode to an empty success that a caller cannot
+/// tell apart from an empty payload. Walk the frame headers: a content frame
+/// means "decode it", only skippable frames means "refuse". An unrecognized
+/// magic is left for zstd to report.
+fn carries_content_frame(bytes: &[u8]) -> bool {
+    let mut offset = 0usize;
+    while let Some(header) = bytes.get(offset..offset + 4) {
+        let magic = u32::from_le_bytes([header[0], header[1], header[2], header[3]]);
+        if magic == FRAME_MAGIC {
+            return true;
+        }
+        if magic & SKIPPABLE_MASK != SKIPPABLE_MAGIC {
+            return true;
+        }
+        let Some(length) = bytes.get(offset + 4..offset + 8) else {
+            return false;
+        };
+        let length = u32::from_le_bytes([length[0], length[1], length[2], length[3]]) as usize;
+        match offset
+            .checked_add(8)
+            .and_then(|start| start.checked_add(length))
+        {
+            Some(next) => offset = next,
+            None => return false,
+        }
+    }
+    false
+}
+
 /// Compress a canonical image or frame payload with zstd.
 pub fn compress(bytes: &[u8], level: i32) -> Result<Vec<u8>> {
     check_level(level)?;
@@ -54,6 +92,11 @@ pub fn compress(bytes: &[u8], level: i32) -> Result<Vec<u8>> {
 pub fn decompress(bytes: &[u8], max_output: usize) -> Result<Vec<u8>> {
     if bytes.is_empty() {
         return Err(Error::Compression("empty compressed input"));
+    }
+    if !carries_content_frame(bytes) {
+        return Err(Error::Compression(
+            "compressed input carries no content frame",
+        ));
     }
     zstd::bulk::decompress(bytes, max_output).map_err(|_| Error::Compression("zstd decompress"))
 }
@@ -82,6 +125,11 @@ pub fn decompress_with_dictionary(
     if bytes.is_empty() {
         return Err(Error::Compression("empty compressed input"));
     }
+    if !carries_content_frame(bytes) {
+        return Err(Error::Compression(
+            "compressed input carries no content frame",
+        ));
+    }
     let mut decompressor = zstd::bulk::Decompressor::with_dictionary(dictionary)
         .map_err(|_| Error::Compression("zstd dictionary decompressor"))?;
     decompressor
@@ -99,6 +147,14 @@ pub fn train_dictionary<S: AsRef<[u8]>>(samples: &[S], max_size: usize) -> Resul
     }
     if samples.is_empty() {
         return Err(Error::InvalidArgument("dictionary training needs samples"));
+    }
+    // zstd's allocator aborts the process (not an `Err`) for a large enough
+    // capacity, so the ceiling is enforced here: this crate's contract is to
+    // fail closed on every input.
+    if max_size as u64 > Limits::default().max_total_bytes {
+        return Err(Error::InvalidArgument(
+            "dictionary size is above the codec's image ceiling",
+        ));
     }
     zstd::dict::from_samples(samples, max_size)
         .map_err(|_| Error::Compression("zstd dictionary training"))
@@ -119,6 +175,35 @@ mod tests {
         let root = module.push(Inode::Table { fields });
         module.set_root(Some(root));
         encode(&module).expect("encode")
+    }
+
+    #[test]
+    fn train_refuses_a_dictionary_size_above_the_codec_ceiling() {
+        let samples = vec![image(0), image(1)];
+        let ceiling = Limits::default().max_total_bytes as usize;
+        let error = train_dictionary(&samples, ceiling + 1).expect_err("refused");
+        assert_eq!(error.code(), "infinity/invalid-argument", "{error}");
+    }
+
+    #[test]
+    fn skippable_only_input_is_refused() {
+        let mut frame = 0x184D_2A50u32.to_le_bytes().to_vec();
+        frame.extend_from_slice(&4u32.to_le_bytes());
+        frame.extend_from_slice(&[0u8; 4]);
+        let error = decompress(&frame, 1024).expect_err("no content frame");
+        assert_eq!(error.code(), "infinity/compression", "{error}");
+    }
+
+    #[test]
+    fn a_skippable_frame_before_content_still_decompresses() {
+        let image = image(3);
+        let compressed = compress(&image, 3).expect("compress");
+        let mut stream = 0x184D_2A51u32.to_le_bytes().to_vec();
+        stream.extend_from_slice(&2u32.to_le_bytes());
+        stream.extend_from_slice(&[7u8; 2]);
+        stream.extend_from_slice(&compressed);
+        let restored = decompress(&stream, image.len() + 1).expect("decompress");
+        assert_eq!(restored, image);
     }
 
     #[test]

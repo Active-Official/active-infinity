@@ -302,17 +302,26 @@ fn check_positional(positional: &[String], expected: usize, usage: &str) -> Resu
     Ok(())
 }
 
+fn flag_signed(flags: &BTreeMap<String, String>, name: &str) -> Result<Option<i64>, String> {
+    match flags.get(name) {
+        None => Ok(None),
+        Some(value) if value.is_empty() => Err(format!("usage: {name} needs a value")),
+        Some(value) => value
+            .parse::<i64>()
+            .map(Some)
+            .map_err(|_| format!("usage: {name} expects a number")),
+    }
+}
+
 fn flag_number(
     flags: &BTreeMap<String, String>,
     name: &str,
     default: usize,
 ) -> Result<usize, String> {
-    match flags.get(name) {
+    match flag_signed(flags, name)? {
         None => Ok(default),
-        Some(value) if value.is_empty() => Err(format!("usage: {name} needs a value")),
-        Some(value) => value
-            .parse()
-            .map_err(|_| format!("usage: {name} expects a number")),
+        Some(value) if value < 0 => Err(format!("usage: {name} must not be negative")),
+        Some(value) => usize::try_from(value).map_err(|_| format!("usage: {name} is too large")),
     }
 }
 
@@ -371,11 +380,28 @@ fn dict_command(args: &[String]) -> Result<(), String> {
             if positional.len() < 3 {
                 return Err("usage: dict train needs at least two sample files".to_string());
             }
+            // Sum the declared sizes first. Reading every sample before any
+            // check would let N hostile paths commit N files of memory; the
+            // per-file ceiling in `read` does not bound the total.
+            let ceiling = input_ceiling();
+            let mut declared = 0u64;
+            for sample in &positional[1..] {
+                let meta = fs::metadata(sample).map_err(|error| format!("{sample}: {error}"))?;
+                if !meta.is_file() {
+                    return Err(format!("{sample}: not a regular file"));
+                }
+                declared = declared.checked_add(meta.len()).ok_or_else(|| {
+                    format!("usage: samples are larger than the {ceiling} byte input ceiling")
+                })?;
+                if declared > ceiling {
+                    return Err(format!(
+                        "usage: samples together are larger than the {ceiling} byte input ceiling; train from fewer or smaller samples"
+                    ));
+                }
+            }
             let samples: Vec<Vec<u8>> =
                 positional[1..].iter().map(read).collect::<Result<_, _>>()?;
-            let total = samples
-                .iter()
-                .fold(0usize, |sum, sample| sum.saturating_add(sample.len()));
+            let total = usize::try_from(declared).unwrap_or(usize::MAX);
             let default_size = (total / 8).clamp(256, 110 * 1024);
             let size = flag_number(&flags, "--size", default_size)?;
             if size < 256 {
@@ -422,13 +448,25 @@ fn dict_command(args: &[String]) -> Result<(), String> {
                 usage,
             )?;
             check_positional(&positional, 2, usage)?;
+            // A flag that the selected mode cannot use is a typo, not a hint:
+            // accepting it silently would let `--level 99` look applied.
+            let decompressing = flags.contains_key("--decompress");
+            if decompressing && flags.contains_key("--level") {
+                return Err(
+                    "usage: --level applies to compression only; drop it with --decompress"
+                        .to_string(),
+                );
+            }
+            if !decompressing && flags.contains_key("--max-bytes") {
+                return Err("usage: --max-bytes applies to --decompress only".to_string());
+            }
             let dictionary_path = flags
                 .get("--dictionary")
                 .filter(|value| !value.is_empty())
                 .ok_or("usage: dict apply needs --dictionary <path>")?;
             let dictionary = read(dictionary_path)?;
             let bytes = read(&positional[1])?;
-            let output = if flags.contains_key("--decompress") {
+            let output = if decompressing {
                 let ceiling = flag_number(&flags, "--max-bytes", 64 * 1024 * 1024)?;
                 let codec_ceiling = Limits::default().max_total_bytes;
                 if ceiling == 0 || ceiling as u64 > codec_ceiling {
@@ -438,15 +476,15 @@ fn dict_command(args: &[String]) -> Result<(), String> {
                 }
                 decompress_with_dictionary(&bytes, ceiling, &dictionary)
             } else {
-                let level = flag_number(&flags, "--level", 3)?;
-                let level = i32::try_from(level)
-                    .map_err(|_| "usage: --level is outside the supported range".to_string())?;
+                let level = flag_signed(&flags, "--level")?.unwrap_or(3);
                 let (minimum, maximum) = level_range();
-                if !(minimum..=maximum).contains(&level) {
+                if !(i64::from(minimum)..=i64::from(maximum)).contains(&level) {
                     return Err(format!(
                         "usage: --level must be between {minimum} and {maximum}"
                     ));
                 }
+                let level = i32::try_from(level)
+                    .map_err(|_| "usage: --level is outside the supported range".to_string())?;
                 compress_with_dictionary(&bytes, level, &dictionary)
             }
             .map_err(|error| format!("{}: {error}", error.code()))?;

@@ -767,3 +767,122 @@ fn the_man_page_matches_the_command_surface() {
         "the man page must document --sign-file"
     );
 }
+
+#[test]
+fn dict_apply_accepts_a_negative_level_and_refuses_one_below_the_range() {
+    let dir = sandbox("dict-negative-level");
+    let input = dir.join("input.bin");
+    write(&input, b"payload bytes that compress at a negative level");
+    let dictionary = dir.join("corpus.dict");
+    write(&dictionary, &image(0));
+    let output_path = dir.join("out.zst");
+
+    // zstd's fast levels are negative; parsing the flag as an unsigned number
+    // made half the advertised range unreachable from the CLI.
+    let output = run(&[
+        "dict",
+        "apply",
+        "--dictionary",
+        dictionary.to_str().expect("utf8"),
+        "--level",
+        "-1",
+        "--output",
+        output_path.to_str().expect("utf8"),
+        input.to_str().expect("utf8"),
+    ]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let compressed = fs::read(&output_path).expect("read output");
+    assert!(!compressed.is_empty());
+
+    let output = run(&[
+        "dict",
+        "apply",
+        "--dictionary",
+        dictionary.to_str().expect("utf8"),
+        "--level",
+        "-1000000",
+        input.to_str().expect("utf8"),
+    ]);
+    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("--level must be between"),
+        "{}",
+        stderr(&output)
+    );
+}
+
+#[test]
+fn dict_train_refuses_samples_over_the_input_ceiling_before_reading_them() {
+    let dir = sandbox("dict-sample-total");
+    let mut samples = Vec::new();
+    // Sparse files: the declared length is over the ceiling while the disk cost
+    // is one cluster. A per-file read would commit 600 MiB each.
+    for seed in 0..2 {
+        let path = dir.join(format!("sparse-{seed}.ainf"));
+        let file = fs::File::create(&path).expect("create");
+        file.set_len(600u64 << 20).expect("set len");
+        drop(file);
+        samples.push(path.to_string_lossy().into_owned());
+    }
+    let mut args = vec![
+        "dict".to_string(),
+        "train".to_string(),
+        "--output".to_string(),
+        dir.join("over.dict").to_string_lossy().into_owned(),
+    ];
+    args.extend(samples);
+    let reference: Vec<&str> = args.iter().map(String::as_str).collect();
+    let output = run(&reference);
+    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("input ceiling"),
+        "{}",
+        stderr(&output)
+    );
+}
+
+#[test]
+fn dict_apply_refuses_a_flag_that_the_mode_cannot_use() {
+    let dir = sandbox("dict-mode-flags");
+    let input = dir.join("input.bin");
+    write(&input, b"payload bytes");
+    let dictionary = dir.join("corpus.dict");
+    write(&dictionary, &image(0));
+    let dictionary = dictionary.to_str().expect("utf8");
+    let input = input.to_str().expect("utf8");
+
+    // A level on a decode is accepted nowhere; a ceiling on a compress is
+    // accepted nowhere either. Both used to be ignored silently.
+    let output = run(&[
+        "dict",
+        "apply",
+        "--decompress",
+        "--dictionary",
+        dictionary,
+        "--level",
+        "3",
+        input,
+    ]);
+    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("--level applies to compression only"),
+        "{}",
+        stderr(&output)
+    );
+
+    let output = run(&[
+        "dict",
+        "apply",
+        "--dictionary",
+        dictionary,
+        "--max-bytes",
+        "1024",
+        input,
+    ]);
+    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("--max-bytes applies to --decompress only"),
+        "{}",
+        stderr(&output)
+    );
+}

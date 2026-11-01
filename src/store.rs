@@ -38,9 +38,14 @@ const STALE_SCRATCH: Duration = Duration::from_secs(24 * 60 * 60);
 #[derive(Debug, Clone)]
 pub struct Store {
     root: PathBuf,
-    /// Scratch slot counter, per store instance. The names are guessable on
-    /// purpose: they are only ever opened with `create_new`, so an occupied
-    /// name costs a retry and can never redirect a write.
+    /// Device/inode (or volume/file index) captured when the store was opened.
+    /// Every write re-checks it: a root swapped for a symlink or another
+    /// directory after validation must not receive objects.
+    root_id: Option<(u64, u64)>,
+    /// Scratch slot counter, seeded from the clock so a planted run of slot
+    /// names cannot exhaust the attempt budget. The names are not a secret:
+    /// they are only ever opened with `create_new`, so an occupied name costs a
+    /// retry and can never redirect a write.
     scratch: Arc<AtomicU64>,
 }
 
@@ -52,7 +57,7 @@ impl Store {
     /// The directory is created owner-only on Unix.
     pub fn open(root: impl Into<PathBuf>) -> Result<Self> {
         let root = root.into();
-        match fs::symlink_metadata(&root) {
+        let identity = match fs::symlink_metadata(&root) {
             Ok(meta) => {
                 if meta.file_type().is_symlink() {
                     return Err(Error::Store("store root is a symbolic link"));
@@ -60,13 +65,25 @@ impl Store {
                 if !meta.is_dir() {
                     return Err(Error::Store("store root is not a directory"));
                 }
+                if is_group_or_world_writable(&meta) {
+                    // Anyone who can write the directory can plant or replace
+                    // objects; a shared store is not a store.
+                    return Err(Error::Store("store root is group- or world-writable"));
+                }
+                root_identity(&meta)
             }
-            Err(error) if error.kind() == ErrorKind::NotFound => create_store_dir(&root)?,
+            Err(error) if error.kind() == ErrorKind::NotFound => {
+                create_store_dir(&root)?;
+                fs::symlink_metadata(&root)
+                    .ok()
+                    .and_then(|meta| root_identity(&meta))
+            }
             Err(_) => return Err(Error::Store("cannot inspect store directory")),
-        }
+        };
         let store = Self {
             root,
-            scratch: Arc::new(AtomicU64::new(0)),
+            root_id: identity,
+            scratch: Arc::new(AtomicU64::new(scratch_seed())),
         };
         store.sweep_stale_scratch();
         Ok(store)
@@ -94,7 +111,11 @@ impl Store {
                 }
                 // Read through the same bound as `get`: a planted oversized
                 // file must not be pulled into memory to compare it.
-                let stored = read_bounded(&path, limit)?;
+                // An occupant's size or content is store state, not the
+                // caller's input: report one store code so a caller cannot
+                // distinguish absent, oversized and mismatched objects.
+                let stored = read_bounded(&path, limit)
+                    .map_err(|_| Error::Store("object exists with different bytes"))?;
                 if stored == image {
                     return Ok(hash);
                 }
@@ -222,6 +243,21 @@ impl Store {
         self.get_verified(hash, Some(&key))
     }
 
+    /// Refuse to use a root that changed since it was opened.
+    fn ensure_root(&self) -> Result<()> {
+        let meta = fs::symlink_metadata(&self.root)
+            .map_err(|_| Error::Store("store root is unavailable"))?;
+        if meta.file_type().is_symlink() || !meta.is_dir() {
+            return Err(Error::Store("store root changed since it was opened"));
+        }
+        if let (Some(expected), Some(actual)) = (self.root_id, root_identity(&meta)) {
+            if expected != actual {
+                return Err(Error::Store("store root changed since it was opened"));
+            }
+        }
+        Ok(())
+    }
+
     /// Number of stored objects.
     ///
     /// A directory that cannot be read counts as empty; use [`Store::try_len`]
@@ -267,6 +303,7 @@ impl Store {
     /// Write `bytes` to a fresh scratch file and commit it at `dest` without
     /// replacing an existing object.
     fn store_bytes(&self, dest: &Path, bytes: &[u8], limit: u64) -> Result<()> {
+        self.ensure_root()?;
         let name = dest
             .file_name()
             .and_then(|name| name.to_str())
@@ -323,23 +360,41 @@ impl Store {
                 let _ = fs::remove_file(temp);
                 self.compare_existing(dest, bytes, limit)
             }
-            Err(_) => match fs::rename(temp, dest) {
-                Ok(()) => Ok(()),
-                Err(error) if error.kind() == ErrorKind::AlreadyExists => {
-                    let _ = fs::remove_file(temp);
-                    self.compare_existing(dest, bytes, limit)
+            Err(_) => {
+                // Filesystems without hard links: an exclusive create cannot
+                // replace a concurrently planted object, unlike a rename on
+                // Unix. The object becomes visible while it is written, so a
+                // reader may see a partial file and refuse it (validation is
+                // fail-closed).
+                match create_new_file(dest) {
+                    Ok(mut file) => {
+                        let written = file.write_all(bytes).and_then(|()| file.sync_all());
+                        drop(file);
+                        let _ = fs::remove_file(temp);
+                        if written.is_ok() {
+                            Ok(())
+                        } else {
+                            let _ = fs::remove_file(dest);
+                            Err(Error::Store("cannot commit object"))
+                        }
+                    }
+                    Err(error) if error.kind() == ErrorKind::AlreadyExists => {
+                        let _ = fs::remove_file(temp);
+                        self.compare_existing(dest, bytes, limit)
+                    }
+                    Err(_) => {
+                        let _ = fs::remove_file(temp);
+                        Err(Error::Store("cannot commit object"))
+                    }
                 }
-                Err(_) => {
-                    let _ = fs::remove_file(temp);
-                    Err(Error::Store("cannot commit object"))
-                }
-            },
+            }
         }
     }
 
     /// A raced or pre-existing object is accepted only when it is byte-identical.
     fn compare_existing(&self, dest: &Path, bytes: &[u8], limit: u64) -> Result<()> {
-        let existing = read_bounded(dest, limit)?;
+        let existing = read_bounded(dest, limit)
+            .map_err(|_| Error::Store("object exists with different bytes"))?;
         if existing == bytes {
             Ok(())
         } else {
@@ -352,6 +407,9 @@ impl Store {
     /// Only names this store creates are considered, and only after a day, so
     /// a concurrent writer's file is never touched.
     fn sweep_stale_scratch(&self) {
+        if self.ensure_root().is_err() {
+            return;
+        }
         let Ok(entries) = fs::read_dir(&self.root) else {
             return;
         };
@@ -383,6 +441,48 @@ impl Store {
     }
 }
 
+/// A stable identity for the store directory, when the platform exposes one.
+#[cfg(unix)]
+fn root_identity(meta: &fs::Metadata) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    Some((meta.dev(), meta.ino()))
+}
+
+#[cfg(windows)]
+fn root_identity(_meta: &fs::Metadata) -> Option<(u64, u64)> {
+    // The Windows file index/volume serial metadata is still unstable
+    // (`windows_by_handle`). The per-write re-check still refuses a root
+    // replaced by a symbolic link or a non-directory; a directory swapped for
+    // another directory at the same path is caught by the OS ACL model, not by
+    // an inode pin.
+    None
+}
+
+#[cfg(not(any(unix, windows)))]
+fn root_identity(_meta: &fs::Metadata) -> Option<(u64, u64)> {
+    None
+}
+
+#[cfg(unix)]
+fn is_group_or_world_writable(meta: &fs::Metadata) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    meta.permissions().mode() & 0o022 != 0
+}
+
+#[cfg(not(unix))]
+fn is_group_or_world_writable(_meta: &fs::Metadata) -> bool {
+    false
+}
+
+/// A clock-derived starting slot so a pre-planted `.tmp` run cannot exhaust the
+/// attempt budget.
+fn scratch_seed() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| u64::from(duration.subsec_nanos()))
+        .unwrap_or(0)
+}
+
 /// The largest object `get` will read: the codec's own ceiling for one image.
 fn object_limit() -> u64 {
     Limits::default().max_total_bytes
@@ -408,7 +508,25 @@ fn read_bounded(path: &Path, limit: u64) -> Result<Vec<u8>> {
         });
     }
     let file = File::open(path).map_err(|_| Error::Store("cannot read object"))?;
-    let mut bytes = Vec::with_capacity(meta.len() as usize);
+    // `symlink_metadata` checked the path, but `open` follows links: re-check
+    // the opened file. A swapped FIFO blocks `open`; a swapped directory or
+    // symlink is caught here. On Unix the device/inode pair also catches a
+    // regular file swapped for another regular file between the two calls.
+    let opened = file
+        .metadata()
+        .map_err(|_| Error::Store("cannot inspect object"))?;
+    if !opened.is_file() {
+        return Err(Error::Store("object is not a regular file"));
+    }
+    if let (Some(expected), Some(actual)) = (root_identity(&meta), root_identity(&opened)) {
+        if expected != actual {
+            return Err(Error::Store("object changed while it was opened"));
+        }
+    }
+    let reserve = usize::try_from(opened.len())
+        .unwrap_or(usize::MAX)
+        .min(1 << 20);
+    let mut bytes = Vec::with_capacity(reserve);
     file.take(limit.saturating_add(1))
         .read_to_end(&mut bytes)
         .map_err(|_| Error::Store("cannot read object"))?;
@@ -468,7 +586,10 @@ fn is_scratch_name(name: &str) -> bool {
         return false;
     };
     match rest.rsplit_once(".tmp.") {
-        Some((_, tail)) => {
+        Some((inner, tail)) => {
+            if !is_scratch_inner(inner) {
+                return false;
+            }
             let mut parts = tail.split('.');
             matches!(
                 (parts.next(), parts.next()),
@@ -481,6 +602,21 @@ fn is_scratch_name(name: &str) -> bool {
         }
         None => false,
     }
+}
+
+/// The inner name of a scratch file: an object name (`<64 hex>.ainf`) or an
+/// envelope name (`<64 hex>.sig`).
+fn is_scratch_inner(inner: &str) -> bool {
+    if is_object_name(std::ffi::OsStr::new(inner)) {
+        return true;
+    }
+    let Some(stem) = inner.strip_suffix(".sig") else {
+        return false;
+    };
+    stem.len() == 64
+        && stem
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 fn hex32(hash: &[u8; 32]) -> String {

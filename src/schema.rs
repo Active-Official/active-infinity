@@ -86,14 +86,29 @@ impl Schema {
     }
 
     /// Validate an instance module against this schema.
+    ///
+    /// Fail-closed: a constraint this reader cannot enforce exactly is refused,
+    /// a duplicate instance field is refused, and a default is held to the same
+    /// type and bounds as a present value.
     pub fn validate_instance(&self, instance: &InfinityModule) -> Result<()> {
         let root = instance
             .root()
             .ok_or(Error::Schema("instance has no root"))?;
         let instance_fields = match instance.get(root) {
-            Some(Inode::Table { fields }) | Some(Inode::SchemaTable { fields, .. }) => fields,
+            // Only a plain `Table` is an instance. A `SchemaTable` in that
+            // position is a schema-shaped program fragment, not a value.
+            Some(Inode::Table { fields }) => fields,
             _ => return Err(Error::Schema("instance root must be a table")),
         };
+        let mut by_name: std::collections::HashMap<&str, NodeId> =
+            std::collections::HashMap::with_capacity(instance_fields.len());
+        for (name, id) in instance_fields {
+            if by_name.insert(name.as_str(), *id).is_some() {
+                // `find` used to take the first of two same-named fields and
+                // leave the second unchecked; a duplicate is ambiguous.
+                return Err(Error::Schema("instance has duplicate field names"));
+            }
+        }
         let schema_root = self
             .module
             .root()
@@ -102,46 +117,51 @@ impl Schema {
             Some(Inode::SchemaTable { fields, .. }) => fields,
             _ => return Err(Error::Schema("schema root must be a SchemaTable")),
         };
-
+        let mut declared: std::collections::HashSet<&str> =
+            std::collections::HashSet::with_capacity(schema_fields.len());
         for (name, node) in schema_fields {
+            declared.insert(name.as_str());
             let spec = match self.module.get(*node) {
                 Some(Inode::SchemaField(spec)) => spec,
                 _ => return Err(Error::Schema("schema field is not a SchemaField")),
             };
-            let value = instance_fields
-                .iter()
-                .find(|(field, _)| field == name)
-                .map(|(_, id)| *id);
-            match value {
+            if let TypeSpec::Table { closed: true } = &spec.typ {
+                // The schema class models top-level fields only; a nested closed
+                // table cannot be enforced field by field, so accepting the spec
+                // would promise more than this reader checks.
+                return Err(Error::Schema(
+                    "nested closed tables are not enforceable by this reader",
+                ));
+            }
+            match by_name.get(name.as_str()).copied() {
                 Some(id) => {
                     let inode = instance
                         .get(id)
                         .ok_or(Error::Schema("instance field points outside the module"))?;
-                    if !matches_type(&spec.typ, inode) {
+                    if !matches_type(&spec.typ, instance, inode) {
                         return Err(Error::Schema("instance field has the wrong type"));
                     }
                     self.check_constraints(spec, instance, id, inode)?;
                 }
                 None if spec.default.is_some() => {
-                    // A default marks the field optional. Its value must still be a
-                    // value of the declared type, or the schema is lying about what
-                    // a consumer will read.
                     let default = spec.default.expect("checked above");
                     let node = self
                         .module
                         .get(default)
                         .ok_or(Error::Schema("schema default points outside the module"))?;
-                    if !matches_type(&spec.typ, node) {
+                    if !matches_type(&spec.typ, &self.module, node) {
                         return Err(Error::Schema("schema default has the wrong type"));
                     }
+                    // A default is what a consumer reads for a missing field, so
+                    // it must satisfy the same bounds a present value would.
+                    self.check_constraints(spec, &self.module, default, node)?;
                 }
                 None => return Err(Error::Schema("required instance field is missing")),
             }
         }
-
         if self.closed {
             for (name, _) in instance_fields {
-                if !schema_fields.iter().any(|(field, _)| field == name) {
+                if !declared.contains(name.as_str()) {
                     return Err(Error::Schema("closed schema rejects an unknown field"));
                 }
             }
@@ -161,7 +181,10 @@ impl Schema {
     ///
     /// A constraint this reader cannot enforce is refused rather than ignored: a
     /// schema that looks restrictive must reject what it says it rejects, or the
-    /// pinned schema hash means nothing.
+    /// pinned schema hash means nothing. Comparisons are exact per numeric kind:
+    /// an integer bound against an integer value never goes through `f64`, and a
+    /// mixed integer/float comparison is refused because rounding would make it
+    /// vacuous.
     fn check_constraints(
         &self,
         spec: &SchemaFieldSpec,
@@ -174,33 +197,20 @@ impl Schema {
                 "pattern constraints are not enforceable by this reader",
             ));
         }
-        let numeric = |module: &InfinityModule, node: NodeId| -> Option<f64> {
-            match module.get(node)? {
-                Inode::Int(value) => Some(*value as f64),
-                Inode::Float(value) => Some(*value),
-                Inode::DurationMs(value) => Some(*value as f64),
-                Inode::Quantity { value, .. } => match module.get(*value)? {
-                    Inode::Int(value) => Some(*value as f64),
-                    Inode::Float(value) => Some(*value),
-                    _ => None,
-                },
-                _ => None,
-            }
-        };
         if spec.min.is_some() || spec.max.is_some() {
             let value = numeric(instance, id)
                 .ok_or(Error::Schema("a bounded field must hold a numeric value"))?;
             if let Some(min) = spec.min {
                 let bound = numeric(&self.module, min)
-                    .ok_or(Error::Schema("schema minimum is not numeric"))?;
-                if value < bound {
+                    .ok_or(Error::Schema("schema minimum is not a finite number"))?;
+                if below(&value, &bound)? {
                     return Err(Error::Schema("instance field is below its minimum"));
                 }
             }
             if let Some(max) = spec.max {
                 let bound = numeric(&self.module, max)
-                    .ok_or(Error::Schema("schema maximum is not numeric"))?;
-                if value > bound {
+                    .ok_or(Error::Schema("schema maximum is not a finite number"))?;
+                if above(&value, &bound)? {
                     return Err(Error::Schema("instance field is above its maximum"));
                 }
             }
@@ -209,17 +219,15 @@ impl Schema {
             let Inode::Str(text) = node else {
                 return Err(Error::Schema("a length-bounded field must hold a string"));
             };
-            let length = text.chars().count() as f64;
+            let length = text.chars().count() as u64;
             if let Some(min) = spec.min_len {
-                let bound = numeric(&self.module, min)
-                    .ok_or(Error::Schema("schema minimum length is not numeric"))?;
+                let bound = length_bound(&self.module, min)?;
                 if length < bound {
                     return Err(Error::Schema("instance field is shorter than its minimum"));
                 }
             }
             if let Some(max) = spec.max_len {
-                let bound = numeric(&self.module, max)
-                    .ok_or(Error::Schema("schema maximum length is not numeric"))?;
+                let bound = length_bound(&self.module, max)?;
                 if length > bound {
                     return Err(Error::Schema("instance field is longer than its maximum"));
                 }
@@ -248,35 +256,122 @@ impl Schema {
     }
 }
 
+/// A numeric value of an instance or a schema bound.
+#[derive(Clone, Copy)]
+enum Numeric {
+    Int(i128),
+    Float(f64),
+}
+
+/// Resolve a node to a finite number.
+///
+/// A non-finite float is not a number for constraint purposes: every comparison
+/// against it is false, which would make a bound vacuous.
+fn numeric(module: &InfinityModule, id: NodeId) -> Option<Numeric> {
+    match module.get(id)? {
+        Inode::Int(value) => Some(Numeric::Int(i128::from(*value))),
+        Inode::DurationMs(value) => Some(Numeric::Int(i128::from(*value))),
+        Inode::Float(value) if value.is_finite() => Some(Numeric::Float(*value)),
+        Inode::Quantity { value, .. } => match module.get(*value)? {
+            Inode::Int(value) => Some(Numeric::Int(i128::from(*value))),
+            Inode::Float(value) if value.is_finite() => Some(Numeric::Float(*value)),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn below(value: &Numeric, bound: &Numeric) -> Result<bool> {
+    match (value, bound) {
+        (Numeric::Int(value), Numeric::Int(bound)) => Ok(value < bound),
+        (Numeric::Float(value), Numeric::Float(bound)) => Ok(value < bound),
+        _ => Err(Error::Schema(
+            "mixed integer/float bounds are not enforceable",
+        )),
+    }
+}
+
+fn above(value: &Numeric, bound: &Numeric) -> Result<bool> {
+    match (value, bound) {
+        (Numeric::Int(value), Numeric::Int(bound)) => Ok(value > bound),
+        (Numeric::Float(value), Numeric::Float(bound)) => Ok(value > bound),
+        _ => Err(Error::Schema(
+            "mixed integer/float bounds are not enforceable",
+        )),
+    }
+}
+
+fn length_bound(module: &InfinityModule, id: NodeId) -> Result<u64> {
+    match numeric(module, id) {
+        Some(Numeric::Int(value)) if value >= 0 => {
+            u64::try_from(value).map_err(|_| Error::Schema("length bound is too large"))
+        }
+        _ => Err(Error::Schema("length bound must be a non-negative integer")),
+    }
+}
+
 /// Whether a node is a *value* of the declared type.
 ///
 /// Only the value plane matches: an `Ident`, an `Interpolate`, a `SecretRef`, a
-/// `SchemaTable` or a `ContentAddressed` node is a program fragment, not a value,
-/// and accepting one would let a "typed" instance resolve into something the
-/// schema never described.
-fn matches_type(typ: &TypeSpec, node: &Inode) -> bool {
+/// `SchemaTable`, an `Env` or a `ContentAddressed` node is a program fragment,
+/// not a value, and accepting one would let a "typed" instance resolve into
+/// something the schema never described.
+fn matches_type(typ: &TypeSpec, module: &InfinityModule, node: &Inode) -> bool {
     match typ {
         TypeSpec::Null => matches!(node, Inode::Null),
         TypeSpec::Bool => matches!(node, Inode::Bool(_)),
         TypeSpec::Int => matches!(node, Inode::Int(_)),
-        TypeSpec::Float => matches!(node, Inode::Float(_)),
+        TypeSpec::Float => matches!(node, Inode::Float(value) if value.is_finite()),
         TypeSpec::String => matches!(node, Inode::Str(_)),
         // A duration is a millisecond count or a quantity in a time unit; the
-        // discriminant range 0..=7 is the closed time table (layout §5.2).
+        // discriminant range 0..=7 is the closed time table (layout §5.2). The
+        // quantity's value must itself be numeric.
         TypeSpec::Duration => match node {
             Inode::DurationMs(_) => true,
-            Inode::Quantity { unit, .. } => unit.discriminant() <= 7,
+            Inode::Quantity { value, unit } => {
+                unit.discriminant() <= 7
+                    && match module.get(*value) {
+                        Some(Inode::Int(_)) => true,
+                        Some(Inode::Float(value)) => value.is_finite(),
+                        _ => false,
+                    }
+            }
             _ => false,
         },
-        TypeSpec::Bytes => matches!(node, Inode::Blob { .. }),
-        TypeSpec::Blob => matches!(node, Inode::Blob { .. }),
-        TypeSpec::Table { .. } => matches!(node, Inode::Table { .. }),
+        // A tainted blob carries secret-bearing payload identity; it is not a
+        // public value of a declared Bytes/Blob field.
+        TypeSpec::Bytes | TypeSpec::Blob => {
+            matches!(node, Inode::Blob { tainted: false, .. })
+        }
+        TypeSpec::Table { closed } => !closed && matches!(node, Inode::Table { .. }),
         TypeSpec::Enum(values) => match node {
             Inode::Str(value) => values.iter().any(|candidate| candidate == value),
             _ => false,
         },
         // A locator is not a secret value; only the secret itself is.
         TypeSpec::Secret => matches!(node, Inode::Secret(_)),
-        TypeSpec::Any => true,
+        // `Any` still means a value: it does not open the program plane.
+        TypeSpec::Any => is_value_node(module, node),
+    }
+}
+
+/// The value plane: literals and the containers a consumer can read directly.
+fn is_value_node(module: &InfinityModule, node: &Inode) -> bool {
+    match node {
+        Inode::Null
+        | Inode::Bool(_)
+        | Inode::Int(_)
+        | Inode::Str(_)
+        | Inode::DurationMs(_)
+        | Inode::Array { .. }
+        | Inode::Table { .. } => true,
+        Inode::Float(value) => value.is_finite(),
+        Inode::Quantity { value, .. } => match module.get(*value) {
+            Some(Inode::Int(_)) => true,
+            Some(Inode::Float(value)) => value.is_finite(),
+            _ => false,
+        },
+        Inode::Blob { tainted, .. } => !tainted,
+        _ => false,
     }
 }

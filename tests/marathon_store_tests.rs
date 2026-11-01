@@ -88,7 +88,7 @@ fn get_refuses_an_object_larger_than_the_read_limit() {
 }
 
 #[test]
-fn put_refuses_an_existing_object_larger_than_the_read_limit() {
+fn put_refuses_an_oversized_occupant_with_the_store_code() {
     let directory = tempfile::tempdir().expect("tempdir");
     let store = Store::open(directory.path()).expect("store");
     let image = encode(&module()).expect("encode");
@@ -98,10 +98,13 @@ fn put_refuses_an_existing_object_larger_than_the_read_limit() {
     file.set_len((1u64 << 30) + 8).expect("set len");
     drop(file);
 
+    // The occupant is store state, not the caller's input: one store code for
+    // absent, oversized and mismatched objects. The read is still bounded (this
+    // returns immediately instead of pulling a gigabyte into memory).
     let error = store
         .put(&image)
         .expect_err("an oversized occupant is refused");
-    assert_eq!(error.code(), "infinity/limit", "{error}");
+    assert_eq!(error.code(), "infinity/store", "{error}");
 }
 
 #[cfg(unix)]
@@ -258,6 +261,55 @@ fn open_refuses_a_symlinked_root() {
     assert_eq!(error.code(), "infinity/store", "{error}");
     assert!(fs::read_dir(&victim)
         .expect("victim then read")
+        .next()
+        .is_none());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_group_or_world_writable_root_is_refused() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = tempfile::tempdir().expect("tempdir");
+    let root = directory.path().join("shared");
+    fs::create_dir(&root).expect("create");
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o777)).expect("chmod");
+    let error = Store::open(&root).expect_err("a writable-by-others root is refused");
+    assert_eq!(error.code(), "infinity/store", "{error}");
+
+    // Readable by others is allowed (the at-rest exposure is documented); only
+    // writability lets another user plant or replace objects.
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).expect("chmod");
+    Store::open(&root).expect("a 0755 root is accepted");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_root_swapped_for_a_symlink_is_refused_on_write() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let root = directory.path().join("store");
+    let store = Store::open(&root).expect("store");
+    let image = encode(&module()).expect("encode");
+    store.put(&image).expect("first put");
+
+    // Replace the validated directory with a symlink to another directory.
+    let moved = directory.path().join("moved");
+    fs::rename(&root, &moved).expect("move");
+    let elsewhere = directory.path().join("elsewhere");
+    fs::create_dir(&elsewhere).expect("elsewhere");
+    std::os::unix::fs::symlink(&elsewhere, &root).expect("symlink");
+
+    let second = encode(&{
+        let mut module = InfinityModule::new();
+        let root = module.push(Inode::Int(7));
+        module.set_root(Some(root));
+        module
+    })
+    .expect("encode second");
+    let error = store.put(&second).expect_err("a swapped root is refused");
+    assert_eq!(error.code(), "infinity/store", "{error}");
+    assert!(fs::read_dir(&elsewhere)
+        .expect("elsewhere")
         .next()
         .is_none());
 }

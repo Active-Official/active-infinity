@@ -270,3 +270,206 @@ fn a_bare_schema_still_validates() {
         .validate_instance(&instance(vec![("port", Inode::Int(1))]))
         .expect("bare schema");
 }
+
+fn schema_with(build: impl FnOnce(&mut InfinityModule) -> SchemaFieldSpec) -> Schema {
+    let mut module = InfinityModule::new();
+    let spec = build(&mut module);
+    let field = module.push(Inode::SchemaField(spec));
+    let root = module.push(Inode::SchemaTable {
+        fields: vec![("value".to_string(), field)],
+        closed: false,
+    });
+    module.set_root(Some(root));
+    Schema::from_bytes(&encode(&module).expect("encode schema")).expect("schema")
+}
+
+fn bare(typ: TypeSpec) -> SchemaFieldSpec {
+    SchemaFieldSpec {
+        typ,
+        min: None,
+        max: None,
+        min_len: None,
+        max_len: None,
+        pattern: None,
+        default: None,
+        deprecated: None,
+    }
+}
+
+#[test]
+fn a_default_is_held_to_the_declared_bounds() {
+    let schema = schema_with(|module| {
+        let min = module.push(Inode::Int(10));
+        let max = module.push(Inode::Int(20));
+        let default = module.push(Inode::Int(999));
+        SchemaFieldSpec {
+            min: Some(min),
+            max: Some(max),
+            default: Some(default),
+            ..bare(TypeSpec::Int)
+        }
+    });
+    // No "value" field: the schema falls back to its default, which is outside
+    // 10..=20. A missing field must not bypass the bounds.
+    let instance = instance(vec![]);
+    let error = schema
+        .validate_instance(&instance)
+        .expect_err("an out-of-bounds default is refused");
+    assert_eq!(error.code(), "infinity/schema", "{error}");
+}
+
+#[test]
+fn a_non_finite_bound_is_refused() {
+    let schema = schema_with(|module| {
+        let min = module.push(Inode::Float(f64::NAN));
+        SchemaFieldSpec {
+            min: Some(min),
+            ..bare(TypeSpec::Float)
+        }
+    });
+    let instance = instance(vec![("value", Inode::Float(1.0))]);
+    let error = schema
+        .validate_instance(&instance)
+        .expect_err("a NaN bound is not enforceable");
+    assert_eq!(error.code(), "infinity/schema", "{error}");
+}
+
+#[test]
+fn a_non_finite_float_value_is_refused() {
+    let schema = schema_with(|_| bare(TypeSpec::Float));
+    for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        let instance = instance(vec![("value", Inode::Float(value))]);
+        let error = schema
+            .validate_instance(&instance)
+            .expect_err("a non-finite value is not a Float value");
+        assert_eq!(error.code(), "infinity/schema", "{value}: {error}");
+    }
+}
+
+#[test]
+fn duplicate_instance_fields_are_refused() {
+    let schema = schema_with(|_| bare(TypeSpec::Int));
+    let mut module = InfinityModule::new();
+    let first = module.push(Inode::Int(1));
+    let second = module.push(Inode::Int(2));
+    let root = module.push(Inode::Table {
+        fields: vec![("value".to_string(), first), ("value".to_string(), second)],
+    });
+    module.set_root(Some(root));
+    let error = schema
+        .validate_instance(&module)
+        .expect_err("a duplicate field is ambiguous");
+    assert_eq!(error.code(), "infinity/schema", "{error}");
+}
+
+#[test]
+fn a_duration_quantity_must_hold_a_number() {
+    let schema = schema_with(|_| bare(TypeSpec::Duration));
+    let mut module = InfinityModule::new();
+    let text = module.push(Inode::Str("five".to_string()));
+    let quantity = module.push(Inode::Quantity {
+        value: text,
+        unit: UnitTag::Seconds,
+    });
+    let root = module.push(Inode::Table {
+        fields: vec![("value".to_string(), quantity)],
+    });
+    module.set_root(Some(root));
+    let error = schema
+        .validate_instance(&module)
+        .expect_err("a duration quantity must be numeric");
+    assert_eq!(error.code(), "infinity/schema", "{error}");
+}
+
+#[test]
+fn a_schema_table_is_not_an_instance() {
+    let schema = schema_with(|_| bare(TypeSpec::Int));
+    let mut module = InfinityModule::new();
+    let value = module.push(Inode::Int(1));
+    let root = module.push(Inode::SchemaTable {
+        fields: vec![("value".to_string(), value)],
+        closed: false,
+    });
+    module.set_root(Some(root));
+    let error = schema
+        .validate_instance(&module)
+        .expect_err("a SchemaTable is a program fragment");
+    assert_eq!(error.code(), "infinity/schema", "{error}");
+}
+
+#[test]
+fn length_bounds_must_be_non_negative_integers() {
+    for bound in [Inode::Int(-1), Inode::Float(2.5), Inode::Float(f64::NAN)] {
+        let schema = schema_with(|module| {
+            let bound = module.push(bound.clone());
+            SchemaFieldSpec {
+                min_len: Some(bound),
+                ..bare(TypeSpec::String)
+            }
+        });
+        let instance = instance(vec![("value", Inode::Str("abc".to_string()))]);
+        let error = schema
+            .validate_instance(&instance)
+            .expect_err("an unusable length bound is refused");
+        assert_eq!(error.code(), "infinity/schema", "{error}");
+    }
+}
+
+#[test]
+fn a_nested_closed_table_is_refused_as_unenforceable() {
+    let schema = schema_with(|_| bare(TypeSpec::Table { closed: true }));
+    let mut module = InfinityModule::new();
+    let inner = module.push(Inode::Int(1));
+    let table = module.push(Inode::Table {
+        fields: vec![("inner".to_string(), inner)],
+    });
+    let root = module.push(Inode::Table {
+        fields: vec![("value".to_string(), table)],
+    });
+    module.set_root(Some(root));
+    let error = schema
+        .validate_instance(&module)
+        .expect_err("a nested closed table is not enforceable");
+    assert_eq!(error.code(), "infinity/schema", "{error}");
+}
+
+#[test]
+fn any_does_not_open_the_program_plane() {
+    let schema = schema_with(|_| bare(TypeSpec::Any));
+    for node in [
+        Inode::Secret(SecretBytes::from("any-canary")),
+        Inode::Ident("TOKEN".to_string()),
+        Inode::Env {
+            name: "TOKEN".to_string(),
+            default: None,
+        },
+        Inode::SecretRef { locator: NodeId(0) },
+    ] {
+        let instance = instance(vec![("value", node.clone())]);
+        let error = schema
+            .validate_instance(&instance)
+            .expect_err("Any is still a value plane");
+        assert_eq!(error.code(), "infinity/schema", "{node:?}: {error}");
+    }
+}
+
+#[test]
+fn a_tainted_blob_is_not_a_public_value() {
+    let schema = schema_with(|_| bare(TypeSpec::Blob));
+    let mut module = InfinityModule::new();
+    let blob = module.push(Inode::Blob {
+        hash: *blake3::hash(b"tainted").as_bytes(),
+        size: 7,
+        tainted: true,
+        media_type: "application/octet-stream".to_string(),
+        payload: None,
+    });
+    let root = module.push(Inode::Table {
+        fields: vec![("value".to_string(), blob)],
+    });
+    module.set_root(Some(root));
+    let error = schema
+        .validate_instance(&module)
+        .expect_err("a tainted blob carries secret-bearing identity");
+    assert_eq!(error.code(), "infinity/schema", "{error}");
+}

@@ -671,3 +671,46 @@ pending-delta test pins the retry path.
 
 Gate: 332 all-features, clippy clean both feature sets; 11 new behavioural
 tests, all proved to fail against the pre-fix tree.
+
+### Re-audit loop, round 2 (I-07) and round 2 (I-08) - 2026-10-31
+
+**I-07 schema round 2** (4 high, 7 medium):
+
+| # | Severity | Finding | Disposition |
+|---|---|---|---|
+| 1 | high | a default skipped `check_constraints`, so `min/max/pattern` were bypassed for a missing field | **fixed**: the default is checked against the same constraints; `a_default_is_held_to_the_declared_bounds` (fails pre-fix) |
+| 2 | high | numeric bounds went through `f64`: NaN made every comparison false, infinities were vacuous and integers above 2^53 rounded | **fixed**: `Numeric::{Int(i128), Float(f64)}` with finite-only floats, exact int/int comparison, and a mixed int/float comparison refused as unenforceable; `a_non_finite_bound_is_refused`, `a_non_finite_float_value_is_refused` |
+| 3 | high | duplicate instance fields were accepted and the first was checked | **fixed**: a `HashMap` rejects a duplicate name; `duplicate_instance_fields_are_refused` |
+| 4 | high | `Duration` accepted a quantity whose inner value was a string | **fixed**: the inner node must be an Int or a finite Float; `a_duration_quantity_must_hold_a_number` |
+| 5 | medium | a `SchemaTable` root passed as an instance | **fixed**: only `Inode::Table` is an instance; `a_schema_table_is_not_an_instance` |
+| 6 | medium | `min_len`/`max_len` accepted negative, fractional and NaN bounds | **fixed**: a length bound must be a non-negative integer; `length_bounds_must_be_non_negative_integers` |
+| 7 | medium | a nested `Table { closed: true }` was silently treated as an open table | **fixed**: the schema class refuses a nested closed table as unenforceable; `a_nested_closed_table_is_refused_as_unenforceable` |
+| 8 | medium | `Any` accepted program-plane nodes (secret, locator, env, interpolation) | **fixed**: `Any` accepts only the value plane; `any_does_not_open_the_program_plane` |
+| 9 | medium | a tainted blob matched `Bytes`/`Blob` | **fixed**: only `tainted: false`; `a_tainted_blob_is_not_a_public_value` |
+| 10 | medium | per-field `find` plus a closed-schema `any` was O(fields x instance fields) | **fixed**: one `HashMap` for the instance and one `HashSet` for the declaration |
+| 11 | medium | `Float` accepted NaN and infinity | **fixed**: finite floats only |
+
+The rewrite also replaced the per-field `find`+`any` scan with hash lookups (finding
+10).
+
+**I-08 store round 2** (4 medium, 3 low):
+
+| # | Severity | Finding | Disposition |
+|---|---|---|---|
+| 1 | medium | `read_bounded` lstat-checked then `File::open` followed a swapped symlink; a FIFO could block the reader | **partly fixed**: after opening, the file's own metadata must be a regular file and (Unix) match the lstat device/inode; a swap is refused. `O_NOFOLLOW` and a FIFO-specific test need `libc`/`nix`; the post-open check already catches a symlink or a non-regular target on the platforms this crate builds for |
+| 2 | medium | `Vec::with_capacity(meta.len())` reserved up to 1 GiB from metadata | **fixed**: the reserve is capped at 1 MiB and the read stays bounded by `take` |
+| 3 | medium | a pre-existing group/world-writable root was accepted | **fixed** on Unix: `infinity/store` for mode bits 0o022; a 0755 root is accepted because only writability lets another user plant objects (the at-rest readability exposure is documented). `a_group_or_world_writable_root_is_refused` (fails pre-fix, Linux) |
+| 4 | medium | the root was checked once and could be swapped for a symlink before a write | **fixed**: the store records the root's device/inode (Unix) and re-checks it before every write and sweep; `a_root_swapped_for_a_symlink_is_refused_on_write` (fails pre-fix, Linux) |
+| 5 | low | scratch slots started at 0 and `is_scratch_name` matched any `.X.tmp.pid.slot` | **fixed**: the counter is seeded from the clock and the matcher requires an object or envelope inner name |
+| 6 | low | an oversized occupant surfaced `infinity/limit`, distinguishing absent / oversized / mismatched | **fixed**: an occupant fault is `infinity/store`; the test now pins that code |
+| 7 | low | the hardlink-less fallback renamed over a concurrently planted object | **fixed**: the fallback writes through `create_new` (exclusive on every platform) and removes a partial file on failure |
+
+Residual: `ensure_root` re-checks the path, not a pinned directory handle; a
+write between the check and the commit is still possible on a filesystem where
+the attacker can rename the store directory. Pinning a directory fd needs
+`openat`/`cap-std`, which is a dependency decision for the next release. Windows
+has no stable file-index metadata, so its identity check is the symlink/dir
+re-check only.
+
+Gate: 342 all-features, clippy clean both feature sets, Linux Docker store suite
+12/12; 10 new schema tests and 3 store tests proved to fail pre-fix.

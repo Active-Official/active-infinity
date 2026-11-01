@@ -13,11 +13,17 @@ cd "$ROOT"
 
 cargo build --release --manifest-path cli/active-infinity-cli/Cargo.toml
 CLI="$ROOT/cli/active-infinity-cli/target/release/active-infinity-cli"
+# Windows builds carry the .exe suffix; prefer it so one script runs on both.
+if [ -x "$CLI.exe" ]; then
+  CLI="$CLI.exe"
+fi
+PY=python3
+command -v python3 >/dev/null 2>&1 || PY=python
 
 "$CLI" doctor
 "$CLI" conformance run --manifest conformance/manifest.json
 
-rows=$(python3 - <<'PY'
+rows=$("$PY" - <<'PY'
 import json
 
 with open("conformance/manifest.json", encoding="utf-8") as handle:
@@ -50,7 +56,7 @@ if printf '%s' "$redacted" | grep -q 'CANARY_SECRET_'; then
   echo "secret canary survived the redacted decode" >&2
   exit 1
 fi
-printf '%s' "$redacted" | python3 -c 'import json, sys; json.load(sys.stdin)' ||
+printf '%s' "$redacted" | "$PY" -c 'import json, sys; json.load(sys.stdin)' ||
   { echo "redacted decode did not produce valid JSON" >&2; exit 1; }
 
 full_hash=$("$CLI" hash tests/vectors/valid/full.ainf)

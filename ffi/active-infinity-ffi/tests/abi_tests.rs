@@ -189,9 +189,10 @@ fn redacted_json_never_contains_a_secret_canary() {
     };
     assert_eq!(status, 0, "{}", last_error());
     let json = String::from_utf8(out[..out_len].to_vec()).expect("utf8");
-    // The canary used by the Rust redaction suite must not survive a projection.
-    assert!(!json.contains("CANARY_SECRET_"));
-    assert!(json.contains("***SECRET***") || !json.contains("secret"));
+    // The literal that `full.ainf` carries must not survive a projection, and
+    // the marker stands in its place.
+    assert!(!json.contains("vector-secret"), "{json}");
+    assert!(json.contains("***SECRET***"), "{json}");
 }
 
 #[test]
@@ -342,4 +343,159 @@ fn an_oversized_source_is_refused_before_parsing() {
     };
     assert_eq!(status, -1);
     assert_eq!(last_error(), "infinity/limit");
+}
+
+/// A caller can plant the tag at an address it chooses. The registry, not the
+/// tag, decides what may be freed, so a foreign pointer is a no-op.
+#[test]
+fn a_foreign_pointer_with_a_planted_tag_is_not_freed() {
+    use active_infinity_ffi::active_infinity_free;
+
+    let mut buffer = vec![0u8; 64];
+    buffer[..8].copy_from_slice(b"AINFALLO");
+    buffer[8..16].copy_from_slice(&16u64.to_le_bytes());
+    let planted = unsafe { buffer.as_mut_ptr().add(16) };
+    // SAFETY: the pointer is inside `buffer`; the shim must not free it.
+    unsafe { active_infinity_free(planted, 16) };
+    // The buffer is still ours and unchanged where the tag was written.
+    assert_eq!(&buffer[..8], b"AINFALLO");
+    assert_eq!(buffer[16], 0);
+}
+
+/// A zero-length allocation still owns a header; freeing it with the same
+/// length must release it instead of returning early.
+#[test]
+fn a_zero_length_allocation_round_trips() {
+    use active_infinity_ffi::{active_infinity_alloc, active_infinity_free};
+
+    let pointer = active_infinity_alloc(0);
+    assert!(!pointer.is_null());
+    // SAFETY: the pointer and its length come from the allocation above.
+    unsafe { active_infinity_free(pointer, 0) };
+}
+
+/// The registry removes the address on the first free, so the second call is a
+/// no-op rather than a double free.
+#[test]
+fn a_double_free_is_a_no_op() {
+    use active_infinity_ffi::{active_infinity_alloc, active_infinity_free};
+
+    let pointer = active_infinity_alloc(32);
+    assert!(!pointer.is_null());
+    // SAFETY: the first call frees the allocation; the second must be ignored.
+    unsafe {
+        active_infinity_free(pointer, 32);
+        active_infinity_free(pointer, 32);
+    }
+}
+
+/// A name of exactly the limit is inside the contract; one byte more is not.
+#[test]
+fn a_name_of_the_full_limit_is_accepted() {
+    let source = b"port = 1\n";
+    let mut name = vec![b'a'; MAX_NAME_BYTES];
+    name.push(0);
+    let mut out = vec![0u8; 64 * 1024];
+    let mut out_len = out.len();
+    // SAFETY: the name is NUL-terminated and both buffers are live.
+    let status = unsafe {
+        active_infinity_from_active(
+            source.as_ptr(),
+            source.len(),
+            name.as_ptr().cast(),
+            out.as_mut_ptr(),
+            &mut out_len,
+        )
+    };
+    assert_ne!(
+        last_error(),
+        "infinity/name-too-long",
+        "a name of exactly {MAX_NAME_BYTES} bytes is inside the limit (status {status})"
+    );
+}
+
+/// A one-byte-over name is refused by the bounded scan, not read past.
+#[test]
+fn a_name_over_the_limit_is_refused() {
+    let source = b"port = 1\n";
+    let mut name = vec![b'a'; MAX_NAME_BYTES + 1];
+    name.push(0);
+    let mut out = vec![0u8; 4096];
+    let mut out_len = out.len();
+    // SAFETY: the name is NUL-terminated; the scan must stop at the cap.
+    let status = unsafe {
+        active_infinity_from_active(
+            source.as_ptr(),
+            source.len(),
+            name.as_ptr().cast(),
+            out.as_mut_ptr(),
+            &mut out_len,
+        )
+    };
+    assert_eq!(status, -1);
+    assert_eq!(last_error(), "infinity/name-too-long");
+}
+
+/// A length beyond `isize::MAX` must be refused before a slice is built from it.
+#[test]
+fn a_hostile_length_is_refused_before_the_slice() {
+    let bytes = vector("empty.ainf");
+    // SAFETY: the pointer is valid; the length is hostile and must be refused
+    // without touching the buffer.
+    let status = unsafe { active_infinity_validate(bytes.as_ptr(), usize::MAX) };
+    assert_eq!(status, -1);
+    assert_eq!(last_error(), "infinity/null-input");
+}
+
+/// The FFI hash is the canonical identity: a non-canonical image would hash to
+/// bytes that re-encode to a different address.
+#[test]
+fn content_hash_refuses_a_non_canonical_image() {
+    use active_infinity_ffi::active_infinity_content_hash;
+
+    let bytes = vector("non_canonical.ainf");
+    let mut hash = [0u8; 32];
+    // SAFETY: the buffer is readable and `hash` is 32 writable bytes.
+    let status =
+        unsafe { active_infinity_content_hash(bytes.as_ptr(), bytes.len(), hash.as_mut_ptr()) };
+    assert_eq!(status, -1);
+    assert_eq!(last_error(), "infinity/not-canonical");
+
+    // The canonical vector still hashes.
+    let bytes = vector("full.ainf");
+    // SAFETY: same contract.
+    let status =
+        unsafe { active_infinity_content_hash(bytes.as_ptr(), bytes.len(), hash.as_mut_ptr()) };
+    assert_eq!(status, 0, "{}", last_error());
+}
+
+/// A successful `alloc` and `free` clear a stale failure code; a binding that
+/// logs `last_error` on every call must not report a phantom failure.
+#[test]
+fn a_success_clears_the_last_error() {
+    use active_infinity_ffi::{active_infinity_alloc, active_infinity_free};
+
+    // SAFETY: the pointer is a 4-byte readable literal.
+    assert_eq!(unsafe { active_infinity_validate(b"junk".as_ptr(), 4) }, -1);
+    assert_eq!(last_error(), "infinity/magic");
+    let pointer = active_infinity_alloc(8);
+    assert!(!pointer.is_null());
+    assert_eq!(last_error(), "infinity/ok");
+    // SAFETY: the pointer and length come from the allocation above.
+    unsafe { active_infinity_free(pointer, 8) };
+    assert_eq!(last_error(), "infinity/ok");
+}
+
+/// `validate_canonical` accepts every canonical vector, so the comparison with
+/// `validate` is meaningful in both directions.
+#[test]
+fn validate_canonical_accepts_every_canonical_vector() {
+    use active_infinity_ffi::active_infinity_validate_canonical;
+
+    for name in ["empty.ainf", "full.ainf", "extensions.ainf", "simple.ainf"] {
+        let bytes = vector(name);
+        // SAFETY: the vector is a readable buffer.
+        let status = unsafe { active_infinity_validate_canonical(bytes.as_ptr(), bytes.len()) };
+        assert_eq!(status, 0, "{name}: {}", last_error());
+    }
 }

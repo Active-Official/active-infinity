@@ -401,6 +401,15 @@
     },
     {
       "kind": "invalid_stream",
+      "name": "frame_flags",
+      "path": "tests/vectors/invalid_stream/frame_flags.ainf",
+      "options": {},
+      "expected_code": "infinity/stream-flags",
+      "sha256": "9f50ec504e444d3be069ee99e73d885402e9dd3b0d5556ae9bbda81b60254fd2",
+      "size": 1012
+    },
+    {
+      "kind": "invalid_stream",
       "name": "frame_len",
       "path": "tests/vectors/invalid_stream/frame_len.ainf",
       "options": {},

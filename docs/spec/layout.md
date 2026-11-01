@@ -584,15 +584,17 @@ messages. Every code below is part of the contract.
 | `infinity/signature` | detached signature envelope is malformed or invalid |
 | `infinity/proof` | a proof sidecar is malformed or does not match its image |
 | `infinity/encode` | module cannot be encoded (dangling reference, tainted blob with payload, ...) |
+| `infinity/error` | FFI fallback when an error code cannot be represented (never returned by the codec) |
 | `infinity/encode-dangling` | encoding referenced a missing node |
 | `infinity/too-large` | image exceeds the 4 GiB address space |
 | `infinity/stream-magic` | frame does not start with `AINS` |
 | `infinity/stream-version` | unsupported frame version |
 | `infinity/stream-frame-len` | frame length exceeds its ceiling or the buffer |
 | `infinity/stream-frame-kind` | unknown frame kind |
+| `infinity/stream-flags` | unknown stream frame flag bits |
 | `infinity/stream-sequence` | frame out of order |
 | `infinity/stream-state` | frame illegal in the current stream state |
-| `infinity/stream-hash` | reassembled hash disagrees with the end frame |
+| `infinity/stream-hash` | a frame checksum or the reassembled hash disagrees |
 | `infinity/stream-delta` | delta cannot be applied |
 | `infinity/stream-unterminated` | stream ended without an end frame |
 

@@ -114,6 +114,22 @@ impl Frame {
         }
     }
 
+    /// Fallible form of [`Frame::new`] for a payload size a caller cannot prove.
+    ///
+    /// `new` panics on an oversized payload because it is a caller bug; a
+    /// caller that accepts a size from input uses this instead and gets
+    /// `infinity/too-large`.
+    pub fn try_new(kind: FrameKind, sequence: u64, payload: Vec<u8>) -> Result<Self> {
+        if payload.len() > MAX_FRAME_PAYLOAD as usize {
+            return Err(Error::TooLarge);
+        }
+        Ok(Frame {
+            kind,
+            sequence,
+            payload,
+        })
+    }
+
     /// Serialize the frame with its header and checksum.
     pub fn to_bytes(&self) -> Vec<u8> {
         assert!(
@@ -157,7 +173,7 @@ impl Frame {
         let kind = FrameKind::from_code(buf[5]).ok_or(Error::StreamFrameKind(buf[5]))?;
         let flags = u16::from_le_bytes([buf[6], buf[7]]);
         if flags != 0 {
-            return Err(Error::UnknownFlags(flags));
+            return Err(Error::StreamFlags(u32::from(flags)));
         }
         let sequence = u64::from_le_bytes(buf[8..16].try_into().expect("8 bytes"));
         let len = u32::from_le_bytes(buf[16..20].try_into().expect("4 bytes"));
@@ -188,7 +204,10 @@ impl Frame {
         let payload = &buf[payload_start..payload_end];
         let expected = frame_checksum(payload);
         if buf[24..32] != expected[..8] {
-            return Err(Error::HashMismatch);
+            // A frame checksum fault is a stream fault, not the image content
+            // hash: a consumer that retries a frame must not be sent down the
+            // "the image is corrupt" path.
+            return Err(Error::StreamHashMismatch);
         }
         Ok((
             Frame {
@@ -879,6 +898,9 @@ impl StreamDecoder {
                 }
                 let major = u16::from_le_bytes([frame.payload[0], frame.payload[1]]);
                 let minor = u16::from_le_bytes([frame.payload[2], frame.payload[3]]);
+                // The Begin payload carries the *image* header's generation and
+                // flag word, so a mismatch is a file-format answer, not a
+                // stream-frame one.
                 if major != crate::layout::FORMAT_MAJOR {
                     return Err(Error::VersionMajor(major));
                 }

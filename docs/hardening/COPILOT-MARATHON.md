@@ -26,8 +26,8 @@ the code → regression test first → minimal fix → targeted tests + clippy �
 | I-10 | signature / proof | `src/signature.rs`, `src/proof.rs` | **CLEAN** (round 3: weak keys, code mapping) | 10 fixed, 2 rejected/documented | this commit |
 | I-11 | merge | `src/merge.rs` | **CLEAN** (round 2: width/byte budgets) | 11 fixed, 1 rejected | this commit |
 | I-12 | interop / protobuf | `src/interop.rs`, `src/protobuf.rs` | **CLEAN** (round 2: blob hash, marker, budget) | 12 fixed, 2 rejected/documented | this commit |
-| I-13 | error codes | `src/error.rs` | **CLEAN** | 6 fixed, 2 rejected | this commit |
-| I-14 | FFI | `ffi/**` | **CLEAN** | 12 fixed, 3 documented | this commit |
+| I-13 | error codes | `src/error.rs` | **CLEAN** (round 2: fatality, stream codes) | 17 fixed, 2 rejected | this commit |
+| I-14 | FFI | `ffi/**` | **CLEAN** (round 2 registry, round 3 DeepSeek) | 21 fixed, 9 documented | this commit |
 | I-15 | CLI | `cli/active-infinity-cli/**` | **CLEAN** | 13 fixed, 2 documented | this commit |
 | I-16 | fuzz targets | `fuzz/**` | **CLEAN** | 11 fixed, 2 documented | this commit |
 
@@ -819,3 +819,51 @@ copy gate). Round-1 fixes verified holding. Findings: 1 critical, 2 high,
 Gate: 364 library/integration tests, clippy clean both feature sets; 6 new
 tests proved to fail against the pre-fix tree. The protobuf early refusal is
 exercised by code inspection only: a test would need a 512 MB value.
+
+### Re-audit round 2 (I-13) - 2026-10-31
+
+Reviewer scope: `src/error.rs` and every error construction site. Findings:
+3 high, 7 medium, 1 low.
+
+| # | Severity | Finding | Disposition |
+|---|---|---|---|
+| 1 | high | `is_fatal` marked `Truncated`/`StreamFrameLen` fatal while `push_bytes` treats them as "wait for more", so a caller gating a retry on the flag would drop a healthy partial stream | **fixed**: the two are no longer fatal, a new `is_incomplete()` names the wait signal, and the doc says a one-shot reader treats every error as terminal; the classification test fails pre-fix |
+| 2 | high | a frame checksum failure reported `infinity/hash-mismatch`, the image content-hash code | **fixed**: `infinity/stream-hash`; `a_corrupt_frame_checksum_is_a_stream_hash_fault` (fails pre-fix) |
+| 3 | high | `Validated::node` sliced `buf[offset..offset+32]` unchecked, a panic path in a public API if a layout invariant were ever missed | **fixed**: checked starts, ends and slice with `infinity/offset` |
+| 4 | medium | stream frame flags reused the header's `UnknownFlags`, whose message always says "header" | **fixed**: a new `StreamFlags` variant (`infinity/stream-flags`), Display and spec row; a conformance vector `frame_flags.ainf` drives it (pre-fix: `infinity/flags`) |
+| 5 | medium | the Begin payload's version/flags were mapped to `StreamVersion`/`StreamFlags` | **rejected**: the Begin payload carries the *image* header's generation and flag word, so `VersionMajor`/`VersionMinor`/`UnknownFlags` are the precise answers, as the I-06 test already required |
+| 6 | medium | `validate_canonical` swallowed a decode fault into `NotCanonical` | **fixed**: the decode error is propagated; only a differing re-encode is `NotCanonical` |
+| 7 | medium | `source()` is always `None` and `map_err(\|_\|)` discards the io/zstd cause | **rejected as by design**: the codec has no cause chain to avoid allocating in an error path and to avoid a filesystem-state oracle; store messages are fixed strings on purpose |
+| 8 | medium | `is_fatal` included the caller-side `EncodeDangling`/`TooLarge` but excluded `Encode` | **fixed**: both are non-fatal; the classification test pins it |
+| 9 | medium | `Frame::new`/`to_bytes` panic on an oversized payload | **fixed for input-driven sizes**: `Frame::try_new` returns `infinity/too-large`; `new` keeps its documented panic for a caller bug |
+| 10 | medium | `From<Utf8Error>` reported a slice-relative offset under a code documented as an image offset | **fixed**: the impl is removed; every `Utf8` comes from an explicit absolute offset |
+| 11 | low | the FFI fallback code `infinity/error` was undocumented | **fixed**: a spec row plus a conformance waiver |
+
+Gate: 364 library/integration tests, clippy clean both feature sets; 3 new tests
+and 1 new conformance vector, all proved pre-fix by stashing the implementation.
+
+### Re-audit rounds 2 and 3 (I-14) - 2026-10-31
+
+Round 2 reviewer: Muse proxy. Round 3 reviewer: **DeepSeek V4.1 via the Copilot
+CLI** (CommandCode BYOK, `xhigh`), as an independent second opinion on the
+rewritten allocator.
+
+| # | Severity | Finding | Disposition |
+|---|---|---|---|
+| 1 | high | `free` read a header behind any pointer and trusted a fixed tag, so a foreign pointer with a planted tag corrupted the heap | **fixed**: a live-allocation registry decides what may be freed; `a_foreign_pointer_with_a_planted_tag_is_not_freed` (pre-fix: STATUS_HEAP_CORRUPTION) |
+| 2 | medium | `send`-getters (`version`, `ffi_version`, `last_error`) could panic across the boundary | **fixed**: `catch_unwind` with a NULL fallback, documented |
+| 3 | medium | the name scan stopped one byte early, refusing a legal 4096-byte name | **fixed**: `a_name_of_the_full_limit_is_accepted` (fails pre-fix) |
+| 4 | medium | `alloc(0)` plus `free(p, 0)` leaked the buffer forever | **fixed**: the length-zero path goes through the registry; `a_zero_length_allocation_round_trips` |
+| 5 | medium | `alloc` used `Vec` and `Vec::from_raw_parts(total, total)`, whose capacity can exceed the requested size (UB on dealloc) | **fixed**: `alloc_zeroed`/`dealloc` with one explicit `Layout` |
+| 6 | high (DeepSeek) | the header promised a double free is a no-op, which fails once the address is reused: the stale free then releases a live block | **documented, contract corrected**: the header and `free` docs state the true guarantee (no-op only while the address is unreused; null after free) |
+| 7 | medium (DeepSeek) | `input()` built a slice before any length bound, so `len = usize::MAX` violated `from_raw_parts` preconditions | **fixed**: a length above `isize::MAX` is `infinity/null-input`, and `from_active` checks its cap before slicing; `a_hostile_length_is_refused_before_the_slice` (pre-fix: STATUS_STACK_BUFFER_OVERRUN) |
+| 8 | medium (DeepSeek) | the FFI `content_hash` accepted a non-canonical image, splitting identity from the Rust API | **fixed**: it calls `validate_canonical` first; `content_hash_refuses_a_non_canonical_image` (fails pre-fix) |
+| 9 | medium (DeepSeek) | `-3` is inert on `panic=abort` targets, including `wasm32-unknown-unknown` | **documented**: the header states the guarantee per target and that a trap is a failed call |
+| 10 | medium (DeepSeek) | no limits knob; a 1 GiB image needs decode plus re-encode inside a 4 GiB wasm space | **documented**: the shim runs the default profile and the host must cap input for a small instance |
+| 11 | low (DeepSeek) | `alloc`/`free` left a stale `last_error` after success | **fixed**: every call sets `infinity/ok`; `a_success_clears_the_last_error` (fails pre-fix) |
+| 12 | low (DeepSeek) | getters can return NULL, which the header did not admit | **fixed**: documented as "unavailable"; bindings null-check |
+| 13 | low (DeepSeek) | wrong-length `free` removes the registry entry and leaks permanently; alignment was undocumented | **documented**: the buffer is leaked by design and the alignment is 8 |
+| 14 | low (DeepSeek) | the redaction canary named a literal the vector does not carry, and `validate_canonical` had no positive case | **fixed**: the test asserts `vector-secret` and the marker, and every canonical vector is accepted |
+
+Gate: 27 FFI tests, clippy clean; each new behavioural test proved against the
+pre-fix tree.

@@ -7,8 +7,10 @@
  * Calling convention
  * ------------------
  * - Return 0 on success, -1 on invalid input or a refused operation, -2 when
- *   the output buffer is too small, -3 on an internal panic (never aborts
- * across the boundary).
+ *   the output buffer is too small, -3 on an internal panic. The shim catches
+ *   panics on unwinding targets; on `panic=abort` targets, including
+ *   `wasm32-unknown-unknown`, a panic traps the instance instead of returning
+ *   -3, so a host must treat a trap as a failed call.
  * - After every call, active_infinity_last_error() gives the stable
  *   `infinity/...` code for the calling thread (`infinity/ok` on success).
  *   Copy the string immediately: the pointer is owned by the library and is
@@ -25,10 +27,24 @@
  * Allocation
  * ----------
  * `active_infinity_alloc` refuses more than 1 GiB (`infinity/limit`) and
- * returns NULL rather than aborting. Every buffer carries a private tag, and
- * `active_infinity_free` checks it: a wrong length is a no-op instead of a heap
- * corruption. A double free, a foreign pointer or a pointer used after free is
- * still undefined behaviour in the C ABI; null the pointer after freeing it.
+ * returns NULL rather than aborting. Every live allocation is recorded, and
+ * `active_infinity_free` consults that record: a foreign pointer, a forged tag
+ * and a wrong length are each a no-op (the buffer is leaked at worst) instead
+ * of heap corruption. Buffers are 8-byte aligned.
+ *
+ * A double free is a no-op only while the address has not been reused. If an
+ * allocation between the two frees returned the same address, the stale free
+ * releases that newer buffer. Always null the pointer after freeing it; using
+ * a pointer after it was freed is undefined behaviour.
+ *
+ * Every call sets `last_error`, including `alloc` and `free` (`infinity/ok` on
+ * success). The getters return NULL only if an internal panic occurred;
+ * bindings should treat NULL as "unavailable".
+ *
+ * Untrusted input: the shim runs the default profile (1 GiB total bytes). A
+ * wasm32 instance has a 4 GiB address space, so size the module's memory for
+ * the decode plus one re-encode; a host that cannot afford that must cap the
+ * input itself before calling in.
  *
  * The library is thread-safe; `last_error` is thread-local. No function
  * retains a caller pointer after it returns.

@@ -156,8 +156,10 @@ impl<'a> Validated<'a> {
             // Any failure to reproduce the image is a canonical-form fault, not an
             // encoder fault: the caller asked "is this the canonical encoding of
             // its own content", and the answer is no.
-            let module =
-                crate::decode::decode_validated(&validated).map_err(|_| Error::NotCanonical)?;
+            // A decode fault here means the bytes are corrupt, not merely
+            // non-canonical, so its precise code is kept. Only a re-encode that
+            // differs from the input is the canonical-form answer.
+            let module = crate::decode::decode_validated(&validated)?;
             let image = crate::encode::encode_with(
                 &module,
                 crate::layout::EncodeOpts {
@@ -165,8 +167,7 @@ impl<'a> Validated<'a> {
                     mark_canonical: true,
                     streamed: header.flags & crate::layout::FLAG_STREAMED != 0,
                 },
-            )
-            .map_err(|_| Error::NotCanonical)?;
+            )?;
             if image != buf {
                 return Err(Error::NotCanonical);
             }
@@ -250,9 +251,23 @@ impl<'a> Validated<'a> {
         if id.0 >= count {
             return Err(Error::NodeRef(id.0));
         }
-        let offset =
-            self.header.span(Section::Nodes).offset as usize + id.index() * NODE_RECORD_SIZE;
-        let rec = &self.buf[offset..offset + NODE_RECORD_SIZE];
+        let start = self.header.span(Section::Nodes).offset as usize;
+        let offset = start
+            .checked_add(id.index() * NODE_RECORD_SIZE)
+            .ok_or(Error::Offset {
+                section: "nodes",
+                offset: start as u64,
+            })?;
+        let end = offset.checked_add(NODE_RECORD_SIZE).ok_or(Error::Offset {
+            section: "nodes",
+            offset: offset as u64,
+        })?;
+        // `validate_layout` proved the span is inside the buffer; a checked
+        // slice keeps a future gap from turning into a panic in a public API.
+        let rec = self.buf.get(offset..end).ok_or(Error::Offset {
+            section: "nodes",
+            offset: offset as u64,
+        })?;
         // Bytes 2..4 of a node record are reserved and must be zero. They are
         // covered by the content hash, so an image with a non-zero reserved byte
         // validates but cannot re-encode to itself: two bytes per node of hidden

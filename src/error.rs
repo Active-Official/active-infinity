@@ -126,6 +126,12 @@ pub enum Error {
     StreamFrameLen { declared: u32, available: u64 },
     /// A stream frame kind is unknown.
     StreamFrameKind(u8),
+    /// A stream frame carries flag bits this reader does not implement.
+    ///
+    /// Distinct from [`Error::UnknownFlags`]: that variant is the image
+    /// header's flag word, and a consumer that sees `infinity/flags` knows to
+    /// look in one place. A stream fault reports `infinity/stream-flags`.
+    StreamFlags(u32),
     /// A stream frame is out of sequence or the stream is truncated.
     StreamSequence { expected: u64, found: u64 },
     /// A frame arrived before `Begin` or after `End`.
@@ -189,6 +195,7 @@ impl Error {
             Error::StreamVersion(_) => "infinity/stream-version",
             Error::StreamFrameLen { .. } => "infinity/stream-frame-len",
             Error::StreamFrameKind(_) => "infinity/stream-frame-kind",
+            Error::StreamFlags(_) => "infinity/stream-flags",
             Error::StreamSequence { .. } => "infinity/stream-sequence",
             Error::StreamState(_) => "infinity/stream-state",
             Error::StreamHashMismatch => "infinity/stream-hash",
@@ -217,6 +224,11 @@ impl Error {
     /// than retrying with a different configuration. Structure, framing, hash,
     /// canonical-form and stream-frame faults are fatal.
     ///
+    /// An **incomplete** input is the one exception and is not fatal: see
+    /// [`Error::is_incomplete`]. A one-shot reader treats every error as
+    /// terminal because no more bytes exist to supply; a streaming caller feeds
+    /// more bytes instead of discarding the buffer.
+    ///
     /// A non-fatal error says the operation failed for a reason a different
     /// limit, a different companion file or a retry may fix: `limit` (raise the
     /// ceiling), `invalid-argument`, `evaluation` (the module is valid; the
@@ -224,6 +236,17 @@ impl Error {
     /// media-dependent), `signature` and `proof` (the sidecar, not the image),
     /// `encode` (the caller's own module), `stream-delta` and `stream-state`
     /// (the caller's protocol state).
+    /// True when the input ended early and more bytes may make it valid.
+    ///
+    /// This is the streaming wait signal: [`crate::StreamDecoder::push_bytes`]
+    /// returns `Ok(())` for these faults and waits for the next chunk. The
+    /// errors are deliberately **not** fatal, so a caller that gates a retry on
+    /// [`Error::is_fatal`] does not throw away a healthy partial stream.
+    pub const fn is_incomplete(&self) -> bool {
+        matches!(self, Error::Truncated { .. } | Error::StreamFrameLen { .. })
+    }
+
+    /// Whether every fault this error reports is fatal; see [`Error::is_fatal`].
     pub const fn is_fatal(&self) -> bool {
         matches!(
             self,
@@ -235,7 +258,6 @@ impl Error {
                 | Error::UnknownFlags(_)
                 | Error::ReservedNonZero { .. }
                 | Error::Offset { .. }
-                | Error::Truncated { .. }
                 | Error::TrailingBytes { .. }
                 | Error::Count { .. }
                 | Error::Padding { .. }
@@ -259,12 +281,10 @@ impl Error {
                 | Error::DuplicateBinding
                 | Error::Cycle { .. }
                 | Error::Depth { .. }
-                | Error::EncodeDangling(_)
-                | Error::TooLarge
                 | Error::StreamMagic
                 | Error::StreamVersion(_)
-                | Error::StreamFrameLen { .. }
                 | Error::StreamFrameKind(_)
+                | Error::StreamFlags(_)
                 | Error::StreamSequence { .. }
                 | Error::StreamHashMismatch
                 | Error::StreamUnterminated
@@ -333,6 +353,7 @@ impl fmt::Display for Error {
             Error::TooLarge => write!(f, "module exceeds the 4 GiB addressable image"),
             Error::StreamMagic => write!(f, "not an Active Infinity stream frame"),
             Error::StreamVersion(v) => write!(f, "unsupported stream frame version {v}"),
+            Error::StreamFlags(bits) => write!(f, "unknown stream frame flag bits {bits:#06x}"),
             Error::StreamFrameLen {
                 declared,
                 available,
@@ -359,16 +380,9 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
-impl From<std::str::Utf8Error> for Error {
-    fn from(error: std::str::Utf8Error) -> Self {
-        // `valid_up_to` is the byte offset of the first invalid sequence, which
-        // is what a caller needs to locate the fault. Hardcoding zero would
-        // turn any future `?` into a misleading report.
-        Error::Utf8 {
-            offset: error.valid_up_to() as u64,
-        }
-    }
-}
+// No `From<Utf8Error>`: `valid_up_to` is relative to the slice, while every
+// `Error::Utf8` the decoder reports is an absolute image offset. A blanket
+// conversion would silently mix the two bases.
 
 #[cfg(test)]
 mod code_tests {
@@ -461,6 +475,7 @@ mod code_tests {
                 available: 0,
             },
             Error::StreamFrameKind(9),
+            Error::StreamFlags(9),
             Error::StreamSequence {
                 expected: 1,
                 found: 2,
@@ -502,9 +517,30 @@ mod code_tests {
             Error::NodeRef(0),
             Error::HashMismatch,
             Error::StreamHashMismatch,
-            Error::TooLarge,
         ] {
             assert!(fatal.is_fatal(), "{fatal:?} is a corrupt-input fault");
+        }
+        // An incomplete input may become valid once more bytes arrive, and a
+        // caller-side encode fault says nothing about the input's trust.
+        for incomplete in [
+            Error::Truncated {
+                needed: 4,
+                found: 0,
+            },
+            Error::StreamFrameLen {
+                declared: 8,
+                available: 0,
+            },
+        ] {
+            assert!(!incomplete.is_fatal(), "{incomplete:?} is incomplete");
+            assert!(incomplete.is_incomplete(), "{incomplete:?} waits for bytes");
+        }
+        for caller_side in [Error::TooLarge, Error::EncodeDangling(0)] {
+            assert!(
+                !caller_side.is_fatal(),
+                "{caller_side:?} is the caller's fault"
+            );
+            assert!(!caller_side.is_incomplete());
         }
         for recoverable in [
             Error::InvalidArgument("test"),

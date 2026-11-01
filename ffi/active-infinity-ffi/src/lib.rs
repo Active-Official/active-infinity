@@ -26,12 +26,15 @@
 //! The codec is `#![forbid(unsafe_code)]`; this shim catches any panic and
 //! reports `-3` with `infinity/panic`. A panic never unwinds into C or WASM.
 
+use std::alloc::Layout;
 use std::cell::RefCell;
+use std::collections::BTreeSet;
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr;
 use std::slice;
+use std::sync::Mutex;
 
 use active_infinity::{content_hash, decode, encode, validate, validate_canonical};
 
@@ -53,6 +56,23 @@ pub const MAX_SOURCE_BYTES: usize = 16 << 20;
 const ALLOC_MAGIC: u64 = u64::from_le_bytes(*b"AINFALLO");
 /// Tag plus the stored length, both little-endian `u64`.
 const ALLOC_HEADER: usize = 16;
+/// Alignment of every `alloc` buffer. `u64` fields need no more, and a fixed
+/// alignment makes the free layout explicit.
+const ALLOC_ALIGN: usize = 8;
+
+/// Every live allocation handed out by [`active_infinity_alloc`].
+///
+/// A tag cannot prove an address: a caller can plant a matching tag wherever it
+/// likes. The registry is the authority, so a foreign pointer, a forged tag and
+/// a double free are each a no-op instead of a free of memory this library never
+/// allocated.
+static LIVE_ALLOCS: Mutex<BTreeSet<usize>> = Mutex::new(BTreeSet::new());
+
+fn live_allocations() -> std::sync::MutexGuard<'static, BTreeSet<usize>> {
+    LIVE_ALLOCS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 const OK: i32 = 0;
 const INVALID: i32 = -1;
@@ -104,6 +124,12 @@ unsafe fn input<'a>(ptr: *const u8, len: usize) -> Option<&'a [u8]> {
     if ptr.is_null() {
         return None;
     }
+    // `slice::from_raw_parts` requires a length no larger than `isize::MAX`.
+    // A hostile `len` (for example `usize::MAX` from a JS host) would be
+    // library UB before any ceiling comparison runs, so refuse it here.
+    if len > isize::MAX as usize {
+        return None;
+    }
     // SAFETY: the caller guarantees `ptr` points to `len` readable bytes for the
     // duration of the call, as documented in the header.
     Some(unsafe { slice::from_raw_parts(ptr, len) })
@@ -145,7 +171,9 @@ unsafe fn write_output(bytes: &[u8], out: *mut u8, out_len: *mut usize) -> i32 {
 /// first NUL, so a hostile string is refused instead of read.
 unsafe fn bounded_name<'a>(name: *const c_char) -> Option<&'a CStr> {
     let mut length = 0usize;
-    while length < MAX_NAME_BYTES {
+    // The cap counts name bytes; the terminator sits at index `MAX_NAME_BYTES`
+    // for a name of exactly the limit, so the scan includes that index.
+    while length <= MAX_NAME_BYTES {
         // SAFETY: the caller promises a NUL-terminated string; the cap keeps a
         // missing terminator from turning into an unbounded scan.
         if unsafe { *name.add(length) } == 0 {
@@ -171,15 +199,23 @@ pub extern "C" fn active_infinity_abi_version() -> u32 {
 /// codec, and `active_infinity_ffi_version` reports the shim.
 #[no_mangle]
 pub extern "C" fn active_infinity_version() -> *const c_char {
-    static SLOT: std::sync::OnceLock<CString> = std::sync::OnceLock::new();
-    version_pointer(&SLOT, active_infinity::VERSION)
+    // A getter that panicked would unwind into C; null is the documented
+    // "unavailable" answer and cannot happen for a static version string.
+    catch_unwind(|| {
+        static SLOT: std::sync::OnceLock<CString> = std::sync::OnceLock::new();
+        version_pointer(&SLOT, active_infinity::VERSION)
+    })
+    .unwrap_or(ptr::null())
 }
 
 /// Shim version as a static NUL-terminated string.
 #[no_mangle]
 pub extern "C" fn active_infinity_ffi_version() -> *const c_char {
-    static SLOT: std::sync::OnceLock<CString> = std::sync::OnceLock::new();
-    version_pointer(&SLOT, env!("CARGO_PKG_VERSION"))
+    catch_unwind(|| {
+        static SLOT: std::sync::OnceLock<CString> = std::sync::OnceLock::new();
+        version_pointer(&SLOT, env!("CARGO_PKG_VERSION"))
+    })
+    .unwrap_or(ptr::null())
 }
 
 fn version_pointer(slot: &'static std::sync::OnceLock<CString>, text: &str) -> *const c_char {
@@ -190,7 +226,7 @@ fn version_pointer(slot: &'static std::sync::OnceLock<CString>, text: &str) -> *
 /// Stable error code from the last failing call on this thread.
 #[no_mangle]
 pub extern "C" fn active_infinity_last_error() -> *const c_char {
-    LAST_ERROR.with(|slot| slot.borrow().as_ptr())
+    catch_unwind(|| LAST_ERROR.with(|slot| slot.borrow().as_ptr())).unwrap_or(ptr::null())
 }
 
 /// Allocate `len` zeroed bytes in the module's linear memory.
@@ -217,18 +253,33 @@ fn alloc_tagged(len: usize) -> *mut u8 {
         set_error("infinity/limit");
         return ptr::null_mut();
     };
-    let mut buffer: Vec<u8> = Vec::new();
-    if buffer.try_reserve_exact(total).is_err() {
+    let Ok(layout) = Layout::from_size_align(total, ALLOC_ALIGN) else {
+        set_error("infinity/limit");
+        return ptr::null_mut();
+    };
+    // SAFETY: `total` is non-zero and the layout is valid for the allocator.
+    let base = unsafe { std::alloc::alloc_zeroed(layout) };
+    if base.is_null() {
         set_error("infinity/limit");
         return ptr::null_mut();
     }
-    buffer.resize(total, 0);
-    buffer[..8].copy_from_slice(&ALLOC_MAGIC.to_le_bytes());
-    buffer[8..16].copy_from_slice(&(len as u64).to_le_bytes());
-    let pointer = buffer.as_mut_ptr();
-    std::mem::forget(buffer);
-    // SAFETY: the allocation has at least `ALLOC_HEADER` bytes.
-    unsafe { pointer.add(ALLOC_HEADER) }
+    // SAFETY: the allocation holds `ALLOC_HEADER` bytes at `base`.
+    unsafe {
+        ptr::copy_nonoverlapping(ALLOC_MAGIC.to_le_bytes().as_ptr(), base, 8);
+        ptr::copy_nonoverlapping((len as u64).to_le_bytes().as_ptr(), base.add(8), 8);
+    }
+    // SAFETY: the allocation is at least `ALLOC_HEADER` bytes.
+    let pointer = unsafe { base.add(ALLOC_HEADER) };
+    if !live_allocations().insert(pointer as usize) {
+        // A fresh allocation cannot alias a live one; fail closed rather than
+        // hand out two names for one buffer.
+        set_error("infinity/limit");
+        // SAFETY: `base` came from `alloc_zeroed` with this layout.
+        unsafe { std::alloc::dealloc(base, layout) };
+        return ptr::null_mut();
+    }
+    set_error("infinity/ok");
+    pointer
 }
 
 /// Release a buffer from [`active_infinity_alloc`].
@@ -241,26 +292,47 @@ fn alloc_tagged(len: usize) -> *mut u8 {
 /// cannot make a double free safe.
 #[no_mangle]
 pub unsafe extern "C" fn active_infinity_free(ptr: *mut u8, len: usize) {
-    if ptr.is_null() || len == 0 {
+    // A panic must not unwind into C; `free` has no return code, so a caught
+    // panic leaves the buffer live (a leak) rather than aborting the caller.
+    let _ = catch_unwind(AssertUnwindSafe(|| free_tagged(ptr, len)));
+}
+
+fn free_tagged(ptr: *mut u8, len: usize) {
+    if ptr.is_null() {
         return;
     }
-    // SAFETY: the caller contract says `ptr - ALLOC_HEADER` is the start of an
-    // allocation made by `alloc_tagged`.
+    // Removing the address under the lock is what makes a foreign pointer, a
+    // forged tag and a double free a no-op: only an address this library
+    // recorded can be reconstructed, and only once.
+    if !live_allocations().remove(&(ptr as usize)) {
+        // A foreign pointer or a double free: no-op, and the call itself
+        // succeeded, so the thread's code reflects that.
+        set_error("infinity/ok");
+        return;
+    }
+    // SAFETY: the registry proved this address came from `alloc_tagged`, so the
+    // header behind it was written by this library.
     let base = unsafe { ptr.sub(ALLOC_HEADER) };
     let header = unsafe { slice::from_raw_parts(base, ALLOC_HEADER) };
     let magic = u64::from_le_bytes(header[..8].try_into().expect("8 bytes"));
     let stored = u64::from_le_bytes(header[8..16].try_into().expect("8 bytes"));
     if magic != ALLOC_MAGIC || stored != len as u64 {
-        // Not the pairing the contract requires. Freeing would corrupt the
-        // heap; refusing to free leaks one buffer, which is the safe failure.
+        // A wrong length cannot be freed with the right layout. The buffer is
+        // leaked, which is the safe failure, and it is no longer reachable
+        // through this API.
         return;
     }
-    // Clear the tag so a later `free` of the same pointer fails the check
-    // instead of reconstructing the Vec a second time.
+    let Some(total) = len.checked_add(ALLOC_HEADER) else {
+        return;
+    };
+    let Ok(layout) = Layout::from_size_align(total, ALLOC_ALIGN) else {
+        return;
+    };
+    // Clear the tag so a stale copy never looks valid.
     unsafe { ptr::write_bytes(base, 0, ALLOC_HEADER) };
-    let total = len + ALLOC_HEADER;
-    // SAFETY: the header proves this is the allocation `alloc_tagged` made.
-    drop(unsafe { Vec::from_raw_parts(base, total, total) });
+    // SAFETY: `base` came from `alloc_zeroed` with exactly this layout.
+    unsafe { std::alloc::dealloc(base, layout) };
+    set_error("infinity/ok");
 }
 
 /// Validate an AINF image. Returns 0 for a structurally valid image.
@@ -337,6 +409,13 @@ pub unsafe extern "C" fn active_infinity_content_hash(
             set_error("infinity/null-output");
             return INVALID;
         }
+        // Identity is the canonical form: a non-canonical image hashes to
+        // different bytes than the image it re-encodes to, so the shim refuses
+        // it exactly as `SignedImage::content_hash` does.
+        if let Err(error) = validate_canonical(bytes, active_infinity::Limits::default()) {
+            set_error(error.code());
+            return INVALID;
+        }
         match content_hash(bytes) {
             Ok(hash) => {
                 // SAFETY: the caller guarantees 32 writable bytes.
@@ -401,15 +480,17 @@ pub unsafe extern "C" fn active_infinity_from_active(
     out_len: *mut usize,
 ) -> i32 {
     guarded(|| {
+        // Check the declared length before building a slice from it: the cap is
+        // what keeps a hostile length from reaching `from_raw_parts`.
+        if source_len > MAX_SOURCE_BYTES {
+            set_error("infinity/limit");
+            return INVALID;
+        }
         // SAFETY: forwarded caller contract.
         let Some(bytes) = (unsafe { input(source, source_len) }) else {
             set_error("infinity/null-input");
             return INVALID;
         };
-        if bytes.len() > MAX_SOURCE_BYTES {
-            set_error("infinity/limit");
-            return INVALID;
-        }
         let Ok(text) = std::str::from_utf8(bytes) else {
             set_error("infinity/utf8");
             return INVALID;

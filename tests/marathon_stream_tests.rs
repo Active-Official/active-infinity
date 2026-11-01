@@ -275,3 +275,28 @@ fn a_newer_minor_generation_is_a_minor_version_error() {
         .expect_err("a newer minor is refused");
     assert_eq!(error.code(), "infinity/version-minor", "{error}");
 }
+
+/// A frame checksum fault is a stream fault, not the image content hash: a
+/// consumer that retries a frame must not be sent down the image path.
+#[test]
+fn a_corrupt_frame_checksum_is_a_stream_hash_fault() {
+    let mut bytes = Frame::new(FrameKind::Batch, 0, b"payload".to_vec()).to_bytes();
+    let last = bytes.len() - 1;
+    bytes[last] ^= 0x01;
+    let error = Frame::parse(&bytes).expect_err("the checksum disagrees");
+    assert_eq!(error.code(), "infinity/stream-hash", "{error}");
+}
+
+/// `try_new` is the fallible constructor for a payload size from input; `new`
+/// keeps its documented panic for a caller bug.
+#[test]
+fn frame_try_new_refuses_an_oversized_payload() {
+    let error = Frame::try_new(
+        FrameKind::Batch,
+        0,
+        vec![0u8; MAX_FRAME_PAYLOAD as usize + 1],
+    )
+    .expect_err("the payload cannot fit a frame");
+    assert_eq!(error.code(), "infinity/too-large", "{error}");
+    assert!(Frame::try_new(FrameKind::Batch, 0, vec![0u8; 8]).is_ok());
+}

@@ -35,6 +35,10 @@ use active_infinity::{
 /// down why the code is unreachable from bytes.
 const NON_IMAGE_CLASSES: &[(&str, &str)] = &[
     (
+        "infinity/error",
+        "FFI fallback when a code cannot be represented; never returned by the codec",
+    ),
+    (
         "infinity/invalid-argument",
         "caller-supplied argument (offset, depth, tag) outside its range",
     ),

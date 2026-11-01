@@ -166,7 +166,7 @@ fn a_fragment_in_a_label_is_refused() {
     module.set_root(Some(root));
     let error = encode(&module).expect_err("a fragment in a field name is refused");
     assert_eq!(error.code(), "infinity/encode", "{error}");
-    assert!(error.to_string().contains("label"), "{error}");
+    assert!(error.to_string().contains("stored text"), "{error}");
 }
 
 /// The blob scan charges a pass over the payload, not the worst-case product:

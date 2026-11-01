@@ -167,7 +167,11 @@ impl<'a> Validated<'a> {
                     streamed: header.flags & crate::layout::FLAG_STREAMED != 0,
                 },
             )
-            .map_err(|_| Error::NotCanonical)?;
+            .map_err(|error| match error {
+                // A ceiling is not a canonicality answer.
+                Error::Limit { .. } => error,
+                _ => Error::NotCanonical,
+            })?;
             if image != buf {
                 return Err(Error::NotCanonical);
             }

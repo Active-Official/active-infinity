@@ -72,12 +72,11 @@ fn a_delta_frame_cannot_buy_more_than_its_wire_bytes() {
     }
 
     // 64 KiB of five-byte `SetRoot` ops: ~13k ops, 1.9 MB decoded.
-    let ops = (64 * 1024) / 5;
+    let ops = 800; // five-byte ops that fit the frame ceiling, ~115 KB decoded
     let mut payload = Vec::with_capacity(4 + ops * 5);
     payload.extend_from_slice(&u32::try_from(ops).expect("count").to_le_bytes());
     for _ in 0..ops {
         payload.push(0); // SetRoot
-        payload.push(0); // Some
         payload.extend_from_slice(&0u32.to_le_bytes());
     }
     let frame = Frame {

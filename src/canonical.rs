@@ -145,7 +145,7 @@ pub(crate) fn prepare(module: &InfinityModule) -> Result<Prepared> {
         remap_node_in_place(&mut node, &remap)?;
         nodes.push(node);
     }
-    let nodes = nodes;
+    let mut nodes = nodes;
 
     let root = module.root().map(|id| remap[id.index()]);
     let mut bindings: Vec<(String, NodeId)> = module
@@ -203,6 +203,14 @@ pub(crate) fn prepare(module: &InfinityModule) -> Result<Prepared> {
             AnnotationKind::AiImmutable(_) => {}
         }
     }
+    for node in &mut nodes {
+        if let Inode::SchemaField(spec) = node {
+            if let Some(text) = &mut spec.deprecated {
+                // A deprecation note is stored prose, exactly like an annotation.
+                *text = try_redact_text_with(text, &secret_literals, &redaction)?;
+            }
+        }
+    }
     let provenance = module
         .provenance()
         .cloned()
@@ -211,7 +219,7 @@ pub(crate) fn prepare(module: &InfinityModule) -> Result<Prepared> {
     if !fragments.is_empty() {
         reject_fragments_in_annotations(&annotations, &fragments)?;
         reject_fragments_in_provenance(provenance.as_ref(), &fragments)?;
-        reject_fragments_in_labels(module, &fragments)?;
+        reject_fragments_in_labels(&nodes, &bindings, module, &fragments)?;
     }
     if let Some(prov) = &provenance {
         if let Some(producer) = &prov.producer {
@@ -303,7 +311,14 @@ pub(crate) fn prepare(module: &InfinityModule) -> Result<Prepared> {
             blobs.push(BlobPayload {
                 hash: *hash,
                 size: *size,
-                payload: if *tainted { None } else { payload.clone() },
+                // An empty payload and a detached blob encode to the same
+                // (hash, offset, 0) record; keying them apart would emit two
+                // duplicate records the validator refuses.
+                payload: if *tainted {
+                    None
+                } else {
+                    payload.clone().filter(|bytes| !bytes.is_empty())
+                },
             });
         }
     }
@@ -562,6 +577,10 @@ fn redact_provenance(
     secrets: &[String],
     budget: &std::cell::Cell<usize>,
 ) -> Result<Provenance> {
+    // The validator refuses an empty producer; the encoder must not emit one.
+    if prov.producer.as_deref() == Some("") {
+        return Err(Error::Encode("empty provenance producer"));
+    }
     if secrets.is_empty() {
         return Ok(prov);
     }
@@ -674,9 +693,10 @@ fn scan_payload(
         if secret.is_empty() || secret.len() > payload.len() {
             continue;
         }
-        // The scan is a first-byte filter plus a compare on candidates, so one
-        // pass costs about the payload length. Charging the worst-case product
-        // refused ordinary blobs (1 MiB payload + a 100-byte secret).
+        // One pass costs the payload length (first-byte filter), plus a full
+        // compare at each candidate position. Charging both is the real work: a
+        // worst-case `windows()` sweep is m times this, and charging only the
+        // pass let a 64 KiB prefix-matching secret burn 61 GB of comparisons.
         *work = work.saturating_add(payload.len());
         if *work > MAX_SECRET_SCAN_BYTES {
             return Err(Error::Limit {
@@ -684,11 +704,22 @@ fn scan_payload(
                 limit: MAX_SECRET_SCAN_BYTES as u64,
             });
         }
-        if payload
-            .windows(secret.len())
-            .any(|window| window == secret.as_slice())
-        {
-            return Err(Error::Encode(reason));
+        let first = secret[0];
+        let mut at = 0usize;
+        while at + secret.len() <= payload.len() {
+            if payload[at] == first {
+                *work = work.saturating_add(secret.len());
+                if *work > MAX_SECRET_SCAN_BYTES {
+                    return Err(Error::Limit {
+                        kind: "secret copy scan bytes",
+                        limit: MAX_SECRET_SCAN_BYTES as u64,
+                    });
+                }
+                if &payload[at..at + secret.len()] == secret.as_slice() {
+                    return Err(Error::Encode(reason));
+                }
+            }
+            at += 1;
         }
     }
     Ok(())
@@ -809,14 +840,22 @@ fn reject_fragments_in_provenance(
     Ok(())
 }
 
-/// Structural labels are stored verbatim, so a fragment in one would sit in the
-/// public string heap; refuse it instead of publishing it.
-fn reject_fragments_in_labels(module: &InfinityModule, fragments: &[String]) -> Result<()> {
-    let mut hit = module
-        .bindings()
+/// Structural and expression text is stored verbatim, so a fragment in one
+/// would sit in the public string heap; refuse it instead of publishing it.
+///
+/// Runs on the *canonical* node set, so a label on a dropped node cannot refuse
+/// an encode. Covers every textual surface `Inode::strings` interns (and the
+/// strings of annotation expression subtrees, which are metadata here).
+fn reject_fragments_in_labels(
+    nodes: &[Inode],
+    bindings: &[(String, NodeId)],
+    module: &InfinityModule,
+    fragments: &[String],
+) -> Result<()> {
+    let mut hit = bindings
         .iter()
         .any(|(name, _)| contains_fragment(name, fragments));
-    for node in module.nodes() {
+    for node in nodes {
         if hit {
             break;
         }
@@ -830,11 +869,78 @@ fn reject_fragments_in_labels(module: &InfinityModule, fragments: &[String]) -> 
                 ..
             } => contains_fragment(name, fragments),
             Inode::Blob { media_type, .. } => contains_fragment(media_type, fragments),
+            Inode::Ident(text) => contains_fragment(text, fragments),
+            Inode::Constrained { constraint, .. } => match constraint {
+                Constraint::Enum(members) => members
+                    .iter()
+                    .any(|member| contains_fragment(member, fragments)),
+                Constraint::Pattern(text) | Constraint::Custom(text) => {
+                    contains_fragment(text, fragments)
+                }
+                Constraint::MinMax { .. } | Constraint::Odd => false,
+            },
+            Inode::Patch(op) => match op {
+                PatchOp::Set { path, .. } | PatchOp::Remove { path } => {
+                    contains_fragment(path, fragments)
+                }
+                PatchOp::Rename { from, to } => {
+                    contains_fragment(from, fragments) || contains_fragment(to, fragments)
+                }
+            },
+            Inode::SchemaField(spec) => {
+                let enum_hit = matches!(&spec.typ, TypeSpec::Enum(items) if items.iter().any(|item| contains_fragment(item, fragments)));
+                enum_hit
+                    || spec
+                        .deprecated
+                        .as_deref()
+                        .is_some_and(|text| contains_fragment(text, fragments))
+            }
+            Inode::Interpolate { parts } => parts.iter().any(|part| match part {
+                InterpPart::Literal(text) => contains_fragment(text, fragments),
+                InterpPart::Expr(_) => false,
+            }),
             _ => false,
         };
     }
+    // A constraint expression subtree is metadata: its strings are stored too.
+    if !hit {
+        let mut stack: Vec<NodeId> = module
+            .annotations()
+            .iter()
+            .filter_map(|annotation| match &annotation.kind {
+                AnnotationKind::Constraint { expr, .. } => Some(*expr),
+                _ => None,
+            })
+            .collect();
+        let mut visited = vec![false; nodes.len()];
+        while let Some(id) = stack.pop() {
+            if id.index() >= nodes.len() || visited[id.index()] {
+                continue;
+            }
+            visited[id.index()] = true;
+            match &nodes[id.index()] {
+                Inode::Str(text) | Inode::Ident(text) => {
+                    if contains_fragment(text, fragments) {
+                        hit = true;
+                        break;
+                    }
+                }
+                Inode::Interpolate { parts } => {
+                    hit = parts.iter().any(|part| match part {
+                        InterpPart::Literal(text) => contains_fragment(text, fragments),
+                        InterpPart::Expr(_) => false,
+                    });
+                    if hit {
+                        break;
+                    }
+                }
+                _ => {}
+            }
+            stack.extend(nodes[id.index()].children());
+        }
+    }
     if hit {
-        return Err(Error::Encode("a secret fragment occurs in a stored label"));
+        return Err(Error::Encode("a secret fragment occurs in stored text"));
     }
     Ok(())
 }
@@ -1714,6 +1820,9 @@ fn type_payload(
     let mut aux = Vec::new();
     match &spec.typ {
         TypeSpec::Enum(items) => {
+            if items.is_empty() {
+                return Err(Error::Encode("enum type without members"));
+            }
             // An enum is a set of members: sort before interning so two modules
             // that differ only in member order produce one type table (and one
             // content hash). The IR keeps the author's order; the canonical form

@@ -166,10 +166,10 @@ impl Frame {
 
     /// Parse one frame, returning it and the number of bytes consumed.
     ///
-    /// A buffer shorter than the magic is `infinity/stream-magic`: the first four
-    /// bytes identify the format, exactly as the file codec does. A buffer with
-    /// the magic but not the whole header is `infinity/truncated`, which is what
-    /// [`StreamDecoder::push_bytes`] uses to decide to wait for more input.
+    /// A buffer shorter than four bytes is `infinity/truncated` (the wait
+    /// signal a network reader needs); four bytes or more with a wrong magic is
+    /// `infinity/stream-magic`. A buffer with the magic but not the whole header
+    /// is also `infinity/truncated`.
     pub fn parse(buf: &[u8]) -> Result<(Frame, usize)> {
         if buf.len() < 4 {
             // Not enough bytes to identify the format: a network reader must
@@ -876,6 +876,8 @@ pub struct StreamDecoder {
     pending_delta_bytes: u64,
     /// Image bytes of every completed generation in this decoder.
     generation_work: u64,
+    /// Decoded bytes held by pending `PutNode` fragments.
+    pending_decoded_bytes: u64,
     /// Set when the work ceiling fired; every later frame is refused without
     /// doing the work again.
     generation_stopped: bool,
@@ -917,6 +919,7 @@ impl StreamDecoder {
             pending_deltas: Vec::new(),
             pending_delta_bytes: 0,
             generation_work: 0,
+            pending_decoded_bytes: 0,
             generation_stopped: false,
             frames: 0,
             partial: Vec::new(),
@@ -981,7 +984,33 @@ impl StreamDecoder {
                 }
                 // A short buffer is not an error: wait for the rest of the
                 // frame. Every other parse fault is fatal for this buffer.
-                Err(Error::Truncated { .. }) => break,
+                Err(Error::Truncated { .. }) => {
+                    // A frame whose declared payload can never fit the caller's
+                    // image ceiling would be buffered up to MAX_FRAME_PAYLOAD.
+                    // Header faults (flags, kind, reserved) were already reported
+                    // by `parse`, so this only sees a well-formed header.
+                    let at = consumed_total;
+                    if self.partial.len() >= at + 20 {
+                        let declared = u32::from_le_bytes([
+                            self.partial[at + 16],
+                            self.partial[at + 17],
+                            self.partial[at + 18],
+                            self.partial[at + 19],
+                        ]) as u64;
+                        if declared <= MAX_FRAME_PAYLOAD as u64
+                            && declared > self.limits.max_total_bytes
+                        {
+                            if at > 0 {
+                                self.partial.drain(..at);
+                            }
+                            return Err(Error::Limit {
+                                kind: "stream frame bytes",
+                                limit: self.limits.max_total_bytes,
+                            });
+                        }
+                    }
+                    break;
+                }
                 Err(error) => {
                     if consumed_total > 0 {
                         self.partial.drain(..consumed_total);
@@ -1043,6 +1072,12 @@ impl StreamDecoder {
             return Err(Error::StreamFrameLen {
                 declared: u32::try_from(frame.payload.len()).unwrap_or(u32::MAX),
                 available: frame.payload.len() as u64,
+            });
+        }
+        if frame.payload.len() as u64 > self.limits.max_total_bytes {
+            return Err(Error::Limit {
+                kind: "stream frame bytes",
+                limit: self.limits.max_total_bytes,
             });
         }
         match frame.kind {
@@ -1208,7 +1243,11 @@ impl StreamDecoder {
                     .len()
                     .saturating_add(count as usize)
                     .saturating_mul(std::mem::size_of::<DeltaOp>());
-                let held = decoded.saturating_add(self.pending_delta_bytes as usize) as u64;
+                let held = decoded
+                    .saturating_add(usize::try_from(self.pending_delta_bytes).unwrap_or(usize::MAX))
+                    .saturating_add(
+                        usize::try_from(self.pending_decoded_bytes).unwrap_or(usize::MAX),
+                    ) as u64;
                 if held > self.limits.max_total_bytes {
                     return Err(Error::Limit {
                         kind: "delta decoded bytes",
@@ -1227,11 +1266,38 @@ impl StreamDecoder {
                     });
                 }
                 for _ in 0..count {
-                    self.pending_deltas.push(DeltaOp::decode(
-                        &frame.payload,
-                        &mut cursor,
-                        self.limits,
-                    )?);
+                    let op = DeltaOp::decode(&frame.payload, &mut cursor, self.limits)?;
+                    if let DeltaOp::PutNode { fragment, .. } = &op {
+                        // A fragment is a full module; its decoded nodes and
+                        // field entries are the memory this delta buys (a table
+                        // of a million fields is two nodes).
+                        let entries: u64 = fragment
+                            .nodes()
+                            .iter()
+                            .map(|node| match node {
+                                crate::ir::Inode::Table { fields }
+                                | crate::ir::Inode::SchemaTable { fields, .. } => {
+                                    fields.len() as u64
+                                }
+                                _ => 0,
+                            })
+                            .fold(0u64, |total, count| total.saturating_add(count));
+                        let decoded_nodes = (fragment.node_count() as u64)
+                            .saturating_mul(std::mem::size_of::<crate::ir::Inode>() as u64 + 32)
+                            .saturating_add(entries.saturating_mul(40));
+                        self.pending_decoded_bytes =
+                            self.pending_decoded_bytes.saturating_add(decoded_nodes);
+                        let held = self
+                            .pending_decoded_bytes
+                            .saturating_add(self.pending_delta_bytes);
+                        if held > self.limits.max_total_bytes {
+                            return Err(Error::Limit {
+                                kind: "delta decoded bytes",
+                                limit: self.limits.max_total_bytes,
+                            });
+                        }
+                    }
+                    self.pending_deltas.push(op);
                 }
                 if cursor != frame.payload.len() {
                     return Err(Error::StreamDelta("trailing bytes in delta payload"));
@@ -1266,7 +1332,13 @@ impl StreamDecoder {
                         .pending_deltas
                         .len()
                         .saturating_mul(std::mem::size_of::<DeltaOp>());
-                    self.charge_generation(estimate.max(ops))?;
+                    // The merge re-processes the pending fragments on every
+                    // retry, and their cost is their bytes: a `PutNode` decoy
+                    // otherwise buys an arbitrarily expensive merge for the
+                    // price of the base image.
+                    let pending =
+                        usize::try_from(self.pending_delta_bytes).map_err(|_| Error::TooLarge)?;
+                    self.charge_generation(estimate.max(ops).max(pending))?;
                     let base = self
                         .module
                         .as_ref()
@@ -1306,6 +1378,7 @@ impl StreamDecoder {
                     // The budget covers one generation's pending deltas; a
                     // long-lived session must not accumulate across generations.
                     self.pending_delta_bytes = 0;
+                    self.pending_decoded_bytes = 0;
                     self.module = Some(module);
                     self.image = Some(image);
                     return Ok(());

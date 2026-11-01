@@ -786,7 +786,15 @@ fn build_node_tables(prepared: &Prepared) -> Result<NodeTables> {
                 media_type,
                 payload,
             } => {
-                let key = (*hash, *size, if *tainted { None } else { payload.clone() });
+                let key = (
+                    *hash,
+                    *size,
+                    if *tainted {
+                        None
+                    } else {
+                        payload.clone().filter(|bytes| !bytes.is_empty())
+                    },
+                );
                 let index = *prepared
                     .blob_index
                     .get(&key)

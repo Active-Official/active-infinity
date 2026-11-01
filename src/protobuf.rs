@@ -441,30 +441,39 @@ fn check_size(out: &[u8]) -> Result<()> {
 /// a module with many secrets and many large payloads is refused with
 /// `infinity/limit` instead of scanning quadratically.
 fn carries_secret(payload: &[u8], secrets: &[Vec<u8>], work: &mut usize) -> Result<bool> {
-    // Each window comparison costs the secret's length, so charge by the bytes
-    // compared rather than by the window count alone. A secret longer than the
-    // payload can never match and must not be charged (that overcharge refused
-    // modules the encoder accepts).
-    let mut charge = 0usize;
     for secret in secrets {
         if secret.is_empty() || secret.len() > payload.len() {
             continue;
         }
-        charge =
-            charge.saturating_add((payload.len() - secret.len() + 1).saturating_mul(secret.len()));
+        // Same accounting as the encoder: one pass plus one compare per
+        // candidate position. The worst-case product refused modules `encode`
+        // accepted.
+        *work = work.saturating_add(payload.len());
+        if *work > crate::canonical::MAX_SECRET_SCAN_BYTES {
+            return Err(Error::Limit {
+                kind: "protobuf secret scan bytes",
+                limit: crate::canonical::MAX_SECRET_SCAN_BYTES as u64,
+            });
+        }
+        let first = secret[0];
+        let mut at = 0usize;
+        while at + secret.len() <= payload.len() {
+            if payload[at] == first {
+                *work = work.saturating_add(secret.len());
+                if *work > crate::canonical::MAX_SECRET_SCAN_BYTES {
+                    return Err(Error::Limit {
+                        kind: "protobuf secret scan bytes",
+                        limit: crate::canonical::MAX_SECRET_SCAN_BYTES as u64,
+                    });
+                }
+                if &payload[at..at + secret.len()] == secret.as_slice() {
+                    return Ok(true);
+                }
+            }
+            at += 1;
+        }
     }
-    *work = work.saturating_add(charge);
-    if *work > crate::canonical::MAX_SECRET_SCAN_BYTES {
-        return Err(Error::Limit {
-            kind: "protobuf secret scan bytes",
-            limit: crate::canonical::MAX_SECRET_SCAN_BYTES as u64,
-        });
-    }
-    Ok(secrets.iter().any(|secret| {
-        !secret.is_empty()
-            && secret.len() <= payload.len()
-            && payload.windows(secret.len()).any(|window| window == secret)
-    }))
+    Ok(false)
 }
 
 fn encode_annotation(

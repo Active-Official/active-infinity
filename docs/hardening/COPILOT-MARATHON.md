@@ -1298,3 +1298,41 @@ The encoder now also refuses to emit a no-op delta its own decoder rejects
 
 Gate: 441 library/integration, 42 CLI, 27 FFI, clippy clean both feature sets,
 fmt clean.
+
+### Re-audit round 11 (I-12) and round 7 (I-13) - 2026-11-01
+
+**I-12 round 11** verified the round-10 fixes and found one high, eight mediums
+and three lows. All but the contract note are fixed; nine tests pin the
+behaviour.
+
+| # | Sev | Finding | Disposition |
+|---|-----|---------|-------------|
+| F1 | high | `scan_payload` charged one pass but ran a `windows()` sweep, whose worst case is `m` times the charge (1 MiB payload + 64 KiB prefix-matching secret: 3.64 s, ~61 GB compared) | **fixed**: first-byte filter plus a full compare per candidate, both charged before the compare, so a prefix-heavy payload trips `infinity/limit` quickly |
+| F2 | medium | the protobuf scan still charged the worst-case product, refusing modules `encode` accepts | **fixed**: same filter/charge algorithm as the encoder |
+| F3 | medium | `SchemaFieldSpec.deprecated` was stored verbatim although `Debug` redacts it | **fixed**: redacted with the shared metadata budget |
+| F4 | medium | the fragment refusal missed `Constraint`, patch paths, enum type members, `deprecated` and ran on dropped nodes | **fixed**: one scan over the canonical reachable nodes covers every `Inode::strings` surface; annotation expression subtrees are included |
+| F5 | medium | annotation `expr` subtrees bypassed the fragment policy | **fixed** by the same scan |
+| F6 | medium | `structurally_eq` ignores secret order while the hash includes it | **documented**: the contract now says content identity includes the relative order of secret entries; a wire change needs an ADR |
+| F7 | medium | an empty enum type encoded but the validator refused it | **fixed**: `infinity/encode` |
+| F8 | medium | an empty provenance producer encoded but the validator refused it | **fixed**: `infinity/encode` |
+| F9 | medium | an empty materialised blob and a detached blob with the same hash emitted duplicate records | **fixed**: an empty payload is keyed as absent in the blob table (the node flag still round-trips) |
+| F10 | low | a re-encode ceiling fault was flattened to `not-canonical` | **fixed**: `infinity/limit` is preserved |
+| F11 | low | annotations that redact to the same text are silently merged | open; refused for provenance, documented for annotations |
+| F12 | low | `Prepared.secrets` and redaction `String`s are not zeroized | open; the image carries secret bytes by design, this is heap residue |
+
+**I-13 round 7** found the work ceiling was still numerically bypassable:
+a `PutNode` fragment's merge cost was not charged (critical), and the decoded
+state did not cover fragment modules (high), plus the frame buffer ignored the
+caller's ceiling (medium).
+
+| # | Sev | Finding | Disposition |
+|---|-----|---------|-------------|
+| R7-1 | critical | a replayed wrong-hash `End` re-merged pending `PutNode` fragments for the price of the base image (measured 101 ms per replay, 40 replays free) | **fixed**: the charge includes `pending_delta_bytes`; `a_wrong_hash_end_with_a_pending_putnode_cannot_be_replayed_free` (fails pre-fix) |
+| R7-2 | high | the decoded-state bound counted `size_of::<DeltaOp>()` but not a fragment's nodes or field entries (9-14x peak) | **fixed**: a fragment contributes `nodes*96 + field_entries*40`, checked before retention; a field-heavy fragment test (fails pre-fix) |
+| R7-3 | medium | the frame buffer ignored `max_total_bytes` (8 MiB buffered under a 1 KiB ceiling) | **fixed**: a truncated frame whose declared length exceeds the ceiling is `infinity/limit`; the check runs after header faults so `stream-flags` still wins |
+| R7-4 | low | `pending_delta_bytes as usize` truncated on 32-bit | **fixed** |
+| R7-5 | low | the `Frame::parse` doc said a short buffer is `stream-magic` | **fixed** |
+| R7-8 | low | a round-6 test claimed five-byte ops but wrote six | **fixed** |
+
+Gate: 445 library/integration, 42 CLI, 27 FFI, clippy clean both feature sets,
+fmt clean.

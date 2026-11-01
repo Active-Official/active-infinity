@@ -24,3 +24,4 @@ rpc/.bsp/
 rpc/.scala-build/
 rpc/build/
 */*.dll
+*/*.dll.a

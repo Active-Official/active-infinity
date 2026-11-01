@@ -1079,3 +1079,28 @@ I-14 round 4 (bindings):
 
 The in-repo C ABI changes from round 3 (silent `alloc`, matching docs) are
 verified by the FFI suite.
+
+### Binding fixes (I-14 round 4 follow-up) and projection round 6 - 2026-10-31
+
+Committed `f259015` and `5a27749`, both pushed; CI green on `f259015`.
+
+Bindings (`f259015`):
+
+| Item | Change | Evidence |
+|---|---|---|
+| JNI capacity | `out_len[0]` is clamped to `GetArrayLength(output)` before the write, in both `output_call` and `fromActive` | compiles in CI's Java lane |
+| Go WASM entropy | `fillRandom` returns an error and the host function fails (returns 1) instead of zero-filling | `TestAllocationRefusalIsInfinityLimit` + the Go conformance lane |
+| AssemblyScript lengths | `copyFromAs` clips to the AS heap and returns the clipped length, which is passed to the reference; `runOutput` reads the caller's capacity from **AS memory** and returns `-2` with the required size when it is too small; a null `alloc` throws `infinity/limit` | `node polyglot/assemblyscript/test.js` PASS (test now sets the capacity) |
+| Null `alloc` | Ruby, PHP, Lua, C#, Dart, JS, AS and Go raise `infinity/limit` instead of writing through address zero | JS guard test (fails pre-fix), Go test, plus the full matrix in CI |
+| AS test contract | the three `outLen` buffers are initialised with their capacity | AS conformance PASS |
+
+Projection (`5a27749`, I-12 round-6 pre-work):
+
+| Item | Change | Evidence |
+|---|---|---|
+| Metadata redaction budget | `encode_provenance`/`encode_annotation`/binding names now draw on the same `PROJECTION_REDACTION_BUDGET` and return `Result` | `protobuf_metadata_redaction_draws_the_shared_budget` (fails pre-fix: it scanned for free) |
+| Duplicate binding names | two names that redact to one key are refused with `infinity/encode` | `duplicate_redacted_binding_names_are_refused` (fails pre-fix) |
+| Placeholder cost | `hiding_placeholder` is computed once per projection, not per node | code change; behaviour tests unchanged |
+| Taint order | `secret_tainted_paths` runs one reverse-BFS pass instead of a depth-sized fixpoint | behaviour tests unchanged |
+
+Gate: 383 library/integration tests, clippy clean both feature sets.

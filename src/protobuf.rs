@@ -291,8 +291,25 @@ pub fn to_protobuf(module: &InfinityModule) -> Result<Vec<u8>> {
     // One budget for the whole projection: a binding that aliases the root's
     // DAG must not get a fresh 100k allowance per binding.
     let mut budget = 0usize;
+    let mut redaction = crate::interop::PROJECTION_REDACTION_BUDGET;
     if let Some(root) = module.root() {
-        let value = project_node_with(module, root, &secrets, &mut budget)?;
+        let value = project_node_with(
+            module,
+            root,
+            &secrets,
+            &raw_secrets,
+            &mut budget,
+            &mut redaction,
+        )?;
+        // The body is built before its length prefix, so the peak is the body
+        // plus the finished buffer. A value that could not fit half the cap is
+        // refused before either allocation.
+        if projected_size(&value) > MAX_PROTOBUF_BYTES / 2 {
+            return Err(Error::Limit {
+                kind: "protobuf projection bytes",
+                limit: MAX_PROTOBUF_BYTES as u64,
+            });
+        }
         let mut body = Vec::new();
         encode_value(&value, &mut body);
         check_size(&body)?;
@@ -301,7 +318,20 @@ pub fn to_protobuf(module: &InfinityModule) -> Result<Vec<u8>> {
     }
 
     for (name, id) in module.bindings() {
-        let value = project_node_with(module, *id, &secrets, &mut budget)?;
+        let value = project_node_with(
+            module,
+            *id,
+            &secrets,
+            &raw_secrets,
+            &mut budget,
+            &mut redaction,
+        )?;
+        if projected_size(&value) > MAX_PROTOBUF_BYTES / 2 {
+            return Err(Error::Limit {
+                kind: "protobuf projection bytes",
+                limit: MAX_PROTOBUF_BYTES as u64,
+            });
+        }
         let mut binding = Vec::new();
         string(&mut binding, 1, &redacted_key(name, &secrets));
         let mut encoded = Vec::new();
@@ -338,6 +368,39 @@ pub fn to_protobuf(module: &InfinityModule) -> Result<Vec<u8>> {
     }
 
     Ok(out)
+}
+
+/// Upper bound on the encoded size of a projected value.
+///
+/// Every field costs one tag byte plus a varint length, and text dominates the
+/// payload, so this is a safe over-estimate that never under-counts.
+fn projected_size(value: &Projected) -> usize {
+    let nested = |items: &[Projected]| -> usize {
+        items.iter().fold(0usize, |sum, item| {
+            sum.saturating_add(8 + projected_size(item))
+        })
+    };
+    match value {
+        Projected::Null | Projected::Bool(_) | Projected::Int(_) | Projected::Float(_) => 16,
+        Projected::Text(text) | Projected::Env(text) => 8usize.saturating_add(text.len()),
+        Projected::Expr(text) => 8usize.saturating_add(text.len()),
+        Projected::DurationMs(_) => 16,
+        Projected::Quantity(inner, unit) => 16usize
+            .saturating_add(unit.len())
+            .saturating_add(projected_size(inner)),
+        Projected::Array(items) => 8usize.saturating_add(nested(items)),
+        Projected::Record(fields) => {
+            let mut total = 8usize;
+            for (key, value) in fields {
+                total = total
+                    .saturating_add(8)
+                    .saturating_add(key.len())
+                    .saturating_add(projected_size(value));
+            }
+            total
+        }
+        Projected::Blob { media_type, .. } => 80usize.saturating_add(media_type.len()),
+    }
 }
 
 fn check_size(out: &[u8]) -> Result<()> {

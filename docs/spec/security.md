@@ -64,6 +64,10 @@ that would violate one stops and needs an ADR.
 | Frame splicing / reordering | sequence numbers, per-frame checksum, strict section order | `stream.rs` |
 | Stream hash substitution | `End` hash compared with the reassembled image | `stream.rs` |
 | Tainted payload smuggling | tainted blob entries must have zero-length payloads | `check_nodes` |
+| Secret copied into a 32-byte hash (provenance parent, provenance entry, blob hash) | refused at encode; projections substitute the placeholder | `canonical::reject_secret_copies`, `interop::projection` |
+| Marker collides with a secret (`SECRET`, `S`) | the projection substitutes the empty string, which never contains a secret; the encoder refuses a copy instead | `interop::hiding_placeholder` |
+| Redaction CPU amplification | one 256 MiB scan budget per projection, charged before each scan | `interop::PROJECTION_REDACTION_BUDGET` |
+| Field forgery in `provenance_lines` | `\n`, `\r`, `=` and `\` are escaped in keys and values | `interop::escape_line` |
 | Unbounded stream growth | declared size bounded by `Limits::max_total_bytes` | `stream.rs` |
 
 ## 4. Non-goals
@@ -80,6 +84,11 @@ that would violate one stops and needs an ADR.
   length, is a CRIME-style oracle. When an adversary can observe lengths,
   compress the redacted projection (`interop`) instead of an image that carries
   secrets; the `zstd` helper cannot decide that for the caller.
+- **Tainted blob identity.** A tainted blob projects its Blake3 hash, size and
+  taint flag by design: identity is what lets a consumer address it. A
+  secret-derived payload with low entropy can therefore be confirmed by hashing
+  guesses. Use a salted or keyed hash upstream when that matters, or withhold
+  the projection; the codec cannot key a hash it does not hold the key for.
 - **Side channels.** Constant-time comparison of secrets is meaningless when
   equality is always false; timing of the *validator* is proportional to input
   size by design.

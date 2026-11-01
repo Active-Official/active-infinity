@@ -25,7 +25,7 @@ the code → regression test first → minimal fix → targeted tests + clippy �
 | I-09 | compress | `src/compress.rs`, CLI `dict` | **CLEAN** (round 3: 5 more fixed) | 16 fixed, 4 rejected/documented | this commit |
 | I-10 | signature / proof | `src/signature.rs`, `src/proof.rs` | **CLEAN** (round 3: weak keys, code mapping) | 10 fixed, 2 rejected/documented | this commit |
 | I-11 | merge | `src/merge.rs` | **CLEAN** (round 2: width/byte budgets) | 11 fixed, 1 rejected | this commit |
-| I-12 | interop / protobuf | `src/interop.rs`, `src/protobuf.rs` | **CLEAN** | 6 fixed, 1 rejected | this commit |
+| I-12 | interop / protobuf | `src/interop.rs`, `src/protobuf.rs` | **CLEAN** (round 2: blob hash, marker, budget) | 12 fixed, 2 rejected/documented | this commit |
 | I-13 | error codes | `src/error.rs` | **CLEAN** | 6 fixed, 2 rejected | this commit |
 | I-14 | FFI | `ffi/**` | **CLEAN** | 12 fixed, 3 documented | this commit |
 | I-15 | CLI | `cli/active-infinity-cli/**` | **CLEAN** | 13 fixed, 2 documented | this commit |
@@ -798,3 +798,24 @@ Reviewer scope: `src/merge.rs`. Round-1 fixes verified holding. Findings:
 
 Gate: 358 library/integration tests, clippy clean both feature sets; 3 new tests
 (2 integration, 1 unit) proved to fail against the pre-fix tree.
+
+### Re-audit round 2 (I-12) - 2026-10-31
+
+Reviewer scope: `src/interop.rs`, `src/protobuf.rs`, `src/canonical.rs` (the
+copy gate). Round-1 fixes verified holding. Findings: 1 critical, 2 high,
+3 medium, 3 low.
+
+| # | Severity | Finding | Disposition |
+|---|---|---|---|
+| 1 | critical | a blob `hash` was never compared with the secret table, and every projection publishes it verbatim (hex in JSON, raw bytes in protobuf). A 32-byte secret copied there left through the projection; the encoder allowed it because it only checked provenance and extensions | **fixed**: `reject_secret_copies` walks blobs and refuses `blob hash equals a secret`, and `build_projected` refuses a hand-built module the same way; `a_blob_hash_that_copies_a_secret_is_refused` (fails pre-fix) |
+| 2 | high | when a secret is a substring of `SECRET_MARKER` (`SECRET`, `S`, `*`), inserting the marker publishes the secret; `redacted_value` and the secret-node arm inserted it unconditionally | **fixed**: `hiding_placeholder` returns the empty string when the marker contains a secret, and every substitution uses it; `a_secret_inside_the_marker_is_never_published` (fails pre-fix) |
+| 3 | high | redaction had a 64 MiB per-call cap but no projection-wide budget, so 100k strings each under the cap multiplied it without bound | **fixed**: one 256 MiB `PROJECTION_REDACTION_BUDGET` charged before each scan, threaded through `build_projected`; `the_projection_redaction_budget_is_shared` (fails pre-fix) |
+| 4 | medium | `to_redacted_json` emitted fields in construction order while protobuf projects the canonical decode, so two modules with equal images produced different JSON | **fixed**: record fields are sorted by redacted name, and two names that redact to one key are refused; `projection_order_follows_the_content_not_the_construction` (fails pre-fix) |
+| 5 | medium | `provenance_lines` interpolated free text into `key=value` without escaping, so a newline or `=` forged a field | **fixed**: `escape_line` escapes `\`, `\n`, `\r` and `=` in keys and values; `provenance_lines_escape_free_text` (fails pre-fix) |
+| 6 | medium | `to_protobuf` built a value body before checking its size, so an 900 MB string peaked at roughly twice that before the refusal | **fixed**: `projected_size` (a proved over-estimate) refuses a value above half the cap before either allocation, and the post-encode check stays |
+| 7 | low | a tainted blob publishes its hash and size, which confirms guesses about a low-entropy secret | **documented residual**: `docs/spec/security.md` §4 (use a salted hash upstream or withhold the projection); identity is the feature the field exists for |
+| 8 | low | `resolves_to_secret` followed only `Ref` and `Semantic`, so a secret behind `Constrained`, `Quantity`, `Unary`, `Binary`, `Env` default, `Patch::Set`, `ContentAddressed` or `Interpolate` was treated as untainted and rendered as its shape | **fixed**: every transparent wrapper recurses, so the outer text becomes the marker; `a_secret_behind_a_wrapper_taints_the_interpolation` (fails pre-fix) |
+
+Gate: 364 library/integration tests, clippy clean both feature sets; 6 new
+tests proved to fail against the pre-fix tree. The protobuf early refusal is
+exercised by code inspection only: a test would need a 512 MB value.

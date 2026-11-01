@@ -735,8 +735,18 @@ pub enum Projected {
 pub(crate) fn project_root(module: &InfinityModule) -> Result<Projected> {
     module.validate_structure(u32::MAX as u64, 4096)?;
     let secrets = secret_texts(module);
+    let hash_secrets = secret_bytes(module);
     let mut budget = 0usize;
-    build_projected(module, module.root(), &secrets, 0, &mut budget)
+    let mut redaction = PROJECTION_REDACTION_BUDGET;
+    build_projected(
+        module,
+        module.root(),
+        &secrets,
+        &hash_secrets,
+        0,
+        &mut budget,
+        &mut redaction,
+    )
 }
 
 /// The module's secret literals, for a caller that projects many nodes.
@@ -749,9 +759,116 @@ pub(crate) fn project_node_with(
     module: &InfinityModule,
     id: NodeId,
     secrets: &[String],
+    hash_secrets: &[Vec<u8>],
     budget: &mut usize,
+    redaction: &mut usize,
 ) -> Result<Projected> {
-    build_projected(module, Some(id), secrets, 0, budget)
+    build_projected(
+        module,
+        Some(id),
+        secrets,
+        hash_secrets,
+        0,
+        budget,
+        redaction,
+    )
+}
+
+/// Scanned bytes one projection may spend redacting.
+///
+/// A per-string ceiling bounds one scan; a module with many strings would
+/// otherwise multiply it, so every redaction in one projection draws from this
+/// single budget.
+pub(crate) const PROJECTION_REDACTION_BUDGET: usize = 256 << 20;
+
+/// The text a projection substitutes for secret material.
+///
+/// [`SECRET_MARKER`] unless a secret is itself a substring of the marker: then
+/// inserting the marker would publish that secret, and the only replacement
+/// that never contains a secret is the empty string.
+pub(crate) fn hiding_placeholder(secrets: &[String]) -> &'static str {
+    if secrets
+        .iter()
+        .any(|secret| !secret.is_empty() && SECRET_MARKER.contains(secret.as_str()))
+    {
+        ""
+    } else {
+        SECRET_MARKER
+    }
+}
+
+/// Redact free text for a projection, charging one shared scan budget.
+///
+/// When the marker is safe this is [`redact_text`]. When a secret occurs inside
+/// the marker, insertions are replaced by deletions and the pass repeats until
+/// the text is clean; a join that keeps recreating a secret collapses the whole
+/// value to the empty string.
+fn redact_within(text: &str, secrets: &[String], budget: &mut usize) -> Result<String> {
+    let cost = crate::canonical::redaction_cost(text, secrets);
+    if cost > *budget {
+        return Err(Error::Limit {
+            kind: "projection redaction scan bytes",
+            limit: PROJECTION_REDACTION_BUDGET as u64,
+        });
+    }
+    *budget -= cost;
+    if hiding_placeholder(secrets) == SECRET_MARKER {
+        return Ok(redact_text(text, secrets));
+    }
+    Ok(delete_secrets(text, secrets))
+}
+
+/// Remove every secret occurrence until the text is clean.
+///
+/// Used when [`SECRET_MARKER`] itself contains a secret and therefore cannot be
+/// inserted. Deleting can join the text around it into a new secret, so the
+/// pass repeats; a text that keeps recreating one collapses to empty.
+fn delete_secrets(text: &str, secrets: &[String]) -> String {
+    let mut out = text.to_string();
+    for _ in 0..8 {
+        let mut matched: Vec<&String> = secrets
+            .iter()
+            .filter(|secret| !secret.is_empty() && out.contains(secret.as_str()))
+            .collect();
+        if matched.is_empty() {
+            return out;
+        }
+        matched.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
+        for secret in matched {
+            out = out.replace(secret.as_str(), "");
+        }
+    }
+    String::new()
+}
+
+/// Escape free text for the `key=value` line codec: a newline or an `=` in a
+/// value would otherwise forge a field for a line-oriented consumer.
+fn escape_line(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for character in text.chars() {
+        match character {
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '=' => out.push_str("\\="),
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// A value-position string: the whole text becomes the placeholder as soon as
+/// it contains a secret literal.
+fn redacted_value_within(text: &str, secrets: &[String], budget: &mut usize) -> Result<String> {
+    let cost = crate::canonical::redaction_cost(text, secrets);
+    if cost > *budget {
+        return Err(Error::Limit {
+            kind: "projection redaction scan bytes",
+            limit: PROJECTION_REDACTION_BUDGET as u64,
+        });
+    }
+    *budget -= cost;
+    Ok(redacted_value(text, secrets))
 }
 
 /// A value-position string: the whole text becomes the marker as soon as it
@@ -762,7 +879,7 @@ pub(crate) fn redacted_value(text: &str, secrets: &[String]) -> String {
         .iter()
         .any(|secret| !secret.is_empty() && text.contains(secret.as_str()))
     {
-        SECRET_MARKER.to_string()
+        hiding_placeholder(secrets).to_string()
     } else {
         text.to_string()
     }
@@ -785,7 +902,10 @@ pub(crate) fn first_entry_per_key(entries: &[ProvEntry]) -> Vec<&ProvEntry> {
 /// key that merely contains a copy of a secret does not leak it. Same rule as
 /// [`redact_text`], including the marker-substring fixpoint.
 pub(crate) fn redacted_key(text: &str, secrets: &[String]) -> String {
-    redact_text(text, secrets)
+    if hiding_placeholder(secrets) == SECRET_MARKER {
+        return redact_text(text, secrets);
+    }
+    delete_secrets(text, secrets)
 }
 
 /// Whether a node resolves to secret material, following `Ref` and `Semantic`.
@@ -808,21 +928,56 @@ fn resolves_to_secret(
     }
     Ok(match module.get(id) {
         Some(Inode::Secret(_)) | Some(Inode::SecretRef { .. }) => true,
-        Some(Inode::Ref(inner)) => resolves_to_secret(module, *inner, depth + 1, budget)?,
-        Some(Inode::Semantic { inner, .. }) => {
+        // Every wrapper that passes a value through is transparent for taint:
+        // a secret reached through one of them must redact the outer string,
+        // not print its shape.
+        Some(Inode::Ref(inner) | Inode::Semantic { inner, .. }) => {
             resolves_to_secret(module, *inner, depth + 1, budget)?
+        }
+        Some(Inode::Quantity { value, .. }) => {
+            resolves_to_secret(module, *value, depth + 1, budget)?
+        }
+        Some(Inode::Unary { expr, .. }) => resolves_to_secret(module, *expr, depth + 1, budget)?,
+        Some(Inode::Binary { lhs, rhs, .. }) => {
+            resolves_to_secret(module, *lhs, depth + 1, budget)?
+                || resolves_to_secret(module, *rhs, depth + 1, budget)?
+        }
+        Some(Inode::Constrained { target, .. }) => {
+            resolves_to_secret(module, *target, depth + 1, budget)?
+        }
+        Some(Inode::Patch(crate::ir::PatchOp::Set { value, .. })) => {
+            resolves_to_secret(module, *value, depth + 1, budget)?
+        }
+        Some(Inode::ContentAddressed { data, .. }) => {
+            resolves_to_secret(module, *data, depth + 1, budget)?
+        }
+        Some(Inode::Env {
+            default: Some(fallback),
+            ..
+        }) => resolves_to_secret(module, *fallback, depth + 1, budget)?,
+        Some(Inode::Interpolate { parts }) => {
+            let mut found = false;
+            for part in parts {
+                if let crate::ir::InterpPart::Expr(inner) = part {
+                    found = found || resolves_to_secret(module, *inner, depth + 1, budget)?;
+                }
+            }
+            found
         }
         Some(node) => node.is_secret(),
         None => false,
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_projected(
     module: &InfinityModule,
     id: Option<NodeId>,
     secrets: &[String],
+    hash_secrets: &[Vec<u8>],
     depth: usize,
     budget: &mut usize,
+    redaction: &mut usize,
 ) -> Result<Projected> {
     if depth > PROJECTION_DEPTH {
         return Err(Error::Encode("projection nesting exceeds the limit"));
@@ -838,40 +993,76 @@ fn build_projected(
             Inode::Bool(flag) => Projected::Bool(*flag),
             Inode::Int(number) => Projected::Int(*number),
             Inode::Float(number) => Projected::Float(*number),
-            Inode::Str(text) => Projected::Text(redacted_value(text, secrets)),
-            Inode::Ident(text) => Projected::Text(redacted_key(text, secrets)),
+            Inode::Str(text) => Projected::Text(redacted_value_within(text, secrets, redaction)?),
+            Inode::Ident(text) => Projected::Text(redact_within(text, secrets, redaction)?),
             Inode::DurationMs(ms) => Projected::DurationMs(*ms),
             Inode::Quantity { value, unit } => Projected::Quantity(
                 Box::new(build_projected(
                     module,
                     Some(*value),
                     secrets,
+                    hash_secrets,
                     depth + 1,
                     budget,
+                    redaction,
                 )?),
-                redacted_key(unit.name(), secrets),
+                redact_within(unit.name(), secrets, redaction)?,
             ),
             Inode::Array { elements } => Projected::Array(
                 elements
                     .iter()
-                    .map(|id| build_projected(module, Some(*id), secrets, depth + 1, budget))
+                    .map(|id| {
+                        build_projected(
+                            module,
+                            Some(*id),
+                            secrets,
+                            hash_secrets,
+                            depth + 1,
+                            budget,
+                            redaction,
+                        )
+                    })
                     .collect::<Result<Vec<_>>>()?,
             ),
             Inode::Table { fields } => {
                 let mut projected = Vec::with_capacity(fields.len());
                 for (name, id) in fields {
                     projected.push((
-                        redacted_key(name, secrets),
-                        build_projected(module, Some(*id), secrets, depth + 1, budget)?,
+                        redact_within(name, secrets, redaction)?,
+                        build_projected(
+                            module,
+                            Some(*id),
+                            secrets,
+                            hash_secrets,
+                            depth + 1,
+                            budget,
+                            redaction,
+                        )?,
                     ));
+                }
+                // A projection is deterministic over the module's *content*,
+                // not its in-memory order, so fields are emitted sorted by
+                // their redacted name. Two names that redact to the same key
+                // would make a JSON reader drop one silently.
+                projected.sort_by(|a, b| a.0.cmp(&b.0));
+                if projected.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+                    return Err(Error::Encode("two field names redact to the same key"));
                 }
                 Projected::Record(projected)
             }
             Inode::Secret(_) | Inode::SecretRef { .. } => {
-                Projected::Text(SECRET_MARKER.to_string())
+                Projected::Text(hiding_placeholder(secrets).to_string())
             }
-            Inode::Ref(id) => build_projected(module, Some(*id), secrets, depth + 1, budget)?,
-            Inode::Env { name, .. } => Projected::Env(redacted_key(name, secrets)),
+            Inode::Ref(id) => build_projected(
+                module,
+                Some(*id),
+                secrets,
+                hash_secrets,
+                depth + 1,
+                budget,
+                redaction,
+            )?,
+            Inode::Env { name, .. } => Projected::Env(redact_within(name, secrets, redaction)?),
             Inode::Interpolate { parts } => {
                 let mut text = String::new();
                 let mut tainted = false;
@@ -903,25 +1094,42 @@ fn build_projected(
             | Inode::ContentAddressed { .. } => {
                 Projected::Expr(crate::view::node_kind_name(node.kind_code()))
             }
-            Inode::Semantic { inner, .. } => {
-                build_projected(module, Some(*inner), secrets, depth + 1, budget)?
-            }
+            Inode::Semantic { inner, .. } => build_projected(
+                module,
+                Some(*inner),
+                secrets,
+                hash_secrets,
+                depth + 1,
+                budget,
+                redaction,
+            )?,
             Inode::Blob {
                 hash,
                 size,
                 tainted,
                 media_type,
                 ..
-            } => Projected::Blob {
-                hash: *hash,
-                size: *size,
-                media_type: if *tainted {
-                    SECRET_MARKER.to_string()
-                } else {
-                    redacted_key(media_type, secrets)
-                },
-                tainted: *tainted,
-            },
+            } => {
+                // A blob hash is published verbatim. A hash that copies a
+                // 32-byte secret would publish it, so the projection refuses
+                // a hand-built module the encoder would already have refused.
+                if hash_secrets
+                    .iter()
+                    .any(|secret| !secret.is_empty() && secret.as_slice() == hash)
+                {
+                    return Err(Error::Encode("blob hash equals a secret"));
+                }
+                Projected::Blob {
+                    hash: *hash,
+                    size: *size,
+                    media_type: if *tainted {
+                        hiding_placeholder(secrets).to_string()
+                    } else {
+                        redact_within(media_type, secrets, redaction)?
+                    },
+                    tainted: *tainted,
+                }
+            }
         },
     };
     Ok(value)
@@ -1014,7 +1222,7 @@ mod projection {
                 .iter()
                 .any(|secret| !secret.is_empty() && secret.as_bytes() == hash.as_slice())
             {
-                serde_json::Value::from(SECRET_MARKER)
+                serde_json::Value::from(hiding_placeholder(secrets))
             } else {
                 serde_json::Value::from(crate::ir::hash_hex(hash))
             }
@@ -1339,30 +1547,30 @@ pub fn provenance_lines(module: &InfinityModule) -> Vec<String> {
             .iter()
             .any(|secret| !secret.is_empty() && text.contains(secret.as_str()))
         {
-            SECRET_MARKER.to_string()
+            hiding_placeholder(&secrets).to_string()
         } else {
             text.to_string()
         }
     };
     let mut lines = Vec::new();
     if let Some(producer) = &prov.producer {
-        lines.push(format!("producer={}", redact(producer)));
+        lines.push(format!("producer={}", escape_line(&redact(producer))));
     }
     if prov.timestamp_ms != 0 {
         lines.push(format!("timestamp_ms={}", prov.timestamp_ms));
     }
     if let Some(model) = &prov.model {
-        lines.push(format!("model={}", redact(model)));
+        lines.push(format!("model={}", escape_line(&redact(model))));
     }
     if let Some(tool) = &prov.tool {
-        lines.push(format!("tool={}", redact(tool)));
+        lines.push(format!("tool={}", escape_line(&redact(tool))));
     }
     let hash_text = |hash: &[u8; 32]| -> String {
         if secrets
             .iter()
             .any(|secret| !secret.is_empty() && secret.as_bytes() == hash.as_slice())
         {
-            SECRET_MARKER.to_string()
+            hiding_placeholder(&secrets).to_string()
         } else {
             format!("blake3:{}", crate::ir::hash_hex(hash))
         }
@@ -1372,12 +1580,15 @@ pub fn provenance_lines(module: &InfinityModule) -> Vec<String> {
     }
     for entry in first_entry_per_key(&prov.entries) {
         let value = match &entry.value {
-            ProvValue::Text(text) => redacted_value(text, &secrets),
+            ProvValue::Text(text) => escape_line(&redacted_value(text, &secrets)),
             ProvValue::Int(number) => number.to_string(),
             ProvValue::Flag(flag) => flag.to_string(),
             ProvValue::Hash(hash) => hash_text(hash),
         };
-        lines.push(format!("{}={value}", redacted_key(&entry.key, &secrets)));
+        lines.push(format!(
+            "{}={value}",
+            escape_line(&redacted_key(&entry.key, &secrets))
+        ));
     }
     lines
 }

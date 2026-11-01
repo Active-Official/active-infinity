@@ -363,7 +363,7 @@ pub(crate) fn prepare(module: &InfinityModule) -> Result<Prepared> {
     // A secret copied into a binary surface cannot be redacted: there is no
     // marker that fits a 32-byte hash and no way to rewrite an opaque payload
     // without corrupting it. Refuse the encode instead of storing the copy.
-    reject_secret_copies(provenance.as_ref(), &extensions, &secrets)?;
+    reject_secret_copies(module, provenance.as_ref(), &extensions, &secrets)?;
 
     let prepared = Prepared {
         nodes,
@@ -473,7 +473,7 @@ pub(crate) fn try_redact_text(text: &str, secrets: &[String]) -> Result<String> 
 pub(crate) const MAX_REDACTION_SCAN_BYTES: usize = 64 << 20;
 
 /// Upper bound on the comparisons one redaction performs.
-fn redaction_cost(text: &str, secrets: &[String]) -> usize {
+pub(crate) fn redaction_cost(text: &str, secrets: &[String]) -> usize {
     const PASSES: usize = 8;
     secrets
         .len()
@@ -556,6 +556,7 @@ pub(crate) const MAX_SECRET_SCAN_BYTES: usize = 64 << 20;
 /// them, which keeps the invariant "a secret is not published" true for the
 /// stored image as well as for every projection.
 fn reject_secret_copies(
+    module: &InfinityModule,
     provenance: Option<&Provenance>,
     extensions: &[(u64, Vec<u8>)],
     secrets: &[Vec<u8>],
@@ -568,6 +569,16 @@ fn reject_secret_copies(
         .filter(|secret| secret.len() == 32)
         .map(Vec::as_slice)
         .collect();
+    // A blob hash is published verbatim by every projection. A hash that
+    // copies a 32-byte secret would publish it there, exactly like a
+    // provenance hash, so it is refused at the source.
+    for node in module.nodes() {
+        if let Inode::Blob { hash, .. } = node {
+            if hash_secrets.contains(hash.as_slice()) {
+                return Err(Error::Encode("blob hash equals a secret"));
+            }
+        }
+    }
     if let Some(provenance) = provenance {
         if let Some(parent) = provenance.parent {
             if hash_secrets.contains(parent.as_slice()) {

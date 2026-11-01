@@ -538,3 +538,32 @@ fn canonical_metadata_redaction_draws_one_budget() {
     assert_eq!(error.code(), "infinity/limit", "{error}");
     assert!(error.to_string().contains("redaction"), "{error}");
 }
+
+/// A `let`-bound literal (`let pw = "..."` then `secret(pw)`) is locator
+/// material: the binding names it, but it must not stay a public `Str`.
+#[cfg(feature = "json")]
+#[test]
+fn a_let_bound_locator_does_not_stay_public() {
+    use active_infinity::interop::to_redacted_json;
+
+    let literal = "hunter2-canary";
+    let mut module = InfinityModule::new();
+    let value = module.push(Inode::Str(literal.into()));
+    let reference = module.push(Inode::Ref(value));
+    let secret = module.push(Inode::SecretRef { locator: reference });
+    module.bind("pw", value);
+    let root = module.push(Inode::Table {
+        fields: vec![("password".into(), secret)],
+    });
+    module.set_root(Some(root));
+
+    let image = active_infinity::encode(&module).expect("encode");
+    let decoded = active_infinity::decode(&image).expect("decode");
+    for node in decoded.nodes() {
+        if let Inode::Str(text) = node {
+            assert_ne!(text, literal, "the literal is still a public string");
+        }
+    }
+    let json = to_redacted_json(&module).expect("project");
+    assert!(!json.contains(literal), "{json}");
+}

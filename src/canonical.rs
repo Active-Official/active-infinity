@@ -663,9 +663,55 @@ fn promote_secret_locators(mut nodes: Vec<Inode>, module: &InfinityModule) -> Ve
     // Public nodes are the ones a root reaches without passing through a secret.
     // A secret node is a barrier: what it references is locator material (the
     // fallback of an env lookup, an interpolated literal), not public data.
+    let public = reachable(&nodes, module.roots(), count);
+    // Reachability from the module root alone. A binding is a name, not a
+    // publication of locator material: `let pw = "..."` plus `secret(pw)` makes
+    // the literal appear public only through the binding, and leaving it there
+    // would store the secret's bytes in the public string heap.
+    let public_from_root = reachable(&nodes, module.root(), count);
+
+    // Every literal a `SecretRef` resolves to.
+    let mut locator_material = vec![false; count];
+    for node in &nodes {
+        if let Inode::SecretRef { locator } = node {
+            if let Some(index) = resolve_locator_str(&nodes, *locator) {
+                locator_material[index] = true;
+            }
+        }
+    }
+
+    let mut referenced = vec![false; count];
+    for node in &nodes {
+        for child in node.children() {
+            if let Some(slot) = referenced.get_mut(child.index()) {
+                *slot = true;
+            }
+        }
+    }
+    for (index, node) in nodes.iter_mut().enumerate() {
+        if !referenced[index] {
+            continue;
+        }
+        // A locator literal counts as public only when the module root itself
+        // reaches it (a shared literal), never merely because a binding names it.
+        let is_public = public[index] && !(locator_material[index] && !public_from_root[index]);
+        if is_public {
+            continue;
+        }
+        if let Inode::Str(text) = node {
+            // Only promote when the literal is reachable solely through secrets;
+            // promotion moves its bytes from the public string heap into the
+            // secret heap, so a shared or public string is never moved.
+            *node = Inode::Secret(crate::ir::SecretBytes::from(text.clone()));
+        }
+    }
+    nodes
+}
+
+/// Nodes reachable from `roots` without passing through a secret.
+fn reachable(nodes: &[Inode], roots: impl IntoIterator<Item = NodeId>, count: usize) -> Vec<bool> {
     let mut public = vec![false; count];
-    let mut queue: std::collections::VecDeque<NodeId> = module
-        .roots()
+    let mut queue: std::collections::VecDeque<NodeId> = roots
         .into_iter()
         .filter(|id| !id.is_none() && id.index() < count)
         .collect();
@@ -683,26 +729,26 @@ fn promote_secret_locators(mut nodes: Vec<Inode>, module: &InfinityModule) -> Ve
             }
         }
     }
-    let mut referenced = vec![false; count];
-    for node in &nodes {
-        for child in node.children() {
-            if let Some(slot) = referenced.get_mut(child.index()) {
-                *slot = true;
-            }
+    public
+}
+
+/// Index of the `Str` a secret locator resolves to, through transparent
+/// wrappers, bounded so a malformed chain cannot loop.
+fn resolve_locator_str(nodes: &[Inode], locator: NodeId) -> Option<usize> {
+    let mut current = locator;
+    for _ in 0..8 {
+        match nodes.get(current.index())? {
+            Inode::Str(_) | Inode::Ident(_) => return Some(current.index()),
+            Inode::Ref(next) | Inode::Semantic { inner: next, .. } => current = *next,
+            Inode::Quantity { value, .. } => current = *value,
+            Inode::Env {
+                default: Some(next),
+                ..
+            } => current = *next,
+            _ => return None,
         }
     }
-    for (index, node) in nodes.iter_mut().enumerate() {
-        if !referenced[index] || public[index] {
-            continue;
-        }
-        if let Inode::Str(text) = node {
-            // Only promote when the literal is reachable solely through secrets;
-            // promotion moves its bytes from the public string heap into the
-            // secret heap, so a shared or public string is never moved.
-            *node = Inode::Secret(crate::ir::SecretBytes::from(text.clone()));
-        }
-    }
-    nodes
+    None
 }
 
 /// Rewrite every node reference in `node` through `remap`.

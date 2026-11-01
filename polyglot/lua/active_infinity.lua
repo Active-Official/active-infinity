@@ -36,8 +36,22 @@ local lib = ffi.load(library)
 
 local M = { ABI = 1 }
 
+-- A structured failure: `code` is the stable infinity/... string and `status`
+-- is the C ABI status. `tostring(error)` still renders the familiar message, so
+-- code that only prints the error keeps working.
+local Error = {}
+Error.__index = Error
+Error.__tostring = function(self)
+  return string.format("%s (status %d)", self.code, self.status)
+end
+M.Error = Error
+
+local function fail(code, status)
+  error(setmetatable({ code = code, status = status }, Error), 0)
+end
+
 if lib.active_infinity_abi_version() ~= M.ABI then
-  error("infinity/abi-mismatch: ABI " .. tostring(lib.active_infinity_abi_version()))
+  fail("infinity/abi-mismatch", -1)
 end
 
 local function last_error()
@@ -47,7 +61,7 @@ end
 
 local function check(status)
   if status ~= 0 then
-    error(string.format("%s (status %d)", last_error(), status))
+    fail(last_error(), status)
   end
 end
 
@@ -57,7 +71,7 @@ local function with_input(bytes, callback)
   end
   local pointer = lib.active_infinity_alloc(#bytes)
   if pointer == nil then
-    error("infinity/limit", 0)
+    fail("infinity/limit", -1)
   end
   ffi.copy(pointer, bytes, #bytes)
   local ok, result = pcall(callback, pointer, #bytes)

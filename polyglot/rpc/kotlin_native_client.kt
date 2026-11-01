@@ -115,6 +115,9 @@ private fun call(address: String, envelope: ByteArray): Response = memScoped {
         (frameHeader[1].toUByte().toInt() shl 8) or
         (frameHeader[2].toUByte().toInt() shl 16) or
         (frameHeader[3].toUByte().toInt() shl 24)
+    // A peer controls the frame length: bound it before allocating, and do not
+    // index the header until the body is known to hold one.
+    check(bodyLength in 20..(1 shl 20)) { "bad frame length $bodyLength" }
     val bodyPointer = allocArray<ByteVar>(bodyLength)
     recvAll(bodyPointer, bodyLength)
     close(fd)
@@ -123,6 +126,7 @@ private fun call(address: String, envelope: ByteArray): Response = memScoped {
     check(body.decodeToString(0, 4) == "ARP1" && body[4] == 1.toByte()) { "bad magic" }
     val methodLength = (body[16].toUByte().toInt()) or (body[17].toUByte().toInt() shl 8) or
         (body[18].toUByte().toInt() shl 16) or (body[19].toUByte().toInt() shl 24)
+    check(methodLength >= 0 && methodLength <= body.size - 20) { "truncated method" }
     Response(body[5].toInt(), body.decodeToString(20, 20 + methodLength), body)
 }
 

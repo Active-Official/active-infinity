@@ -66,14 +66,18 @@ Future<(int, String, Uint8List)> call(String address, Uint8List envelope) async 
       return builder;
     });
     final body = bytes.toBytes();
+    if (body.length < 4) throw StateError('truncated frame header');
     final length = ByteData.sublistView(body, 0, 4).getUint32(0, Endian.little);
+    if (length > 1 << 20) throw StateError('frame exceeds the ceiling');
     if (body.length < 4 + length) throw StateError('truncated frame');
     final frame = Uint8List.sublistView(body, 4, 4 + length);
+    if (frame.length < 20) throw StateError('short envelope');
     if (ascii.decode(frame.sublist(0, 4)) != 'ARP1' || frame[4] != 1) {
       throw StateError('bad magic');
     }
     final kind = frame[5];
     final methodLength = ByteData.sublistView(frame, 16, 20).getUint32(0, Endian.little);
+    if (methodLength > frame.length - 20) throw StateError('truncated method');
     final method = utf8.decode(frame.sublist(20, 20 + methodLength));
     return (kind, method, frame);
   } finally {

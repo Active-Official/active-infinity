@@ -55,6 +55,12 @@ public final class Conformance {
         }
         ActiveInfinity.validate(first);
 
+        // A supplementary character is valid standard UTF-8. GetStringUTFChars
+        // would have produced CESU-8 for it, which the shim refuses; the Java
+        // side now encodes the name itself.
+        byte[] unicodeName = ActiveInfinity.fromActive(source, "java-\uD83D\uDE00.active");
+        ActiveInfinity.validate(unicodeName);
+
         byte[] full = Files.readAllBytes(root.resolve("tests/vectors/valid/full.ainf"));
         // A claimed capacity larger than the array must be clamped by the shim;
         // trusting it would let Java overflow the native buffer.

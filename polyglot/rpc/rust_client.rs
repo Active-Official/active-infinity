@@ -100,8 +100,22 @@ fn read_u64(data: &[u8], cursor: usize) -> io::Result<u64> {
     Ok(u64::from_le_bytes(bytes))
 }
 
+/// Deepest value nesting accepted from a peer. A host decoder that recursed
+/// without a bound would let a nested list exhaust the stack.
+const MAX_VALUE_DEPTH: usize = 64;
+
 /// Skip one value body, returning the cursor after it.
-fn skip_value(data: &[u8], mut cursor: usize) -> io::Result<usize> {
+fn skip_value(data: &[u8], cursor: usize) -> io::Result<usize> {
+    skip_value_at(data, cursor, 0)
+}
+
+fn skip_value_at(data: &[u8], mut cursor: usize, depth: usize) -> io::Result<usize> {
+    if depth > MAX_VALUE_DEPTH {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "value nesting exceeds the ceiling",
+        ));
+    }
     let tag = *data
         .get(cursor)
         .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "truncated value"))?;
@@ -120,7 +134,7 @@ fn skip_value(data: &[u8], mut cursor: usize) -> io::Result<usize> {
             let count = read_u32(data, cursor)? as usize;
             cursor += 4;
             for _ in 0..count {
-                cursor = skip_value(data, cursor)?;
+                cursor = skip_value_at(data, cursor, depth + 1)?;
             }
             Ok(cursor)
         }
@@ -131,7 +145,7 @@ fn skip_value(data: &[u8], mut cursor: usize) -> io::Result<usize> {
             for _ in 0..count {
                 let key = read_u32(data, cursor)? as usize;
                 cursor += 4 + key;
-                cursor = skip_value(data, cursor)?;
+                cursor = skip_value_at(data, cursor, depth + 1)?;
             }
             Ok(cursor)
         }

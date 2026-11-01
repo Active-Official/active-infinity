@@ -96,15 +96,21 @@ func call(address string, envelope []byte) (int, string, []byte) {
 		panic(err)
 	}
 	length := binary.LittleEndian.Uint32(header[:])
+	if length > 1<<20 {
+		panic("frame exceeds the ceiling")
+	}
 	response := make([]byte, length)
 	if _, err := io.ReadFull(connection, response); err != nil {
 		panic(err)
 	}
-	if !bytes.Equal(response[:4], []byte("ARP1")) || response[4] != 1 {
+	if len(response) < 20 || !bytes.Equal(response[:4], []byte("ARP1")) || response[4] != 1 {
 		panic("bad envelope magic")
 	}
 	kind := int(response[5])
 	methodLength := int(binary.LittleEndian.Uint32(response[16:20]))
+	if methodLength < 0 || methodLength > len(response)-20 {
+		panic("truncated method")
+	}
 	method := string(response[20 : 20+methodLength])
 	return kind, strings.TrimRight(method, "\x00"), response
 }

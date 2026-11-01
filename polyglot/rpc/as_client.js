@@ -34,9 +34,23 @@ function call(address, requestBuffer) {
 			received = Buffer.concat([received, chunk]);
 			if (received.length < 4) return;
 			const length = received.readUInt32LE(0);
+			if (length > 1 << 20) {
+				socket.destroy();
+				reject(new Error("frame exceeds the ceiling"));
+				return;
+			}
 			if (received.length < 4 + length) return;
 			socket.end();
-			resolve(received.subarray(4, 4 + length));
+			const body = received.subarray(4, 4 + length);
+			if (body.length < 20) {
+				reject(new Error("short envelope"));
+				return;
+			}
+			if (body.subarray(0, 4).toString() !== "ARP1" || body[4] !== 1) {
+				reject(new Error("bad envelope magic"));
+				return;
+			}
+			resolve(body);
 		});
 		socket.on("error", reject);
 	});
@@ -44,6 +58,7 @@ function call(address, requestBuffer) {
 
 function errorCode(envelope) {
 	const length = envelope.readUInt32LE(16);
+	if (length > envelope.length - 20) return "<truncated>";
 	return envelope.subarray(20, 20 + length).toString();
 }
 

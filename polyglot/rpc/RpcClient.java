@@ -118,13 +118,22 @@ public final class RpcClient {
             byte[] frameHeader = new byte[4];
             input.readFully(frameHeader);
             int length = ByteBuffer.wrap(frameHeader).order(ByteOrder.LITTLE_ENDIAN).getInt();
+            if (length < 0 || length > (1 << 20)) {
+                throw new AssertionError("frame exceeds the ceiling");
+            }
             byte[] body = new byte[length];
             input.readFully(body);
+            if (body.length < 20) {
+                throw new AssertionError("short envelope");
+            }
             if (!new String(body, 0, 4, StandardCharsets.US_ASCII).equals("ARP1") || body[4] != 1) {
                 throw new AssertionError("bad envelope magic");
             }
             int kind = body[5];
             int methodLength = ByteBuffer.wrap(body, 16, 4).order(ByteOrder.LITTLE_ENDIAN).getInt();
+            if (methodLength < 0 || methodLength > body.length - 20) {
+                throw new AssertionError("truncated method");
+            }
             String method = new String(body, 20, methodLength, StandardCharsets.UTF_8);
             return new Response(kind, method, body);
         }

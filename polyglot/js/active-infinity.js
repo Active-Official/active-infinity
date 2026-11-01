@@ -53,6 +53,9 @@ class ActiveInfinity {
 
 	_lastError() {
 		const pointer = this.exports.active_infinity_last_error();
+		// A null error pointer means "unavailable", not address zero: scanning
+		// from zero would return arbitrary module memory as an error string.
+		if (!pointer) return "infinity/unknown";
 		const memory = new Uint8Array(this.memory.buffer);
 		let end = pointer;
 		while (end < memory.length && memory[end] !== 0) end += 1;

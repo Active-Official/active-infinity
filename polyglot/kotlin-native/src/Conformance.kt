@@ -11,6 +11,10 @@ import platform.posix.*
  * at run time from ACTIVE_INFINITY_LIB (or the system loader).
  */
 
+/** A stable `infinity/...` failure from the reference codec. */
+private class ActiveInfinityException(val code: String, val status: Int) :
+    Exception("$code (status $status)")
+
 private class Abi {
     val abiVersion: CPointer<CFunction<() -> UInt>> = symbol("active_infinity_abi_version")
     val lastError: CPointer<CFunction<() -> CPointer<ByteVar>?>> = symbol("active_infinity_last_error")
@@ -68,13 +72,17 @@ private fun lastError(abi: Abi): String {
     return pointer.toKString()
 }
 
+private fun failure(abi: Abi, status: Int): Nothing =
+    throw ActiveInfinityException(lastError(abi), status)
+
 @OptIn(ExperimentalForeignApi::class)
 private fun withInput(abi: Abi, bytes: ByteArray, action: (CPointer<UByteVar>?, ULong) -> Unit) {
     if (bytes.isEmpty()) {
         action(null, 0u)
         return
     }
-    val pointer = abi.alloc(bytes.size.toULong()) ?: error("allocation failed")
+    val pointer = abi.alloc(bytes.size.toULong())
+        ?: throw ActiveInfinityException("infinity/limit", -1)
     try {
         bytes.usePinned { pinned ->
             memcpy(pointer, pinned.addressOf(0), bytes.size.toULong())
@@ -96,14 +104,16 @@ private fun output(
         val size = alloc<ULongVar>()
         size.value = 0u
         var status = call(input, length, null, size.ptr)
-        check(status == -2) { "size query failed: ${lastError(abi)} ($status)" }
+        if (status == 0) return@withInput // an empty result needs no buffer
+        if (status != -2) failure(abi, status)
         val required = size.value.toInt()
         if (required > 0) {
-            val buffer = abi.alloc(required.toULong()) ?: error("allocation failed")
+            val buffer = abi.alloc(required.toULong())
+                ?: throw ActiveInfinityException("infinity/limit", -1)
             try {
                 size.value = required.toULong()
                 status = call(input, length, buffer, size.ptr)
-                check(status == 0) { "output failed: ${lastError(abi)} ($status)" }
+                if (status != 0) failure(abi, status)
                 val written = size.value.toInt()
                 result = ByteArray(written)
                 result = buffer.reinterpret<ByteVar>().readBytes(written)
@@ -122,14 +132,16 @@ private fun fromActive(abi: Abi, source: ByteArray, name: String): ByteArray = m
         val size = alloc<ULongVar>()
         size.value = 0u
         var status = abi.fromActive(input, length, name.cstr.ptr, null, size.ptr)
-        check(status == -2) { "size query failed: ${lastError(abi)} ($status)" }
+        if (status == 0) return@withInput
+        if (status != -2) failure(abi, status)
         val required = size.value.toInt()
         if (required > 0) {
-            val buffer = abi.alloc(required.toULong()) ?: error("allocation failed")
+            val buffer = abi.alloc(required.toULong())
+                ?: throw ActiveInfinityException("infinity/limit", -1)
             try {
                 size.value = required.toULong()
                 status = abi.fromActive(input, length, name.cstr.ptr, buffer, size.ptr)
-                check(status == 0) { "output failed: ${lastError(abi)} ($status)" }
+                if (status != 0) failure(abi, status)
                 val written = size.value.toInt()
                 result = ByteArray(written)
                 result = buffer.reinterpret<ByteVar>().readBytes(written)
@@ -144,7 +156,9 @@ private fun fromActive(abi: Abi, source: ByteArray, name: String): ByteArray = m
 @OptIn(ExperimentalForeignApi::class)
 fun main() {
     val abi = Abi()
-    check(abi.abiVersion() == 1u) { "ABI mismatch" }
+    if (abi.abiVersion() != 1u) {
+        throw ActiveInfinityException("infinity/abi-mismatch", -1)
+    }
 
     val root = "."
     val manifest = readFile("$root/conformance/manifest.json").decodeToString()
@@ -158,14 +172,14 @@ fun main() {
         val image = readFile("$root/$path")
         withInput(abi, image) { pointer, length ->
             val status = abi.validate(pointer, length)
-            check(status == 0) { "$path: ${lastError(abi)} ($status)" }
+            if (status != 0) failure(abi, status)
         }
 
         val hash = ByteArray(32)
         withInput(abi, image) { pointer, length ->
             hash.usePinned { pinned ->
                 val status = abi.hash(pointer, length, pinned.addressOf(0).reinterpret())
-                check(status == 0) { "$path: ${lastError(abi)} ($status)" }
+                if (status != 0) failure(abi, status)
             }
         }
         val actual = hash.joinToString("") {
@@ -189,7 +203,10 @@ fun main() {
     val first = fromActive(abi, source, "kn.active")
     val second = fromActive(abi, source, "kn.active")
     check(first.contentEquals(second)) { "Active source not deterministic" }
-    withInput(abi, first) { pointer, length -> check(abi.validate(pointer, length) == 0) }
+    withInput(abi, first) { pointer, length ->
+        val status = abi.validate(pointer, length)
+        if (status != 0) failure(abi, status)
+    }
 
     val full = readFile("$root/tests/vectors/valid/full.ainf")
     val json = output(abi, full) { input, length, out, size ->

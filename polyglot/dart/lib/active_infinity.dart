@@ -103,10 +103,11 @@ _Native _open() {
 
 String _lastError(_Native native) {
   var pointer = native.lastError();
+  if (pointer.address == 0) return 'infinity/unknown';
   final bytes = <int>[];
-  while (pointer.address != 0 && pointer.value != 0) {
+  while (pointer.value != 0) {
     bytes.add(pointer.value);
-    pointer = pointer.elementAt(1);
+    pointer = pointer + 1;
   }
   return utf8.decode(bytes);
 }

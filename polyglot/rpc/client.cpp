@@ -145,6 +145,10 @@ Response call(const std::string &address,
                                (static_cast<std::uint32_t>(header[1]) << 8) |
                                (static_cast<std::uint32_t>(header[2]) << 16) |
                                (static_cast<std::uint32_t>(header[3]) << 24);
+  if (length > (1u << 20)) {
+    close(socket);
+    throw std::runtime_error("frame exceeds the ceiling");
+  }
   std::vector<std::uint8_t> body(length);
   try {
     read_all(socket, body.data(), length);
@@ -162,6 +166,9 @@ Response call(const std::string &address,
       (static_cast<std::uint32_t>(body[17]) << 8) |
       (static_cast<std::uint32_t>(body[18]) << 16) |
       (static_cast<std::uint32_t>(body[19]) << 24);
+  if (method_length > body.size() - 20) {
+    throw std::runtime_error("truncated method");
+  }
   return {body[5],
           std::string(reinterpret_cast<const char *>(body.data() + 20),
                       method_length),

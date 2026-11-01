@@ -58,7 +58,12 @@ def encode_request(
     return bytes(out)
 
 
-def _skip_value(data: bytes, cursor: int) -> int:
+MAX_VALUE_DEPTH = 64
+
+
+def _skip_value(data: bytes, cursor: int, depth: int = 0) -> int:
+    if depth > MAX_VALUE_DEPTH:
+        raise AssertionError("value nesting exceeds the ceiling")
     tag = data[cursor]
     cursor += 1
     if tag == 1:  # bool
@@ -77,7 +82,7 @@ def _skip_value(data: bytes, cursor: int) -> int:
         count = struct.unpack_from("<I", data, cursor)[0]
         cursor += 4
         for _ in range(count):
-            cursor = _skip_value(data, cursor)
+            cursor = _skip_value(data, cursor, depth + 1)
         return cursor
     if tag == 6:  # map
         count = struct.unpack_from("<I", data, cursor)[0]
@@ -85,7 +90,7 @@ def _skip_value(data: bytes, cursor: int) -> int:
         for _ in range(count):
             key_len = struct.unpack_from("<I", data, cursor)[0]
             cursor += 4 + key_len
-            cursor = _skip_value(data, cursor)
+            cursor = _skip_value(data, cursor, depth + 1)
         return cursor
     if tag in (0, 7):  # null, secret
         return cursor
@@ -108,6 +113,8 @@ def _skip_args(data: bytes, cursor: int, count: int) -> int:
 
 
 def decode_envelope(data: bytes) -> dict:
+    if len(data) < 20:
+        raise AssertionError("short envelope")
     if data[:4] != MAGIC or data[4] != VERSION:
         raise AssertionError("bad envelope magic or version")
     kind = data[5]
@@ -115,6 +122,8 @@ def decode_envelope(data: bytes) -> dict:
     cursor = 16
     method_len = struct.unpack_from("<I", data, cursor)[0]
     cursor += 4
+    if method_len > len(data) - cursor:
+        raise AssertionError("truncated method")
     method = data[cursor : cursor + method_len].decode()
     cursor += method_len
     args = struct.unpack_from("<I", data, cursor)[0]
@@ -122,6 +131,8 @@ def decode_envelope(data: bytes) -> dict:
     cursor = _skip_args(data, cursor, args)
     payload_len = struct.unpack_from("<I", data, cursor)[0]
     cursor += 4
+    if payload_len > len(data) - cursor:
+        raise AssertionError("truncated payload")
     payload = data[cursor : cursor + payload_len]
     return {
         "kind": kind,
@@ -142,6 +153,8 @@ def call(address: str, envelope: bytes) -> dict:
                 raise AssertionError("connection closed before the frame header")
             header += chunk
         length = struct.unpack("<I", header)[0]
+        if length > 1 << 20:
+            raise AssertionError("frame exceeds the ceiling")
         body = b""
         while len(body) < length:
             chunk = connection.recv(length - len(body))

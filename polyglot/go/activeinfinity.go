@@ -123,6 +123,10 @@ func (i *Instance) lastError(ctx context.Context) string {
 		return "infinity/unknown"
 	}
 	pointer := uint32(values[0])
+	if pointer == 0 {
+		// A null error pointer means "unavailable", not address zero.
+		return "infinity/unknown"
+	}
 	memory := i.module.Memory()
 	end := pointer
 	for {

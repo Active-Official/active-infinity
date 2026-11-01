@@ -29,10 +29,12 @@ const REFERENCE = path.join(
 const ASSEMBLY = path.join(__dirname, "build", "conformance.wasm");
 
 async function main() {
-	const { assembly } = await load(REFERENCE, ASSEMBLY);
+	const { reference, assembly } = await load(REFERENCE, ASSEMBLY);
 	const exports = assembly.exports;
 	const memory = () => new Uint8Array(exports.memory.buffer);
 	assert.strictEqual(exports.abiVersion(), 1);
+	// A negative allocation request is the null pointer, not an allocator trap.
+	assert.strictEqual(exports.allocate(-1), 0, "a negative allocation is null");
 
 	const alloc = (bytes) => {
 		const pointer = exports.allocate(bytes.length);
@@ -100,6 +102,47 @@ async function main() {
 			true,
 		);
 		assert.ok(required > 8, `required size reported (${required})`);
+
+		// A null output pointer (AS address zero) is not a buffer: the output
+		// functions refuse it with -2 and the exact required size, and never
+		// write at address zero.
+		const nullLength = exports.allocate(4);
+		new DataView(exports.memory.buffer).setUint32(nullLength, 0, true);
+		assert.strictEqual(
+			exports.reencode(input, image.length, 0, nullLength),
+			-2,
+			"a null output pointer is refused",
+		);
+		assert.strictEqual(
+			new DataView(exports.memory.buffer).getUint32(nullLength, true),
+			required,
+			"a null output reports the required size",
+		);
+
+		assert.strictEqual(
+			exports.contentHash(input, image.length, 0),
+			-1,
+			"a null hash output is refused",
+		);
+		assert.strictEqual(
+			reference.lastError(),
+			"infinity/null-output",
+			"the hash refusal carries the reference code",
+		);
+
+		// A null out_len cannot carry a size; the reference refuses it instead of
+		// writing at AS address zero.
+		assert.strictEqual(
+			exports.reencode(input, image.length, tinyBuffer, 0),
+			-1,
+			"a null out_len is refused",
+		);
+		assert.strictEqual(reference.lastError(), "infinity/null-out-len");
+
+		// A null input pointer with a non-zero length is invalid input, never a
+		// read of the module's static data.
+		assert.strictEqual(exports.validate(0, 4), -1);
+		assert.strictEqual(reference.lastError(), "infinity/null-input");
 	}
 
 	const source = Buffer.from('port = 8080\nname = "assemblyscript"\n');
@@ -130,6 +173,25 @@ async function main() {
 	const encodedPointer = alloc(encoded);
 	assert.strictEqual(exports.validate(encodedPointer, encoded.length), 0);
 	assert.strictEqual(exports.validate(encodedPointer, encoded.length), 0);
+
+	// A negative name length must be refused, not silently compiled as an empty
+	// name.
+	const badNameLength = exports.allocate(4);
+	new DataView(exports.memory.buffer).setUint32(badNameLength, 1 << 16, true);
+	const badNameOut = exports.allocate(1 << 16);
+	assert.strictEqual(
+		exports.fromActive(
+			sourcePointer,
+			source.length,
+			namePointer,
+			-1,
+			badNameOut,
+			badNameLength,
+		),
+		-1,
+		"a negative name length is refused",
+	);
+	assert.strictEqual(reference.lastError(), "infinity/null-name");
 
 	const full = new Uint8Array(
 		fs.readFileSync(path.join(ROOT, "tests/vectors/valid/full.ainf")),

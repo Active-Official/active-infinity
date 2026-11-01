@@ -60,6 +60,9 @@ class Reference {
 
 	lastError() {
 		const pointer = this.exports.active_infinity_last_error();
+		// A null error pointer means "unavailable", not address zero: scanning
+		// from zero would return arbitrary module memory as an error string.
+		if (!pointer) return "infinity/unknown";
 		const memory = this.memory();
 		let end = pointer;
 		while (end < memory.length && memory[end] !== 0) end += 1;
@@ -77,6 +80,12 @@ function bind(reference, getAssemblyMemory) {
 		if (!Number.isInteger(length) || length < 0 || length > 0x7fffffff) {
 			// A negative or oversized length is a caller bug, not a heap range.
 			throw new Error("infinity/limit: length out of range");
+		}
+		if (!pointer) {
+			// Address zero is not a buffer. Hand the null pointer to the
+			// reference so the caller gets infinity/null-input, never a read of
+			// the module's static data.
+			return { pointer: 0, length };
 		}
 		const view = asMemory();
 		const end = Math.min(pointer + length, view.length);
@@ -101,6 +110,11 @@ function bind(reference, getAssemblyMemory) {
 	};
 
 	const runOutput = (input, inputLength, output, outputLength, invoke) => {
+		if (!outputLength) {
+			// A null out_len cannot carry a size. Let the reference refuse it
+			// (infinity/null-out-len) instead of writing at AS address zero.
+			return invoke(0, 0);
+		}
 		// The caller declares the capacity at *outputLength; a result larger than
 		// that must be reported as -2 with the required size, never copied.
 		const capacity = readU32(outputLength);
@@ -151,21 +165,34 @@ function bind(reference, getAssemblyMemory) {
 			},
 			content_hash: (pointer, length, output) => {
 				const input = copyFromAs(pointer, length);
-				const hash = allocOrThrow(32);
 				try {
-					const status = reference.exports.active_infinity_content_hash(
-						input.pointer,
-						input.length,
-						hash,
-					);
-					if (status === 0 && output)
-						writeToAs(
-							output,
-							new Uint8Array(reference.exports.memory.buffer, hash, 32),
+					if (!output) {
+						// The reference owns this contract: a null 32-byte output
+						// is infinity/null-output, never a silent success with an
+						// unwritten hash.
+						return reference.exports.active_infinity_content_hash(
+							input.pointer,
+							input.length,
+							0,
 						);
-					return status;
+					}
+					const hash = allocOrThrow(32);
+					try {
+						const status = reference.exports.active_infinity_content_hash(
+							input.pointer,
+							input.length,
+							hash,
+						);
+						if (status === 0)
+							writeToAs(
+								output,
+								new Uint8Array(reference.exports.memory.buffer, hash, 32),
+							);
+						return status;
+					} finally {
+						reference.free(hash, 32);
+					}
 				} finally {
-					reference.free(hash, 32);
 					reference.free(input.pointer, input.length);
 				}
 			},
@@ -218,6 +245,27 @@ function bind(reference, getAssemblyMemory) {
 				outputLength,
 			) => {
 				const input = copyFromAs(source, sourceLength);
+				if (
+					!name ||
+					!Number.isInteger(nameLength) ||
+					nameLength < 0 ||
+					nameLength > 4096
+				) {
+					// A missing, negative or oversized name range must not
+					// silently become an empty name. The reference refuses the
+					// null pointer with infinity/null-name.
+					try {
+						return reference.exports.active_infinity_from_active(
+							input.pointer,
+							input.length,
+							0,
+							0,
+							0,
+						);
+					} finally {
+						reference.free(input.pointer, input.length);
+					}
+				}
 				const nameBytes = asMemory().slice(name, name + nameLength);
 				const nameWithNul = new Uint8Array(nameBytes.length + 1);
 				nameWithNul.set(nameBytes);

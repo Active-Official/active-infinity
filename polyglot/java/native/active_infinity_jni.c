@@ -136,20 +136,31 @@ JNIEXPORT jint JNICALL Java_ai_activeinfinity_Native_redactedJson(
 }
 
 JNIEXPORT jint JNICALL Java_ai_activeinfinity_Native_fromActive(
-    JNIEnv *env, jclass clazz, jbyteArray source, jstring name,
+    JNIEnv *env, jclass clazz, jbyteArray source, jbyteArray name,
     jbyteArray output, jintArray out_len) {
   (void)clazz;
   if (source == NULL || name == NULL || out_len == NULL) {
     return -1;
   }
-  const char *name_chars = (*env)->GetStringUTFChars(env, name, NULL);
-  if (name_chars == NULL) {
-    return -3;
+  /* The Java side encodes the name as standard UTF-8 with a trailing NUL.
+     Copy it into a bounded local buffer so a caller-supplied array that is
+     missing the terminator cannot make the shim scan past its end. */
+  jsize name_length = (*env)->GetArrayLength(env, name);
+  if (name_length <= 0 ||
+      name_length > (jsize)(ACTIVE_INFINITY_MAX_NAME_BYTES + 1)) {
+    return -1;
+  }
+  char name_chars[ACTIVE_INFINITY_MAX_NAME_BYTES + 1];
+  (*env)->GetByteArrayRegion(env, name, 0, name_length, (jbyte *)name_chars);
+  if (name_chars[name_length - 1] != '\0') {
+    if (name_length > (jsize)ACTIVE_INFINITY_MAX_NAME_BYTES) {
+      return -1;
+    }
+    name_chars[name_length] = '\0';
   }
   jsize length = (*env)->GetArrayLength(env, source);
   jbyte *bytes = (*env)->GetByteArrayElements(env, source, NULL);
   if (bytes == NULL) {
-    (*env)->ReleaseStringUTFChars(env, name, name_chars);
     return -3;
   }
   jint capacity = 0;
@@ -167,7 +178,6 @@ JNIEXPORT jint JNICALL Java_ai_activeinfinity_Native_fromActive(
     out_bytes = (*env)->GetByteArrayElements(env, output, NULL);
     if (out_bytes == NULL) {
       (*env)->ReleaseByteArrayElements(env, source, bytes, JNI_ABORT);
-      (*env)->ReleaseStringUTFChars(env, name, name_chars);
       return -3;
     }
     out = (uint8_t *)out_bytes;
@@ -176,7 +186,6 @@ JNIEXPORT jint JNICALL Java_ai_activeinfinity_Native_fromActive(
   int32_t status = active_infinity_from_active(
       (const uint8_t *)bytes, (size_t)length, name_chars, out, &written);
   (*env)->ReleaseByteArrayElements(env, source, bytes, JNI_ABORT);
-  (*env)->ReleaseStringUTFChars(env, name, name_chars);
   if (out_bytes != NULL) {
     (*env)->ReleaseByteArrayElements(env, output, out_bytes,
                                      status == 0 ? 0 : JNI_ABORT);

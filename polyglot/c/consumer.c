@@ -51,8 +51,9 @@ static uint8_t *read_file(const char *path, size_t *len) {
 
 static int expect(int32_t status, const char *what) {
   if (status != ACTIVE_INFINITY_OK) {
+    const char *code = active_infinity_last_error();
     fprintf(stderr, "%s failed (%d): %s\n", what, status,
-            active_infinity_last_error());
+            code != NULL ? code : "infinity/unknown");
     return 0;
   }
   return 1;

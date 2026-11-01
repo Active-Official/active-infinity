@@ -38,15 +38,18 @@ def call(address, envelope)
     raise "connection closed" if header.nil? || header.bytesize < 4
 
     length = header.unpack1("V")
+    raise "frame exceeds the ceiling" if length > (1 << 20)
     body = socket.read(length)
     raise "truncated frame" if body.nil? || body.bytesize < length
   ensure
     socket.close
   end
+  raise "short envelope" if body.bytesize < 20
   raise "bad magic" unless body.byteslice(0, 4) == MAGIC && body.getbyte(4) == 1
 
   kind = body.getbyte(5)
   method_length = body.byteslice(16, 4).unpack1("V")
+  raise "truncated method" if method_length > body.bytesize - 20
   method = body.byteslice(20, method_length)
   [kind, method, body]
 end

@@ -69,15 +69,28 @@ function call(address, envelope) {
 			received = Buffer.concat([received, chunk]);
 			if (received.length < 4) return;
 			const length = received.readUInt32LE(0);
+			if (length > 1 << 20) {
+				socket.destroy();
+				reject(new Error("frame exceeds the ceiling"));
+				return;
+			}
 			if (received.length < 4 + length) return;
 			const body = received.subarray(4, 4 + length);
 			socket.end();
+			if (body.length < 20) {
+				reject(new Error("short envelope"));
+				return;
+			}
 			if (body.subarray(0, 4).toString() !== "ARP1" || body[4] !== 1) {
 				reject(new Error("bad envelope magic"));
 				return;
 			}
 			const kind = body[5];
 			const methodLength = body.readUInt32LE(16);
+			if (methodLength > body.length - 20) {
+				reject(new Error("truncated method"));
+				return;
+			}
 			const method = body.subarray(20, 20 + methodLength).toString();
 			resolve({ kind, method, body });
 		});

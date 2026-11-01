@@ -131,6 +131,26 @@ func TestConformance(t *testing.T) {
 	}
 }
 
+// The reference module imports env.active_random_fill; New() instantiates that
+// host module before the guest, so a missing or failing import breaks
+// instantiation rather than yielding predictable key material. The fill itself
+// must not leave the buffer zeroed: a zero-filled buffer would be a predictable
+// secret. None of the exported codec entry points currently reach getrandom
+// (a secret literal is parsed, not generated), so this exercises the helper the
+// wired host callback uses.
+func TestFillRandomDoesNotZero(t *testing.T) {
+	buffer := make([]byte, 32)
+	if err := fillRandom(buffer); err != nil {
+		t.Fatalf("fillRandom: %v", err)
+	}
+	for _, value := range buffer {
+		if value != 0 {
+			return
+		}
+	}
+	t.Fatal("the random fill left the buffer zeroed")
+}
+
 // A refused allocation is infinity/limit, not a write at address zero. The FFI
 // caps one allocation at 1 GiB, so the module returns a null pointer there.
 func TestAllocationRefusalIsInfinityLimit(t *testing.T) {

@@ -25,6 +25,10 @@ def serve(listener: socket.socket, out_path: str) -> None:
                 if header is None:
                     continue
                 length = int.from_bytes(header, "little")
+                if length > 1 << 20:
+                    # A request frame larger than the protocol ceiling is not a
+                    # golden vector; do not allocate it.
+                    continue
                 body = recv_exact(connection, length)
                 if body is None:
                     continue

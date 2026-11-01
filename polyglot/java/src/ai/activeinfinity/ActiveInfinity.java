@@ -99,15 +99,20 @@ public final class ActiveInfinity {
     public static byte[] fromActive(String source, String name) {
         checkAbi();
         byte[] payload = source.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        // JNI's GetStringUTFChars yields modified UTF-8 (CESU-8): a supplementary
+        // character or U+0000 is not standard UTF-8. Encode the name here so the
+        // native side sees exactly the bytes Java decoded.
+        byte[] nameBytes = (name + "\u0000")
+                .getBytes(java.nio.charset.StandardCharsets.UTF_8);
         int[] length = {0};
-        int probe = Native.fromActive(payload, name, null, length);
+        int probe = Native.fromActive(payload, nameBytes, null, length);
         if (probe != -2) {
             check(probe);
             return new byte[0];
         }
         byte[] output = new byte[length[0]];
         int[] capacity = {output.length};
-        check(Native.fromActive(payload, name, output, capacity));
+        check(Native.fromActive(payload, nameBytes, output, capacity));
         return Arrays.copyOf(output, capacity[0]);
     }
 

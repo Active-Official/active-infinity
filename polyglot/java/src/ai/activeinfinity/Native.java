@@ -20,5 +20,5 @@ final class Native {
 
     static native int redactedJson(byte[] image, byte[] output, int[] outLength);
 
-    static native int fromActive(byte[] source, String name, byte[] output, int[] outLength);
+    static native int fromActive(byte[] source, byte[] name, byte[] output, int[] outLength);
 }

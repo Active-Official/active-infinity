@@ -12,7 +12,8 @@ const c = @cImport({
 });
 
 fn fail(what: []const u8, status: i32) noreturn {
-    const code = std.mem.span(c.active_infinity_last_error());
+    const pointer = c.active_infinity_last_error();
+    const code = if (pointer == null) "infinity/unknown" else std.mem.span(pointer);
     std.debug.print("FAIL {s}: {s} ({d})\n", .{ what, code, status });
     std.process.exit(1);
 }

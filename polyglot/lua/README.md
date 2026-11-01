@@ -30,8 +30,15 @@ local built = ai.from_active("module demo { }", "demo.active")
 ```
 
 The module loads `active_infinity_ffi` by default; set `ACTIVE_INFINITY_LIB` to
-point at a specific shared library. Failures raise a Lua error whose message
-starts with the stable `infinity/...` code.
+point at a specific shared library. Failures raise a structured Lua error:
+
+```lua
+local ok, failure = pcall(ai.validate, image)
+if not ok then
+  print(failure.code, failure.status)  -- e.g. infinity/magic, -1
+  print(tostring(failure))             -- "infinity/magic (status -1)"
+end
+```
 
 ## Active RPC
 

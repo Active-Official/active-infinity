@@ -126,7 +126,9 @@ C;
     {
         if ($status !== 0) {
             $code = $this->ffi->active_infinity_last_error();
-            if (!is_string($code)) {
+            if ($code === null) {
+                $code = 'infinity/unknown';
+            } elseif (!is_string($code)) {
                 $code = FFI::string($code);
             }
             throw new ActiveInfinityError($code, $status);

@@ -175,7 +175,8 @@ class Reader {
 		return slice;
 	}
 
-	skipValue(): void {
+	skipValue(depth = 0): void {
+		if (depth > 64) throw new Error("value nesting exceeds the ceiling");
 		const tag = this.u8();
 		switch (tag) {
 			case 0:
@@ -195,14 +196,14 @@ class Reader {
 				return;
 			case 5: {
 				const count = this.u32();
-				for (let index = 0; index < count; index += 1) this.skipValue();
+				for (let index = 0; index < count; index += 1) this.skipValue(depth + 1);
 				return;
 			}
 			case 6: {
 				const count = this.u32();
 				for (let index = 0; index < count; index += 1) {
 					this.take(this.u32());
-					this.skipValue();
+					this.skipValue(depth + 1);
 				}
 				return;
 			}
@@ -263,11 +264,16 @@ function call(address: string, envelope: Uint8Array): Promise<Decoded> {
 			append(new Uint8Array(chunk));
 			if (received.length < 4) return;
 			const length =
-				received[0] |
-				(received[1] << 8) |
-				(received[2] << 16) |
-				(received[3] << 24);
-			if (received.length < 4 + (length >>> 0)) return;
+				(received[0] |
+					(received[1] << 8) |
+					(received[2] << 16) |
+					(received[3] << 24)) >>> 0;
+			if (length > 1 << 20) {
+				socket.destroy();
+				reject(new Error("frame exceeds the ceiling"));
+				return;
+			}
+			if (received.length < 4 + length) return;
 			socket.end();
 			try {
 				resolve(decode(received.subarray(4, 4 + (length >>> 0))));

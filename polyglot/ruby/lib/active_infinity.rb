@@ -48,7 +48,9 @@ module ActiveInfinity
   module_function
 
   def check(status)
-    raise Error.new(active_infinity_last_error, status) unless status.zero?
+    unless status.zero?
+      raise Error.new(active_infinity_last_error || "infinity/unknown", status)
+    end
   end
 
   def with_buffer(bytes)

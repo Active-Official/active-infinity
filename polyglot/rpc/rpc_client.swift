@@ -55,9 +55,13 @@ func request(id: UInt64, method: String, payload: [UInt8], cap: [UInt8]?) -> [UI
 }
 
 func call(_ address: String, _ envelope: [UInt8]) throws -> (Int, String, [UInt8]) {
-    let split = address.lastIndex(of: ":")!
+    guard let split = address.lastIndex(of: ":") else {
+        throw NSError(domain: "rpc", code: 6)
+    }
     let host = String(address[..<split])
-    let port = UInt16(address[address.index(after: split)...])!
+    guard let port = UInt16(address[address.index(after: split)...]) else {
+        throw NSError(domain: "rpc", code: 7)
+    }
     let descriptor = socket(AF_INET, Int32(SOCK_STREAM.rawValue), 0)
     guard descriptor >= 0 else { throw NSError(domain: "rpc", code: 1) }
     var target = sockaddr_in()
@@ -84,6 +88,10 @@ func call(_ address: String, _ envelope: [UInt8]) throws -> (Int, String, [UInt8
     var header = [UInt8](repeating: 0, count: 4)
     try readExact(descriptor, &header)
     let length = header.withUnsafeBytes { $0.load(as: UInt32.self) }
+    guard length <= 1 << 20 else {
+        close(descriptor)
+        throw NSError(domain: "rpc", code: 8)
+    }
     var body = [UInt8](repeating: 0, count: Int(length))
     try readExact(descriptor, &body)
     close(descriptor)
@@ -91,6 +99,9 @@ func call(_ address: String, _ envelope: [UInt8]) throws -> (Int, String, [UInt8
         throw NSError(domain: "rpc", code: 4)
     }
     let methodLength = body[16..<20].withUnsafeBytes { $0.load(as: UInt32.self) }
+    guard Int(methodLength) <= body.count - 20 else {
+        throw NSError(domain: "rpc", code: 9)
+    }
     let method = String(decoding: body[20..<(20 + Int(methodLength))], as: UTF8.self)
     return (Int(body[5]), method, body)
 }

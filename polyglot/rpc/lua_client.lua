@@ -85,10 +85,13 @@ local function call(address, envelope)
   end
   local header = read_all(fd, 4)
   local length = header:byte(1) + header:byte(2) * 256 + header:byte(3) * 65536 + header:byte(4) * 16777216
+  if length > 1048576 then libc.close(fd); error("frame exceeds the ceiling") end
   local body = read_all(fd, length)
   libc.close(fd)
+  if #body < 20 then error("short envelope") end
   if body:sub(1, 4) ~= "ARP1" or body:byte(5) ~= 1 then error("bad magic") end
   local method_length = body:byte(17) + body:byte(18) * 256 + body:byte(19) * 65536 + body:byte(20) * 16777216
+  if method_length > #body - 20 then error("truncated method") end
   return body:byte(6), body:sub(21, 20 + method_length), body
 end
 

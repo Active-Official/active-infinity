@@ -6,6 +6,7 @@
 const retained: Uint8Array[] = [];
 
 export function allocate(length: i32): usize {
+	if (length < 0) return 0;
 	const buffer = new Uint8Array(length);
 	retained.push(buffer);
 	return buffer.dataStart;
@@ -40,12 +41,23 @@ export function buildRequest(
 	outCapacity: i32,
 ): i32 {
 	// Refuse rather than write past the caller's output buffer: a raw store
-	// overflow would corrupt other module memory.
-	let needed = 16 + 4 + methodLength + 4 + 4 + payloadLength + 4;
-	if (capPointer != 0) {
-		needed += 16 + 4 + capMethodsLength + 56 + 3;
+	// overflow would corrupt other module memory. A negative length would be
+	// reinterpreted as a huge unsigned count by memory.copy, so reject it before
+	// the arithmetic.
+	if (
+		methodLength < 0 ||
+		payloadLength < 0 ||
+		capMethodsLength < 0 ||
+		capMethodsCount < 0 ||
+		outCapacity < 0
+	) {
+		return -1;
 	}
-	if (needed > outCapacity) {
+	let needed: i64 = 32 + <i64>methodLength + <i64>payloadLength;
+	if (capPointer != 0) {
+		needed += 79 + <i64>capMethodsLength;
+	}
+	if (needed > <i64>outCapacity) {
 		return -1;
 	}
 

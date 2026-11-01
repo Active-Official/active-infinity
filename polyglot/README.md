@@ -46,9 +46,11 @@ Build the artifacts once (from the repository root):
 | 20 | Shell / ops | `active-infinity-cli` | `polyglot/shell/test.sh` | `polyglot-shell` |
 
 Every row validates an AINF image, reproduces the manifest content hash,
-re-encodes to canonical bytes, compiles Active text, and asserts that the
-redaction canary `CANARY_SECRET_` never appears. The RPC thin client for each
-language lives in `polyglot/rpc/` (C-8.3).
+re-encodes to canonical bytes, and asserts that the redaction canary
+`CANARY_SECRET_` never appears. Every row compiles Active text except C, C++ and
+Zig, whose conformance drivers exercise the re-encode half of Encode only (see
+`STATUS.md`). The RPC thin client for each language lives in `polyglot/rpc/`
+(C-8.3).
 
 ### Notes on toolchains
 
@@ -138,7 +140,12 @@ hash, _ := instance.ContentHashHex(ctx, image)
 ```
 
 Requires only the WASM artifact; `go test ./...` in `polyglot/go` runs the
-manifest.
+manifest. The Go host supplies the module's single import,
+`env.active_random_fill`, backed by `crypto/rand`; a failed or short fill
+returns a non-zero code so a secret buffer is never zero-filled. The exported
+codec entry points do not currently draw random bytes (a secret comes from the
+source literal), so the import is resolved by `New` but not exercised by the
+conformance run.
 
 ### JavaScript
 

@@ -24,8 +24,15 @@ static uint8_t *read_file(const char *path, size_t *length) {
   FILE *file = fopen(path, "rb");
   if (file == NULL)
     return NULL;
-  fseek(file, 0, SEEK_END);
+  if (fseek(file, 0, SEEK_END) != 0) {
+    fclose(file);
+    return NULL;
+  }
   long size = ftell(file);
+  if (size < 0 || (unsigned long)size > MAX_FRAME) {
+    fclose(file);
+    return NULL;
+  }
   rewind(file);
   uint8_t *buffer = (uint8_t *)malloc((size_t)size);
   if (buffer == NULL || fread(buffer, 1, (size_t)size, file) != (size_t)size) {
@@ -234,6 +241,14 @@ int main(void) {
   uint8_t *payload = read_file(payload_path, &payload_length);
   if (payload == NULL)
     return 2;
+  /* The envelope adds the magic, fixed header, method, capability descriptor
+     and the payload. Refuse a payload that would overflow `request`, rather
+     than writing past it. */
+  if (payload_length > MAX_FRAME - 256) {
+    fprintf(stderr, "payload exceeds the request frame ceiling\n");
+    free(payload);
+    return 2;
+  }
 
   uint8_t request[MAX_FRAME];
   size_t body_length = 0;

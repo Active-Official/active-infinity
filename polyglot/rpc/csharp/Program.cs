@@ -55,6 +55,10 @@ internal static class Program
     private static (int Kind, string Method, byte[] Body) Call(string address, byte[] envelope)
     {
         int split = address.LastIndexOf(':');
+        if (split <= 0 || split == address.Length - 1)
+        {
+            throw new InvalidDataException("ACTIVE_RPC_ADDR must be host:port");
+        }
         string host = address[..split];
         int port = int.Parse(address[(split + 1)..]);
         using var client = new TcpClient();
@@ -66,14 +70,26 @@ internal static class Program
         stream.Flush();
         ReadExact(stream, header);
         uint length = BitConverter.ToUInt32(header);
+        if (length > 1u << 20)
+        {
+            throw new InvalidDataException("frame exceeds the ceiling");
+        }
         byte[] body = new byte[length];
         ReadExact(stream, body);
+        if (body.Length < 20)
+        {
+            throw new InvalidDataException("short envelope");
+        }
         if (Encoding.ASCII.GetString(body, 0, 4) != "ARP1" || body[4] != 1)
         {
             throw new InvalidDataException("bad envelope magic");
         }
         int kind = body[5];
         int methodLength = BitConverter.ToInt32(body, 16);
+        if (methodLength < 0 || methodLength > body.Length - 20)
+        {
+            throw new InvalidDataException("truncated method");
+        }
         string method = Encoding.UTF8.GetString(body, 20, methodLength);
         return (kind, method, body);
     }

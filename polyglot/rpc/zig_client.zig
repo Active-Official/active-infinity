@@ -106,6 +106,7 @@ fn call(allocator: std.mem.Allocator, address: []const u8, envelope: []const u8)
     const colon = std.mem.lastIndexOfScalar(u8, address, ':') orelse return error.BadAddress;
     const port = try std.fmt.parseInt(u16, address[colon + 1 ..], 10);
     var host_buffer: [128]u8 = undefined;
+    if (colon >= host_buffer.len) return error.BadHost;
     @memcpy(host_buffer[0..colon], address[0..colon]);
     host_buffer[colon] = 0;
 
@@ -141,7 +142,8 @@ fn echoes(body: []const u8, payload: []const u8) bool {
 fn errorMethodIs(body: []const u8, expected: []const u8) bool {
     if (body.len < 20) return false;
     const method_length = getU32(body[16..20]);
-    if (20 + method_length > body.len) return false;
+    // Compare against the remaining length; adding to a u32 can wrap.
+    if (@as(usize, method_length) > body.len - 20) return false;
     return std.mem.eql(u8, body[20 .. 20 + method_length], expected);
 }
 
@@ -159,6 +161,9 @@ pub fn main() !void {
     const payload = try readFile(allocator, payload_path);
 
     var buffer: [1 << 20]u8 = undefined;
+    // The envelope adds the fixed header, method and descriptor. Refuse a
+    // payload that would make `request` write past the buffer.
+    if (payload.len > buffer.len - 256) return error.PayloadTooLarge;
 
     var length = request(&buffer, 42, "echo", payload, cap);
     var body = try call(allocator, address, buffer[0..length]);

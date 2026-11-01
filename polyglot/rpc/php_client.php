@@ -50,6 +50,9 @@ function call(string $address, string $envelope): array
             throw new RuntimeException('connection closed');
         }
         $length = unpack('V', $header)[1];
+        if ($length > (1 << 20)) {
+            throw new RuntimeException('frame exceeds the ceiling');
+        }
         $body = '';
         while (strlen($body) < $length) {
             $chunk = fread($socket, $length - strlen($body));
@@ -61,11 +64,17 @@ function call(string $address, string $envelope): array
     } finally {
         fclose($socket);
     }
+    if (strlen($body) < 20) {
+        throw new RuntimeException('short envelope');
+    }
     if (substr($body, 0, 4) !== 'ARP1' || ord($body[4]) !== 1) {
         throw new RuntimeException('bad magic');
     }
     $kind = ord($body[5]);
     $methodLength = unpack('V', substr($body, 16, 4))[1];
+    if ($methodLength > strlen($body) - 20) {
+        throw new RuntimeException('truncated method');
+    }
     $method = substr($body, 20, $methodLength);
     return [$kind, $method, $body];
 }

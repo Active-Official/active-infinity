@@ -42,8 +42,8 @@ use active_infinity::{content_hash, decode, encode, validate, validate_canonical
 pub const ABI_VERSION: u32 = 1;
 
 /// Largest single `alloc` request. A host that asks for more is refused with a
-/// null pointer and `infinity/limit` rather than aborting on an impossible
-/// allocation.
+/// null pointer (and, like every `alloc`/`free`, no change to `last_error`)
+/// rather than aborting on an impossible allocation.
 pub const MAX_ALLOC_BYTES: usize = 1 << 30;
 
 /// Largest module name accepted, in bytes (excluding the NUL).

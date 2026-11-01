@@ -47,6 +47,9 @@ export function abiVersion(): i32 {
 
 /** Allocate `length` bytes and retain them until `releaseAll`. */
 export function allocate(length: i32): usize {
+  // A negative length is not a buffer; return the null pointer rather than
+  // trapping in the allocator.
+  if (length < 0) return 0;
   const buffer = new Uint8Array(length);
   retained.push(buffer);
   return buffer.dataStart;

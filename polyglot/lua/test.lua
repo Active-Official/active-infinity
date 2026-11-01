@@ -50,6 +50,11 @@ local ok, message = pcall(function()
   ai.validate("\255\255")
 end)
 assert(not ok, "malformed input was accepted")
-assert(message:find("infinity/", 1, true), "unstable code: " .. tostring(message))
+assert(type(message) == "table", "expected a structured error, got " .. type(message))
+assert(type(message.code) == "string" and message.code:find("^infinity/"),
+       "unstable code: " .. tostring(message.code))
+assert(type(message.status) == "number" and message.status < 0,
+       "missing failure status: " .. tostring(message.status))
+assert(tostring(message):find("infinity/", 1, true), "message lost the code")
 
 print(string.format("Lua conformance PASS (%d vectors, ABI %d)", checked, ai.ABI))

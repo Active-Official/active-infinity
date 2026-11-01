@@ -92,6 +92,26 @@ run_assemblyscript() {
 run_shell() {
   bash polyglot/rpc/shell_client.sh
 }
+run_r() { Rscript polyglot/rpc/r_client.r; }
+run_julia() { julia polyglot/rpc/julia_client.jl; }
+
+# Fortran and COBOL have no socket library of their own: `native/rpc_socket.c`
+# carries the bytes while the language encodes the envelope.
+build_rpc_socket() {
+  cc -O2 -c polyglot/rpc/native/rpc_socket.c -o /tmp/rpc-socket.o
+}
+
+run_fortran() {
+  build_rpc_socket
+  gfortran -O2 polyglot/rpc/fortran_client.f90 /tmp/rpc-socket.o -o /tmp/rpc-client-fortran
+  /tmp/rpc-client-fortran
+}
+
+run_cobol() {
+  build_rpc_socket
+  cobc -x -free polyglot/rpc/cobol_client.cob /tmp/rpc-socket.o -o /tmp/rpc-client-cobol
+  /tmp/rpc-client-cobol
+}
 
 client_available() {
   case "$1" in
@@ -114,6 +134,10 @@ client_available() {
     swift) command -v swiftc >/dev/null ;;
     assemblyscript) command -v node >/dev/null ;;
     shell) return 0 ;;
+    r) command -v Rscript >/dev/null ;;
+    julia) command -v julia >/dev/null ;;
+    fortran) command -v gfortran >/dev/null && command -v cc >/dev/null ;;
+    cobol) command -v cobc >/dev/null && command -v cc >/dev/null ;;
     ktnative) command -v konanc >/dev/null ||
       [ -x "${POLYGLOT_CACHE:-/cache}/kotlin-native/bin/konanc" ] ||
       command -v curl >/dev/null ;;
@@ -123,4 +147,4 @@ client_available() {
 
 # Every thin client in the matrix, in a stable order. One entry per language in
 # the Infinity matrix, including Rust and TypeScript.
-CLIENTS=(python c cpp rust zig js ts go ruby php lua dart java kotlin scala csharp swift ktnative assemblyscript shell)
+CLIENTS=(python c cpp rust zig js ts go ruby php lua dart java kotlin scala csharp swift ktnative assemblyscript shell r julia fortran cobol)

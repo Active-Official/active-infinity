@@ -1,12 +1,31 @@
 # Thin RPC clients (polyglot)
 
 Every language in the polyglot matrix ships a thin Active RPC client, one per
-language row: 20 clients including a Rust client that hand-encodes ARP1 with the
+language row: 24 clients including a Rust client that hand-encodes ARP1 with the
 standard library only (so the reference language is exercised without its own
 codec) and a TypeScript client compiled from `ts_client.ts` with `tsc --strict`.
 The kernel stays in Rust; a client proves it can put a real ARP1 envelope with a
 capability on the wire, carry an AINF payload, read the response, and surface a
 refusal code.
+
+| Runtime | File | Notes |
+|---|---|---|
+| Python, JavaScript, TypeScript, AssemblyScript | `*_client.py/.js/.ts` | native sockets |
+| Go, Rust, C, C++, Zig, Swift | `*_client.go/.rs/.c/.cpp/.zig/.swift` | native sockets |
+| Ruby, PHP, LuaJIT, Dart, Java, Kotlin, Kotlin/Native, Scala, C# | `*_client.*`, `RpcClient.java`, ... | native sockets |
+| Shell | `shell_client.sh` | `/dev/tcp` |
+| R | `r_client.r` | base R `socketConnection` + `writeBin`/`readBin`; u64 as two u32 halves |
+| Julia | `julia_client.jl` | `Sockets`, `htol`/`ltoh` |
+| Fortran | `fortran_client.f90` | `iso_c_binding` + `native/rpc_socket.c` for connect/send/recv |
+| COBOL | `cobol_client.cob` | COMP-5 fields copied through PIC X redefines + the same C shim |
+
+`native/rpc_socket.c` is a byte carrier: it opens a TCP connection, sends a
+buffer, reads one length-prefixed frame, closes, and decodes the 32-hex
+capability id. It contains no ARP1 knowledge, so the Fortran and COBOL lanes
+still prove their language can encode the envelope. Neither language exposes
+the process environment reliably to a statically linked C object, so both read
+the harness variables with their own runtime (`get_environment_variable` and
+`ACCEPT ... FROM ENVIRONMENT`).
 
 Modern transports (QUIC/HTTP3, HTTP/2) are implemented once, in the Rust stack.
 Thin clients use native ARP1 over TCP, the lowest common denominator that every
@@ -95,7 +114,10 @@ export ACTIVE_RPC_PAYLOAD=tests/vectors/valid/full.ainf
 python polyglot/rpc/python_client.py
 ```
 
-`polyglot/rpc/run_clients.sh` automates that for every runtime it finds:
+`polyglot/rpc/run_clients.sh` automates that for every runtime it finds. The
+Fortran and COBOL rows build through `clients.sh`, which compiles the shim and
+links it into the client (on Windows the shim also needs `-lws2_32`; the harness
+is POSIX and does not):
 
 ```text
 bash polyglot/rpc/run_clients.sh /path/to/active-rpc "$PWD" [client...]

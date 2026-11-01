@@ -7,7 +7,10 @@ rows.
 Verified 2026-10-31 at `ebec21d` (Infinity) and `66f9fef` (Active RPC), re-run
 for the RPC column at `59e58e2` (Rust and TypeScript clients, 20/20 live and
 20/20 byte-identical), in the `active-all-toolchains:phase2` container
-(Ubuntu 24.04).
+(Ubuntu 24.04). The R, Julia, Fortran and COBOL RPC rows were added and run on
+2026-11-01 against the real kernel peer on Windows (R 4.6.2, Julia 1.13.3,
+GFortran 16.2.0, GnuCOBOL 3.1.2) and each frame is byte-identical to the Rust
+reference encoder (2 742 hex characters for the fixed call).
 
 | # | Language | Validate + hash | Redaction | Encode | RPC thin client | Result |
 |---|----------|-----------------|-----------|--------|-----------------|--------|
@@ -31,10 +34,10 @@ for the RPC column at `59e58e2` (Rust and TypeScript clients, 20/20 live and
 | 18 | AssemblyScript | PASS | PASS | PASS | PASS | PASS |
 | 19 | Lua | PASS | PASS | PASS | PASS | PASS |
 | 20 | Shell / ops | PASS | PASS | PASS | PASS | PASS |
-| 21 | Julia | PASS | PASS | PASS | not yet (RPC C-8.3) | PASS |
-| 22 | Fortran | PASS | PASS | PASS | not yet (RPC C-8.3) | PASS |
-| 23 | R | PASS | PASS | PASS | not yet (RPC C-8.3) | PASS |
-| 24 | COBOL | PASS | PASS | PASS | not yet (RPC C-8.3) | PASS |
+| 21 | Julia | PASS | PASS | PASS | PASS | PASS |
+| 22 | Fortran | PASS | PASS | PASS | PASS | PASS |
+| 23 | R | PASS | PASS | PASS | PASS | PASS |
+| 24 | COBOL | PASS | PASS | PASS | PASS | PASS |
 
 ## What each column means
 
@@ -53,7 +56,9 @@ for the RPC column at `59e58e2` (Rust and TypeScript clients, 20/20 live and
   client: Rust hand-encodes ARP1 with the standard library only
   (`polyglot/rpc/rust_client.rs`), and TypeScript is compiled from
   `polyglot/rpc/ts_client.ts` with `tsc --strict` rather than reusing the
-  JavaScript script.
+  JavaScript script. R uses base `socketConnection`/`writeBin`, Julia uses
+  `Sockets` with `htol`, and Fortran and COBOL call `polyglot/rpc/native/rpc_socket.c`
+  for connect/send/recv while encoding ARP1 themselves.
 
 ## CI jobs
 
@@ -61,10 +66,11 @@ for the RPC column at `59e58e2` (Rust and TypeScript clients, 20/20 live and
 `polyglot-scripting`, `polyglot-dotnet`, `polyglot-jvm`, `polyglot-swift`,
 `polyglot-kotlin-native`, `polyglot-assemblyscript`, `polyglot-shell`, and
 `polyglot-rpc` (live matrix plus byte-exact encoder conformance). The
-`polyglot-rpc` job runs with `ACTIVE_RPC_STRICT=1` and names all 20 clients
+`polyglot-rpc` job runs with `ACTIVE_RPC_STRICT=1` and names all 24 clients
 (`python c cpp rust zig js ts go ruby php lua dart java kotlin scala csharp
-swift ktnative assemblyscript shell`), so a missing runtime fails the job
-instead of skipping a language.
+swift ktnative assemblyscript shell r julia fortran cobol`), so a missing runtime
+fails the job instead of skipping a language. The job installs `r-base-core`,
+`gfortran`, `gnucobol` and a pinned Julia tarball for the four new rows.
 
 ## Reproduce
 
@@ -78,8 +84,8 @@ bash polyglot/rpc/run_clients.sh /path/to/active-rpc "$PWD"
 ```
 
 Encoder bytes are compared with the Rust reference; on a mismatch the check
-prints the first differing byte offset. All 20 languages produce identical
-request bytes: the 18 earlier clients, the TypeScript client compiled with
-`tsc --strict`, and a Rust thin client that hand-encodes ARP1 with the standard
-library only (so the reference language is checked by an implementation that
-does not use the kernel codec).
+prints the first differing byte offset. All 24 languages produce identical
+request bytes: the 18 earlier clients, the four new rows, the TypeScript client
+compiled with `tsc --strict`, and a Rust thin client that hand-encodes ARP1 with
+the standard library only (so the reference language is checked by an
+implementation that does not use the kernel codec).

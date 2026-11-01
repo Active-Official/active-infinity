@@ -51,6 +51,22 @@ pub const MAX_MERGE_NODES: usize = 262_144;
 /// a pathological nested conflict walk hits it and fails closed.
 pub const MAX_MERGE_WORK: usize = 16 * MAX_MERGE_NODES;
 
+/// References (table fields, array elements, children) a merge compares.
+///
+/// A node can hold far more references than [`MAX_MERGE_NODES`] counts nodes,
+/// and merge builds per-input maps keyed by field name, so a two-node table
+/// with millions of fields would cost memory proportional to its width while
+/// the node budget saw nothing. This ceiling is checked before a map or a
+/// traversal is built.
+pub const MAX_MERGE_EDGES: usize = 4 * MAX_MERGE_NODES;
+
+/// Canonical subtree bytes a merge encodes while comparing.
+///
+/// Equality compares re-encoded fragments, and a small node set can share one
+/// large value across thousands of fields, so a node budget alone would let
+/// the work amplify to gigabytes. This budget bounds the encoding itself.
+pub const MAX_MERGE_BYTES: usize = 256 << 20;
+
 /// Total bytes of conflict paths one merge may report.
 pub const MAX_CONFLICT_PATH_BYTES: usize = 1 << 20;
 
@@ -139,11 +155,19 @@ pub fn merge(
         }
         module.validate_structure(MAX_MERGE_NODES as u64, max_depth)?;
     }
+    // Every secret anywhere in the three inputs, so a hash that copies one is
+    // never compared by value even when the copy lives in another input.
+    let mut hash_secrets: Vec<Vec<u8>> = Vec::new();
+    for module in [base, left, right] {
+        hash_secrets.extend(crate::interop::secret_bytes(module));
+    }
     let ctx = Ctx {
         base,
         left,
         right,
         budget: Cell::new(MAX_MERGE_WORK),
+        bytes: Cell::new(MAX_MERGE_BYTES),
+        hash_secrets,
     };
 
     let mut conflicts = ConflictSet::default();
@@ -161,9 +185,9 @@ pub fn merge(
         conflicts.push(String::new(), ConflictKind::KindMismatch)?;
         return Ok(Merge::Conflicts(conflicts.into_vec()));
     };
-    let base_map = field_map(base_fields);
-    let left_map = field_map(left_fields);
-    let right_map = field_map(right_fields);
+    let base_map = field_map(base_fields)?;
+    let left_map = field_map(left_fields)?;
+    let right_map = field_map(right_fields)?;
 
     let names: BTreeSet<&str> = base_map
         .keys()
@@ -232,10 +256,20 @@ pub fn merge(
             return Ok(Merge::Conflicts(conflicts.into_vec()));
         };
         fields.retain(|(name, _)| !removed.contains(name.as_str()));
-        for (name, id) in additions {
-            match fields.iter_mut().find(|(field, _)| *field == name) {
-                Some((_, slot)) => *slot = id,
-                None => fields.push((name, id)),
+        // Index the surviving fields once: a linear scan per addition is
+        // quadratic in the table width (`additions x fields`).
+        let mut pending: std::collections::HashMap<&str, NodeId> = additions
+            .iter()
+            .map(|(name, id)| (name.as_str(), *id))
+            .collect();
+        for (name, slot) in fields.iter_mut() {
+            if let Some(id) = pending.remove(name.as_str()) {
+                *slot = id;
+            }
+        }
+        for (name, id) in &additions {
+            if pending.contains_key(name.as_str()) {
+                fields.push((name.clone(), *id));
             }
         }
         fields.sort_by(|a, b| a.0.cmp(&b.0));
@@ -247,6 +281,15 @@ pub fn merge(
     // reach and validates the result.
     let image = encode(&merged)?;
     let module = decode(&image)?;
+    // A clean merge imports at most one right-hand cone on top of the left
+    // module, so the result can be twice an input. Keep the returned module
+    // under the same ceiling a caller needed to hand in.
+    if module.node_count() > MAX_MERGE_NODES {
+        return Err(Error::Limit {
+            kind: "merge output nodes",
+            limit: MAX_MERGE_NODES as u64,
+        });
+    }
     Ok(Merge::Clean(Box::new(module)))
 }
 
@@ -281,6 +324,8 @@ struct Ctx<'a> {
     left: &'a InfinityModule,
     right: &'a InfinityModule,
     budget: Cell<usize>,
+    bytes: Cell<usize>,
+    hash_secrets: Vec<Vec<u8>>,
 }
 
 impl Ctx<'_> {
@@ -293,6 +338,18 @@ impl Ctx<'_> {
             });
         }
         self.budget.set(remaining - nodes);
+        Ok(())
+    }
+
+    fn charge_bytes(&self, bytes: usize) -> Result<()> {
+        let remaining = self.bytes.get();
+        if remaining < bytes {
+            return Err(Error::Limit {
+                kind: "merge bytes",
+                limit: MAX_MERGE_BYTES as u64,
+            });
+        }
+        self.bytes.set(remaining - bytes);
         Ok(())
     }
 
@@ -378,7 +435,9 @@ impl Ctx<'_> {
     fn image(&self, module: &InfinityModule, id: NodeId) -> Result<Vec<u8>> {
         let fragment = subtree_fragment(module, id)?;
         self.charge(fragment.node_count())?;
-        encode(&fragment)
+        let encoded = encode(&fragment)?;
+        self.charge_bytes(encoded.len())?;
+        Ok(encoded)
     }
 
     /// Whether a subtree reaches secret material, charging every node visited.
@@ -396,7 +455,11 @@ impl Ctx<'_> {
             if node.is_secret() {
                 found = true;
             }
-            stack.extend(node.children());
+            let children = node.children();
+            // Charge the references before pushing them: a wide node would
+            // otherwise commit its whole child list to the stack first.
+            self.charge(children.len())?;
+            stack.extend(children);
         }
         self.charge(seen.len())?;
         Ok(found)
@@ -430,7 +493,7 @@ impl Ctx<'_> {
             return Ok(());
         }
         let base_fields = match b {
-            Some(id) => match table_fields(self.base, id) {
+            Some(id) => match table_fields(self.base, id)? {
                 Some(fields) => Some(fields),
                 // The base is not a table while both sides are: the shape
                 // changed, so this is the parent's conflict, not a child's.
@@ -439,8 +502,8 @@ impl Ctx<'_> {
             None => None,
         };
         let (Some(left_fields), Some(right_fields)) = (
-            table_fields(self.left, left_id),
-            table_fields(self.right, right_id),
+            table_fields(self.left, left_id)?,
+            table_fields(self.right, right_id)?,
         ) else {
             return Ok(());
         };
@@ -479,9 +542,9 @@ impl Ctx<'_> {
     /// changes.
     fn metadata_plan(&self, conflicts: &mut ConflictSet) -> Result<MetaPlan> {
         let mut plan = MetaPlan::default();
-        let base_map = binding_map(self.base);
-        let left_map = binding_map(self.left);
-        let right_map = binding_map(self.right);
+        let base_map = binding_map(self.base)?;
+        let left_map = binding_map(self.left)?;
+        let right_map = binding_map(self.right)?;
         let names: BTreeSet<&str> = base_map
             .keys()
             .chain(left_map.keys())
@@ -514,10 +577,10 @@ impl Ctx<'_> {
         }
 
         // Provenance: one block, compared through a redacted rendering.
-        let left_key = provenance_key(self.left);
-        let right_key = provenance_key(self.right);
+        let left_key = provenance_key(self.left, &self.hash_secrets);
+        let right_key = provenance_key(self.right, &self.hash_secrets);
         if left_key != right_key {
-            let base_key = provenance_key(self.base);
+            let base_key = provenance_key(self.base, &self.hash_secrets);
             if base_key == left_key {
                 plan.provenance = Some(self.right.provenance().cloned());
             } else if base_key != right_key {
@@ -647,6 +710,7 @@ fn subtree_fragment(module: &InfinityModule, id: NodeId) -> Result<InfinityModul
     let mut order: Vec<NodeId> = Vec::new();
     let mut seen: BTreeSet<NodeId> = BTreeSet::new();
     let mut stack = vec![(id, false)];
+    let mut edges = 0usize;
     while let Some((node, expanded)) = stack.pop() {
         if expanded {
             order.push(node);
@@ -659,7 +723,15 @@ fn subtree_fragment(module: &InfinityModule, id: NodeId) -> Result<InfinityModul
             return Err(Error::NodeRef(node.0));
         }
         stack.push((node, true));
-        for child in module.get(node).map(Inode::children).unwrap_or_default() {
+        let children = module.get(node).map(Inode::children).unwrap_or_default();
+        edges = edges
+            .checked_add(children.len())
+            .filter(|total| *total <= MAX_MERGE_EDGES)
+            .ok_or(Error::Limit {
+                kind: "merge subtree edges",
+                limit: MAX_MERGE_EDGES as u64,
+            })?;
+        for child in children {
             stack.push((child, false));
         }
     }
@@ -727,26 +799,38 @@ fn escape_field(name: &str) -> String {
     out
 }
 
-fn field_map(fields: &[(String, NodeId)]) -> BTreeMap<&str, NodeId> {
-    fields
+fn field_map(fields: &[(String, NodeId)]) -> Result<BTreeMap<&str, NodeId>> {
+    if fields.len() > MAX_MERGE_EDGES {
+        return Err(Error::Limit {
+            kind: "merge table width",
+            limit: MAX_MERGE_EDGES as u64,
+        });
+    }
+    Ok(fields
         .iter()
         .map(|(name, id)| (name.as_str(), *id))
-        .collect()
+        .collect())
 }
 
-fn binding_map(module: &InfinityModule) -> BTreeMap<&str, NodeId> {
-    module
-        .bindings()
+fn binding_map(module: &InfinityModule) -> Result<BTreeMap<&str, NodeId>> {
+    let bindings = module.bindings();
+    if bindings.len() > MAX_MERGE_EDGES {
+        return Err(Error::Limit {
+            kind: "merge bindings",
+            limit: MAX_MERGE_EDGES as u64,
+        });
+    }
+    Ok(bindings
         .iter()
         .map(|(name, id)| (name.as_str(), *id))
-        .collect()
+        .collect())
 }
 
 /// The fields of a table node, keyed by name.
-fn table_fields(module: &InfinityModule, id: NodeId) -> Option<BTreeMap<&str, NodeId>> {
+fn table_fields(module: &InfinityModule, id: NodeId) -> Result<Option<BTreeMap<&str, NodeId>>> {
     match module.get(id) {
-        Some(Inode::Table { fields }) => Some(field_map(fields)),
-        _ => None,
+        Some(Inode::Table { fields }) => field_map(fields).map(Some),
+        _ => Ok(None),
     }
 }
 
@@ -759,10 +843,22 @@ fn root_fields(module: &InfinityModule) -> Option<&[(String, NodeId)]> {
 }
 
 /// A deterministic rendering of provenance with every free text redacted.
-fn provenance_key(module: &InfinityModule) -> Option<String> {
+fn provenance_key(module: &InfinityModule, hash_secrets: &[Vec<u8>]) -> Option<String> {
     let provenance = module.provenance()?;
     let secrets = crate::interop::secret_texts(module);
     let redact = |text: &str| crate::interop::redact_text(text, &secrets);
+    // A 32-byte secret can be copied into a hash field. A hash has no text to
+    // redact, so a copy becomes the marker, exactly as the projections do.
+    let hash_text = |hash: &[u8; 32]| -> String {
+        if hash_secrets
+            .iter()
+            .any(|secret| !secret.is_empty() && secret.as_slice() == hash)
+        {
+            crate::canonical::SECRET_MARKER.to_string()
+        } else {
+            hex(hash)
+        }
+    };
     let mut out = String::new();
     for text in [
         provenance.producer.as_deref(),
@@ -779,7 +875,7 @@ fn provenance_key(module: &InfinityModule) -> Option<String> {
     }
     out.push_str(&format!("t{};", provenance.timestamp_ms));
     match provenance.parent {
-        Some(hash) => out.push_str(&format!("p{};", hex(&hash))),
+        Some(hash) => out.push_str(&format!("p{};", hash_text(&hash))),
         None => out.push_str("p-;"),
     }
     let mut entries: Vec<(String, String)> = provenance
@@ -791,7 +887,7 @@ fn provenance_key(module: &InfinityModule) -> Option<String> {
                 crate::ir::ProvValue::Text(text) => format!("T{}", redact(text)),
                 crate::ir::ProvValue::Int(value) => format!("I{value}"),
                 crate::ir::ProvValue::Flag(flag) => format!("F{flag}"),
-                crate::ir::ProvValue::Hash(hash) => format!("H{}", hex(hash)),
+                crate::ir::ProvValue::Hash(hash) => format!("H{}", hash_text(hash)),
             };
             (key, value)
         })
@@ -834,4 +930,37 @@ fn hex(bytes: &[u8]) -> String {
         let _ = write!(out, "{byte:02x}");
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{InfinityModule, Inode, Provenance, SecretBytes};
+
+    /// 32 bytes, so it can be copied into a provenance hash verbatim.
+    const CANARY: &[u8; 32] = b"0123456789abcdef0123456789abcdef";
+
+    /// A hash that copies a secret is replaced by the marker in the comparison
+    /// key, exactly as every projection renders it. Without this, the key is a
+    /// value comparison against secret bytes.
+    #[test]
+    fn a_provenance_hash_that_copies_a_secret_is_marked() {
+        let mut module = InfinityModule::new();
+        let value = module.push(Inode::Secret(SecretBytes::from(
+            std::str::from_utf8(CANARY).expect("ascii"),
+        )));
+        module.set_root(Some(value));
+        module.set_provenance(Some(Provenance {
+            parent: Some(*CANARY),
+            ..Provenance::default()
+        }));
+
+        let key = provenance_key(&module, &[CANARY.to_vec()]).expect("key");
+        assert!(key.contains(crate::canonical::SECRET_MARKER), "{key}");
+        assert!(!key.contains(&hex(CANARY)), "{key}");
+
+        // Without a matching secret the hash is ordinary data.
+        let key = provenance_key(&module, &[]).expect("key");
+        assert!(key.contains(&hex(CANARY)), "{key}");
+    }
 }

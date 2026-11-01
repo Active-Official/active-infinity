@@ -103,7 +103,19 @@ impl Proof {
     }
 
     /// Verify a proof that may carry a schema hash.
+    ///
+    /// Every image or schema fault is reported as `infinity/proof`, the
+    /// sidecar's code; a resource ceiling is passed through.
     pub fn verify_with_schema(&self, image: &[u8], schema: Option<&[u8]>) -> Result<()> {
+        self.check(image, schema).map_err(|error| match error {
+            Error::Limit { .. } | Error::Proof(_) => error,
+            _ => Error::Proof("the proof does not verify"),
+        })
+    }
+
+    /// The verifying body, split out so image and schema faults pass through
+    /// one mapping to the sidecar's code.
+    fn check(&self, image: &[u8], schema: Option<&[u8]>) -> Result<()> {
         let meta = validate_canonical(image, Limits::default())?;
         let actual = Proof::from_meta(&meta, self.schema_hash);
         if actual.content_hash != self.content_hash {
@@ -237,7 +249,11 @@ impl Proof {
             u32::try_from(number(key)?).map_err(|_| Error::Proof("field out of range"))
         };
         let schema_hash = match value.get("schema_hash") {
-            None | Some(serde_json::Value::Null) => None,
+            // The field is mandatory and `null` is the canonical spelling for
+            // "no schema"; accepting a missing key would give one proof two
+            // byte encodings.
+            None => return Err(Error::Proof("the schema_hash field is required")),
+            Some(serde_json::Value::Null) => None,
             Some(serde_json::Value::String(text)) => Some(parse_hex32(text)?),
             Some(_) => return Err(Error::Proof("schema hash is not a string")),
         };

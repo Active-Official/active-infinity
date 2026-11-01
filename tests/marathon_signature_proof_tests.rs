@@ -196,3 +196,40 @@ fn a_numeric_string_must_be_canonical_decimal() {
     let parsed = Proof::from_json(&value.to_string()).expect("zero is canonical");
     assert_eq!(parsed.dialect_hash, 0);
 }
+
+/// A monitor that counts `infinity/proof` rejections must see them all: a raw
+/// codec code would slip past it and read as a different failure class.
+#[cfg(feature = "json")]
+#[test]
+fn verify_reports_one_code_for_a_malformed_image() {
+    use active_infinity::Proof;
+
+    let image = encode(&module()).expect("encode");
+    let proof = Proof::issue(&image).expect("issue");
+    for bad in [&b""[..], &b"nonsense"[..], &b"AINF"[..]] {
+        let error = proof.verify(bad).expect_err("the image is refused");
+        assert_eq!(error.code(), "infinity/proof", "{error}");
+    }
+}
+
+/// The field is mandatory so one proof has one byte encoding; `null` is the
+/// canonical spelling for "no schema".
+#[cfg(feature = "json")]
+#[test]
+fn a_sidecar_without_a_schema_hash_field_is_refused() {
+    use active_infinity::Proof;
+
+    let proof = Proof::issue(&encode(&module()).expect("encode")).expect("issue");
+    let mut value: serde_json::Value = serde_json::from_str(&proof.to_json()).expect("json");
+    value
+        .as_object_mut()
+        .expect("object")
+        .remove("schema_hash")
+        .expect("the field is written");
+    let error = Proof::from_json(&value.to_string()).expect_err("a missing field is refused");
+    assert_eq!(error.code(), "infinity/proof", "{error}");
+
+    value["schema_hash"] = serde_json::Value::Null;
+    let parsed = Proof::from_json(&value.to_string()).expect("null is canonical");
+    assert!(parsed.schema_hash.is_none());
+}

@@ -183,3 +183,23 @@ fn the_signed_object_round_trips_through_the_same_bytes() {
     assert_eq!(encode(&module).expect("encode"), recovered);
     fs::remove_dir_all(&dir).expect("cleanup");
 }
+
+#[test]
+fn a_weak_trusted_key_is_refused() {
+    let dir = sandbox("weak-key");
+    let store = Store::open(&dir).expect("store");
+    let signed = SignedImage::sign_with_seed(image("weak"), &[9u8; 32]).expect("sign");
+    let hash = store.put_signed(&signed).expect("put signed");
+    // The identity point is a valid compressed Edwards point of small order: a
+    // forged signature under it verifies for every message.
+    let mut bytes = [0u8; 32];
+    bytes[0] = 1;
+    let key = ed25519_dalek::VerifyingKey::from_bytes(&bytes).expect("identity point");
+    assert!(key.is_weak());
+    let error = store
+        .get_verified(&hash, Some(&key))
+        .expect_err("a weak key cannot be a trust anchor");
+    assert_eq!(error.code(), "infinity/signature", "{error}");
+    assert!(error.to_string().contains("weak"), "{error}");
+    fs::remove_dir_all(&dir).expect("cleanup");
+}

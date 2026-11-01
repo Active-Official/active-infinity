@@ -187,3 +187,43 @@ fn the_import_budget_refuses_two_takes_of_a_shared_cone() {
     assert_eq!(error.code(), "infinity/limit", "{error}");
     assert!(error.to_string().contains("imported"), "{error}");
 }
+
+/// A node can hold far more fields than the node budget counts nodes. A wide
+/// array must be refused before its whole child list is pushed or mapped.
+#[test]
+fn a_wide_array_is_refused_before_it_is_walked() {
+    // One more than the merge edge ceiling (4 x MAX_MERGE_NODES).
+    let mut module = InfinityModule::new();
+    let leaf = module.push(Inode::Int(7));
+    let wide = module.push(Inode::Array {
+        elements: vec![leaf; 1_048_577],
+    });
+    let root = module.push(Inode::Table {
+        fields: vec![("wide".into(), wide)],
+    });
+    module.set_root(Some(root));
+
+    let error = merge(&module, &module, &module).expect_err("the width is refused");
+    assert_eq!(error.code(), "infinity/limit", "{error}");
+}
+
+/// Equality re-encodes a fragment per field, so one shared large value under
+/// many fields must be charged in bytes, not only in nodes.
+#[test]
+fn a_shared_large_value_is_charged_in_bytes() {
+    let mut module = InfinityModule::new();
+    let text = "x".repeat(2 << 20);
+    let value = module.push(Inode::Str(text));
+    let mut fields = Vec::new();
+    for index in 0..200 {
+        fields.push((format!("f{index:03}"), value));
+    }
+    let root = module.push(Inode::Table { fields });
+    module.set_root(Some(root));
+
+    let error =
+        merge(&module, &module, &module).expect_err("the encoded work exceeds the byte budget");
+    assert_eq!(error.code(), "infinity/limit", "{error}");
+    assert!(error.to_string().contains("bytes"), "{error}");
+    // The probe re-encodes 400 MiB against a 256 MiB merge byte budget.
+}

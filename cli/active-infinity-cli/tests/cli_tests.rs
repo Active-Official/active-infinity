@@ -886,3 +886,76 @@ fn dict_apply_refuses_a_flag_that_the_mode_cannot_use() {
         stderr(&output)
     );
 }
+
+#[test]
+fn dict_apply_refuses_output_equal_to_the_dictionary() {
+    let dir = sandbox("dict-output-clash");
+    let input = dir.join("input.bin");
+    write(&input, b"payload bytes");
+    let dictionary = dir.join("corpus.dict");
+    write(&dictionary, &image(0));
+    let before = fs::read(&dictionary).expect("read dictionary");
+
+    // Overwriting the dictionary would silently replace it with data output;
+    // every later run would compress under a "dictionary" that is not one.
+    let output = run(&[
+        "dict",
+        "apply",
+        "--dictionary",
+        dictionary.to_str().expect("utf8"),
+        "--output",
+        dictionary.to_str().expect("utf8"),
+        input.to_str().expect("utf8"),
+    ]);
+    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+    assert!(stderr(&output).contains("usage:"), "{}", stderr(&output));
+    assert_eq!(fs::read(&dictionary).expect("read dictionary"), before);
+}
+
+#[test]
+fn dict_train_needs_an_output_path() {
+    let dir = sandbox("dict-no-output");
+    let mut samples = Vec::new();
+    for seed in 0..2 {
+        let path = dir.join(format!("sample-{seed}.ainf"));
+        write(&path, &image(seed));
+        samples.push(path.to_string_lossy().into_owned());
+    }
+    let mut args = vec!["dict".to_string(), "train".to_string()];
+    args.extend(samples);
+    let reference: Vec<&str> = args.iter().map(String::as_str).collect();
+    let output = run(&reference);
+    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("needs --output"),
+        "{}",
+        stderr(&output)
+    );
+    assert!(output.stdout.is_empty(), "no dictionary on stdout");
+}
+
+#[test]
+fn dict_apply_refuses_an_empty_dictionary() {
+    let dir = sandbox("dict-empty");
+    let input = dir.join("input.bin");
+    write(&input, b"payload bytes");
+    let dictionary = dir.join("empty.dict");
+    write(&dictionary, b"");
+
+    // An empty dictionary is not a dictionary; zstd would silently compress
+    // without one while the command claims otherwise.
+    let output = run(&[
+        "dict",
+        "apply",
+        "--dictionary",
+        dictionary.to_str().expect("utf8"),
+        input.to_str().expect("utf8"),
+    ]);
+    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("must not be empty"),
+        "{}",
+        stderr(&output)
+    );
+}
+

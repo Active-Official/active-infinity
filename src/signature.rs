@@ -88,10 +88,11 @@ impl SignedImage {
     /// A malformed image is an envelope fault (`infinity/signature`); a
     /// resource ceiling is passed through.
     pub fn content_hash(&self) -> Result<[u8; 32]> {
-        crate::content_hash(&self.image).map_err(|error| match error {
-            Error::Limit { .. } => error,
-            _ => Error::Signature("the envelope's image does not validate"),
-        })
+        // Prove the image is canonical before hashing it. The envelope only
+        // ever holds a canonical image, and a hash over any other bytes would
+        // name content that re-encodes to something else.
+        validate_canonical(&self.image, Limits::default()).map_err(envelope_fault)?;
+        crate::content_hash(&self.image).map_err(envelope_fault)
     }
 
     /// Serialize the detached envelope.
@@ -148,12 +149,16 @@ impl SignedImage {
 /// copying it. Every image fault is `infinity/signature` except a resource
 /// ceiling, which keeps `infinity/limit`.
 fn verify_parts(image: &[u8], public_key: &[u8; 32], signature: &[u8; 64]) -> Result<()> {
-    validate_canonical(image, Limits::default()).map_err(|error| match error {
-        Error::Limit { .. } => error,
-        _ => Error::Signature("the signed image does not validate"),
-    })?;
+    validate_canonical(image, Limits::default()).map_err(envelope_fault)?;
     let key =
         VerifyingKey::from_bytes(public_key).map_err(|_| Error::Signature("invalid public key"))?;
+    // A small-order (weak) key makes verification independent of the message:
+    // with R = identity and S = 0 the equation holds for any image, so an
+    // envelope under such a key is a forgery that never needed a private
+    // scalar. Refuse the key instead of reporting a verified envelope.
+    if key.is_weak() {
+        return Err(Error::Signature("the public key is weak"));
+    }
     let signature = Signature::from_bytes(signature);
     let mut message = Vec::with_capacity(DOMAIN.len() + image.len());
     message.extend_from_slice(DOMAIN);
@@ -161,6 +166,14 @@ fn verify_parts(image: &[u8], public_key: &[u8; 32], signature: &[u8; 64]) -> Re
     key.verify(&message, &signature)
         .map_err(|_| Error::Signature("signature does not verify"))?;
     Ok(())
+}
+
+/// Map a validation fault to the envelope's code, keeping a resource ceiling.
+fn envelope_fault(error: Error) -> Error {
+    match error {
+        Error::Limit { .. } => error,
+        _ => Error::Signature("the envelope's image does not validate"),
+    }
 }
 
 /// Largest envelope accepted: the codec's image ceiling plus the fixed header
@@ -229,6 +242,48 @@ mod tests {
         bytes.extend_from_slice(&doctored);
         let error = SignedImage::from_bytes(&bytes).expect_err("the image is refused");
         assert_eq!(error.code(), "infinity/limit", "{error}");
+    }
+
+    #[test]
+    fn a_weak_key_envelope_is_refused() {
+        // The identity point is a valid compressed Edwards point of small
+        // order; with R = identity and S = 0 the verification equation holds
+        // for every message.
+        let image = image();
+        let mut public_key = [0u8; 32];
+        public_key[0] = 1;
+        let mut signature = [0u8; 64];
+        signature[0] = 1;
+        let mut bytes = MAGIC.to_vec();
+        bytes.push(VERSION);
+        bytes.extend_from_slice(&public_key);
+        bytes.extend_from_slice(&signature);
+        bytes.extend_from_slice(&image);
+        let error = SignedImage::from_bytes(&bytes).expect_err("the envelope is refused");
+        assert_eq!(error.code(), "infinity/signature", "{error}");
+    }
+
+    #[test]
+    fn content_hash_refuses_a_non_canonical_image() {
+        let key = SigningKey::from_bytes(&[7u8; 32]);
+        let mut doctored = image();
+        // Clear the canonical flag and rewrite the header hash so integrity
+        // alone passes; a hash over these bytes would name content that
+        // re-encodes to different bytes.
+        doctored[8] &= !1;
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(&doctored[..16]);
+        hasher.update(&[0u8; 32]);
+        hasher.update(&doctored[48..]);
+        let hash = *hasher.finalize().as_bytes();
+        doctored[16..48].copy_from_slice(&hash);
+        let signed = SignedImage {
+            image: doctored,
+            public_key: key.verifying_key().to_bytes(),
+            signature: [0u8; 64],
+        };
+        let error = signed.content_hash().expect_err("refused");
+        assert_eq!(error.code(), "infinity/signature", "{error}");
     }
 
     /// `content_hash` reports envelope faults under the envelope's code, so a

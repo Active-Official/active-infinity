@@ -22,9 +22,9 @@ the code → regression test first → minimal fix → targeted tests + clippy �
 | I-06 | stream and delta | `src/stream.rs` | CLEAN | 7 fixed, 2 rejected, 0 open | this commit |
 | I-07 | schema class | `src/schema.rs` | CLEAN | 6 fixed, 1 rejected | this commit |
 | I-08 | store | `src/store.rs` | **CLEAN** | 7 fixed, 1 rejected | this commit |
-| I-09 | compress | `src/compress.rs`, CLI `dict` | **CLEAN** (round 2: 5 more fixed) | 11 fixed, 4 rejected/documented | this commit |
-| I-10 | signature / proof | `src/signature.rs`, `src/proof.rs` | **CLEAN** | 6 fixed, 2 rejected/documented | this commit |
-| I-11 | merge | `src/merge.rs` | **CLEAN** | 7 fixed, 1 rejected | this commit |
+| I-09 | compress | `src/compress.rs`, CLI `dict` | **CLEAN** (round 3: 5 more fixed) | 16 fixed, 4 rejected/documented | this commit |
+| I-10 | signature / proof | `src/signature.rs`, `src/proof.rs` | **CLEAN** (round 3: weak keys, code mapping) | 10 fixed, 2 rejected/documented | this commit |
+| I-11 | merge | `src/merge.rs` | **CLEAN** (round 2: width/byte budgets) | 11 fixed, 1 rejected | this commit |
 | I-12 | interop / protobuf | `src/interop.rs`, `src/protobuf.rs` | **CLEAN** | 6 fixed, 1 rejected | this commit |
 | I-13 | error codes | `src/error.rs` | **CLEAN** | 6 fixed, 2 rejected | this commit |
 | I-14 | FFI | `ffi/**` | **CLEAN** | 12 fixed, 3 documented | this commit |
@@ -750,3 +750,51 @@ Gate: 349 library/integration tests plus 26 CLI tests, clippy clean both
 feature sets and the CLI package; each new test proved to fail against the
 pre-fix tree (library tests by stashing `src/compress.rs`, CLI tests by stashing
 `cli/active-infinity-cli/src/main.rs`).
+
+### Re-audit round 3 (I-09) - 2026-10-31
+
+Reviewer scope: `src/compress.rs`, the CLI `dict` surface. All five round-2
+fixes verified holding by live probe. Findings: 2 medium, 3 low.
+
+| # | Severity | Finding | Disposition |
+|---|---|---|---|
+| 1 | medium | `dict apply` checked the input against `--output` but not the dictionary, so `--output` equal to `--dictionary` overwrote the dictionary with data output and every later run compressed under a file that is not a dictionary | **fixed**: `ensure_distinct(dictionary, output)`; `dict_apply_refuses_output_equal_to_the_dictionary` (fails pre-fix, exit 0) |
+| 2 | medium | `dict train` summed declared sizes but read every sample under a fixed per-file ceiling, so a sample that grew between the metadata pass and the read committed more than the total budget, and `total` stayed stale | **fixed**: each sample is read against the remaining budget (`ceiling - held`), and `total` is the bytes actually held; the same test path refuses the over-budget corpus |
+| 3 | low | `dict train` without `--output` wrote the binary dictionary to stdout even though the usage line marks `--output` required | **fixed**: a usage error; `dict_train_needs_an_output_path` (fails pre-fix, binary on stdout) |
+| 4 | low | a zero-byte `--dictionary` was accepted and compressed without a dictionary while claiming one | **fixed**: a usage error; `dict_apply_refuses_an_empty_dictionary` (fails pre-fix) |
+| 5 | low | `carries_content_frame` computed `offset + 4` with wrapping arithmetic, so a crafted skippable length could produce a reversed range on a 32-bit target | **fixed**: both windows use `checked_add`; no panic path remains |
+| 6 | residual | concatenated content frames decode to concatenated output | **documented + pinned**: `docs/spec/streaming.md` section 6, `concatenated_content_frames_decode_in_order`; the caller's ceiling bounds the total and an image consumer fails at validation |
+
+Gate: 358 library/integration tests plus 29 CLI tests, clippy clean both
+feature sets and the CLI package; every new test proved to fail pre-fix.
+
+### Re-audit round 3 (I-10) - 2026-10-31
+
+Reviewer scope: `src/signature.rs`, `src/proof.rs`, and the store trust anchor.
+Round-2 fixes verified holding. Findings: 1 high, 2 medium, 1 low.
+
+| # | Severity | Finding | Disposition |
+|---|---|---|---|
+| 1 | high | `VerifyingKey::from_bytes` accepts small-order keys; under the identity key with `R = identity, S = 0` the verification equation holds for every message, so an envelope verifies with no private scalar. The reviewer confirmed the forgery live | **fixed**: `verify_parts` refuses `key.is_weak()`, and `Store::get_verified` refuses a weak pinned key; `a_weak_key_envelope_is_refused` (pre-fix the envelope is accepted), `a_weak_trusted_key_is_refused` (fails pre-fix) |
+| 2 | medium | `verify_with_schema` leaked raw codec and schema codes (`infinity/header-truncated`, `infinity/magic`) instead of the sidecar's `infinity/proof` | **fixed**: one mapping around the whole body, `Limit` passed through; `verify_reports_one_code_for_a_malformed_image` (fails pre-fix) |
+| 3 | medium | `content_hash` hashed any bytes, so a non-canonical image would produce a hash naming content that re-encodes to different bytes | **fixed**: `validate_canonical` runs before the hash and `envelope_fault` maps the result; `content_hash_refuses_a_non_canonical_image` (fails pre-fix) |
+| 4 | low | a sidecar without a `schema_hash` key parsed the same as `"schema_hash": null`, giving one proof two encodings | **fixed**: the key is required; `a_sidecar_without_a_schema_hash_field_is_refused` (fails pre-fix) |
+
+Gate: same suite plus 6 new tests (2 unit, 2 sidecar, 1 store, 1 compress);
+every one proved to fail against the pre-fix tree.
+
+### Re-audit round 2 (I-11) - 2026-10-31
+
+Reviewer scope: `src/merge.rs`. Round-1 fixes verified holding. Findings:
+2 high, 1 medium, 1 low.
+
+| # | Severity | Finding | Disposition |
+|---|---|---|---|
+| 1 | high | the work budget charged distinct nodes while the cost is references: a two-node table with millions of fields (the wire allows 16M) built three million-entry maps and looped before `MAX_MERGE_WORK` could trip; a 16M-element array cloned its child list into the stack charged as two nodes | **fixed**: `MAX_MERGE_EDGES` (4 x node ceiling) refuses a wide table before a map is built (`field_map`, `binding_map`, `table_field`), `has_secret` charges children before pushing them, and `subtree_fragment` counts cone edges against the same ceiling; `a_wide_array_is_refused_before_it_is_walked` (pre-fix: 5.5 s then a clean merge) |
+| 2 | high | equality re-encoded each fragment but charged only nodes, so one shared 64 MB value under 1000 fields could re-encode ~192 GB with a node charge of ~6000 | **fixed**: `MAX_MERGE_BYTES` (256 MiB) charges the encoded length of every comparison image; `a_shared_large_value_is_charged_in_bytes` (pre-fix: 34 s then a clean merge) |
+| 3 | medium | a provenance `parent` or `ProvValue::Hash` equal to a 32-byte secret was hexed for comparison, while text is redacted and projections substitute the marker | **fixed**: `provenance_key` renders a hash that copies any secret from any of the three inputs as `SECRET_MARKER`, mirroring the projections; `a_provenance_hash_that_copies_a_secret_is_marked` (fails pre-fix) |
+| 4 | low | a clean merge could return up to twice the input node ceiling (left clone plus one imported cone) with no check | **fixed**: the decoded result must be within `MAX_MERGE_NODES` (`merge output nodes`) |
+| 5 | low (found while fixing #1) | the additions loop scanned the whole field vector per added field, which is quadratic in table width | **fixed**: one `HashMap` of pending additions, then a single pass over the fields |
+
+Gate: 358 library/integration tests, clippy clean both feature sets; 3 new tests
+(2 integration, 1 unit) proved to fail against the pre-fix tree.

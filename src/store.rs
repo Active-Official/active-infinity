@@ -225,6 +225,11 @@ impl Store {
         // too. Comparing the buffers would only add a length-dependent timing
         // signal over secret-bearing bytes.
         if let Some(key) = trusted {
+            // A small-order key verifies every message under a forged
+            // signature, so it cannot be a trust anchor.
+            if key.is_weak() {
+                return Err(Error::Signature("the trusted key is weak"));
+            }
             if key.to_bytes() != signed.public_key {
                 return Err(Error::Signature("the object was signed by another key"));
             }

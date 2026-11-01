@@ -134,6 +134,10 @@ frame grammar and it does not move identity:
   Skippable frames are legal zstd and carry nothing; decoding them to an empty
   buffer would be indistinguishable from an empty payload. A content frame after
   any number of skippable frames decodes normally.
+- Concatenated content frames decode to their concatenated output, the standard
+  zstd behavior. The output ceiling bounds the total, so a caller always owns
+  the final size; an image consumer still fail-closes at validation because the
+  concatenation is not one canonical image.
 - Compression levels outside the build's zstd range (-131072..=22 for current
   zstd) are infinity/invalid-argument; they are never silently clamped.
 - A trained dictionary is a **hint**. zstd decompresses a frame that does not

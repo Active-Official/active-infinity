@@ -399,9 +399,23 @@ fn dict_command(args: &[String]) -> Result<(), String> {
                     ));
                 }
             }
-            let samples: Vec<Vec<u8>> =
-                positional[1..].iter().map(read).collect::<Result<_, _>>()?;
-            let total = usize::try_from(declared).unwrap_or(usize::MAX);
+            // Read against a shrinking budget: a sample that grew between the
+            // metadata pass and the read is refused before it is allocated,
+            // and `total` is the bytes actually held.
+            let output = flags
+                .get("--output")
+                .filter(|value| !value.is_empty())
+                .ok_or("usage: dict train needs --output <path>")?;
+            let mut samples = Vec::with_capacity(positional.len() - 1);
+            let mut total = 0usize;
+            for sample in &positional[1..] {
+                let remaining = ceiling.saturating_sub(total as u64);
+                let bytes = read_capped(Path::new(sample), remaining)?;
+                total = total.checked_add(bytes.len()).ok_or_else(|| {
+                    format!("usage: samples are larger than the {ceiling} byte input ceiling")
+                })?;
+                samples.push(bytes);
+            }
             let default_size = (total / 8).clamp(256, 110 * 1024);
             let size = flag_number(&flags, "--size", default_size)?;
             if size < 256 {
@@ -425,9 +439,9 @@ fn dict_command(args: &[String]) -> Result<(), String> {
                 )
             })?;
             for sample in &positional[1..] {
-                ensure_distinct(sample, flags.get("--output").map(String::as_str))?;
+                ensure_distinct(sample, Some(output))?;
             }
-            write_output(flags.get("--output").map(String::as_str), &dictionary)?;
+            write_output(Some(output), &dictionary)?;
             eprintln!(
                 "trained {} bytes from {} samples",
                 dictionary.len(),
@@ -464,7 +478,11 @@ fn dict_command(args: &[String]) -> Result<(), String> {
                 .get("--dictionary")
                 .filter(|value| !value.is_empty())
                 .ok_or("usage: dict apply needs --dictionary <path>")?;
+            ensure_distinct(dictionary_path, flags.get("--output").map(String::as_str))?;
             let dictionary = read(dictionary_path)?;
+            if dictionary.is_empty() {
+                return Err("usage: --dictionary must not be empty".to_string());
+            }
             let bytes = read(&positional[1])?;
             let output = if decompressing {
                 let ceiling = flag_number(&flags, "--max-bytes", 64 * 1024 * 1024)?;

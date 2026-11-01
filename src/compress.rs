@@ -56,7 +56,13 @@ const SKIPPABLE_MASK: u32 = 0xFFFF_FFF0;
 /// magic is left for zstd to report.
 fn carries_content_frame(bytes: &[u8]) -> bool {
     let mut offset = 0usize;
-    while let Some(header) = bytes.get(offset..offset + 4) {
+    loop {
+        // A skippable frame's declared length can push `offset` past the
+        // buffer; compute the windows with checked arithmetic so a 32-bit
+        // target cannot wrap `offset + 4` into a reversed range.
+        let Some(header) = offset.checked_add(4).and_then(|end| bytes.get(offset..end)) else {
+            return false;
+        };
         let magic = u32::from_le_bytes([header[0], header[1], header[2], header[3]]);
         if magic == FRAME_MAGIC {
             return true;
@@ -64,7 +70,10 @@ fn carries_content_frame(bytes: &[u8]) -> bool {
         if magic & SKIPPABLE_MASK != SKIPPABLE_MAGIC {
             return true;
         }
-        let Some(length) = bytes.get(offset + 4..offset + 8) else {
+        let Some(length) = offset
+            .checked_add(8)
+            .and_then(|end| bytes.get(offset + 4..end))
+        else {
             return false;
         };
         let length = u32::from_le_bytes([length[0], length[1], length[2], length[3]]) as usize;
@@ -76,7 +85,6 @@ fn carries_content_frame(bytes: &[u8]) -> bool {
             None => return false,
         }
     }
-    false
 }
 
 /// Compress a canonical image or frame payload with zstd.
@@ -192,6 +200,19 @@ mod tests {
         frame.extend_from_slice(&[0u8; 4]);
         let error = decompress(&frame, 1024).expect_err("no content frame");
         assert_eq!(error.code(), "infinity/compression", "{error}");
+    }
+
+    #[test]
+    fn concatenated_content_frames_decode_in_order() {
+        // Standard zstd: a decoder concatenates the output of every frame, and
+        // the caller's ceiling still bounds the total. Documented in
+        // docs/spec/streaming.md section 6.
+        let first = compress(b"first-", 3).expect("compress");
+        let second = compress(b"second", 3).expect("compress");
+        let mut stream = first;
+        stream.extend_from_slice(&second);
+        let restored = decompress(&stream, 16).expect("decompress");
+        assert_eq!(restored, b"first-second");
     }
 
     #[test]

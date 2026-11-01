@@ -1,6 +1,6 @@
 # Fuzzing
 
-Nine targets cover the untrusted-input surface. Every target drives the
+Fourteen targets cover the untrusted-input surface. Every target drives the
 shipped public API and asserts a semantic invariant, not only "did not crash".
 
 | Target | Surface | Invariant |
@@ -59,12 +59,15 @@ Pull requests run a short campaign per target; `main` and the nightly lane run
 a longer one. A crash, an assertion failure, or a new artifact fails the lane;
 the artifact is attached to the issue with the input that produced it.
 
-- `fuzz_signed_image`: untrusted-input target added in the I-16 re-audit.
+| Target | Surface | Invariant |
+|---|---|---|
+| `fuzz_signed_image` | `SignedImage::from_bytes` | any bytes are `infinity/signature` or `infinity/limit`; a parsed envelope verifies |
+| `fuzz_proof_sidecar` | `Proof::from_json`, `verify` | parsing and verification are total; every refusal is `infinity/proof` |
+| `fuzz_schema` | `Schema::from_bytes`, `validate_bytes` | both steps are total and refuse with an `infinity/*` code |
+| `fuzz_delta_frames` | an attacker Delta frame after a real Begin | the delta applies into a valid canonical image, or the stream refuses it |
+| `fuzz_merge` | `merge` of two decoded modules | total and deterministic; a clean merge encodes and validates |
 
-- `fuzz_proof_sidecar`: untrusted-input target added in the I-16 re-audit.
-
-- `fuzz_schema`: untrusted-input target added in the I-16 re-audit.
-
-- `fuzz_delta_frames`: untrusted-input target added in the I-16 re-audit.
-
-- `fuzz_merge`: untrusted-input target added in the I-16 re-audit.
+`fuzz/examples/gen_seeds.rs` writes the deterministic positive seeds
+(`valid-envelope`, `valid-proof.json`, `schema.ainf`) and asserts that each one
+parses, so the successful branches stay reachable. Regenerate with
+`cargo run --manifest-path fuzz/Cargo.toml --example gen_seeds`.

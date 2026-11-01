@@ -64,3 +64,16 @@ fn repoint_ref_rewrites_the_edge_and_forms_a_cycle() {
     let error = validate(&mutated).expect_err("a self-loop is refused");
     assert_eq!(error.code(), "infinity/cycle", "{error}");
 }
+
+/// A refused repoint must leave the image byte-identical: the helper is used
+/// inside a fuzz campaign where a half-mutated buffer would poison the oracle.
+#[test]
+fn a_failed_repoint_leaves_the_buffer_unchanged() {
+    let (image, root, _head) = ring();
+    let mut copy = image.clone();
+    assert!(
+        !common::repoint_ref(&mut copy, root, root),
+        "the root is a table"
+    );
+    assert_eq!(copy, image);
+}

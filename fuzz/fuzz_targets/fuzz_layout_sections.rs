@@ -93,13 +93,12 @@ fuzz_target!(|data: &[u8]| {
         }
         match validate(&bytes) {
             Ok(_) => {
-                if let Ok(module) = decode(&bytes) {
-                    let image = encode(&module).expect("validated module encodes");
-                    assert!(
-                        validate_canonical(&image, Limits::default()).is_ok(),
-                        "a validated layout mutation did not re-encode canonically"
-                    );
-                }
+                let module = decode(&bytes).expect("a validated image decodes");
+                let image = encode(&module).expect("validated module encodes");
+                assert!(
+                    validate_canonical(&image, Limits::default()).is_ok(),
+                    "a validated layout mutation did not re-encode canonically"
+                );
             }
             Err(error) => {
                 assert!(

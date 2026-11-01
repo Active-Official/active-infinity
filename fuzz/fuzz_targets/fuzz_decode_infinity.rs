@@ -100,27 +100,34 @@ fuzz_target!(|data: &[u8]| {
         // gated separately below.
         for index in 0..view.node_count().min(4096) {
             let id = active_infinity::NodeId(index);
-            if let Ok(node) = view.node(id) {
-                let _ = view.children(id);
-                let _ = node.kind_name();
-            }
+            let node = view.node(id).expect("a validated node reads");
+            view.children(id)
+                .expect("a validated node has readable children");
+            let _ = node.kind_name();
         }
     }
 
     // 5. Projections are total and deterministic. A projection walks the graph,
     // so the work is bounded here; the conformance suite covers large modules.
     if meta.nodes <= 4096 {
-        active_infinity::interop::to_redacted_json(&module)
-            .expect("a validated module projects");
+        // A valid module projects; only a resource ceiling may refuse.
+        if let Err(error) = active_infinity::interop::to_redacted_json(&module) {
+            assert_eq!(error.code(), "infinity/limit", "JSON projection refused");
+        }
         let _ = active_infinity::interop::provenance_lines(&module);
         let _ = active_infinity::interop::value_paths(&module);
-        if let Ok(first) = active_infinity::to_protobuf(&module) {
-            let second = active_infinity::to_protobuf(&module)
-                .expect("projecting the same module twice succeeds");
-            assert_eq!(
+        let first = active_infinity::to_protobuf(&module);
+        let second = active_infinity::to_protobuf(&module);
+        match (first, second) {
+            (Ok(first), Ok(second)) => assert_eq!(
                 first, second,
                 "the protobuf projection must be deterministic"
-            );
+            ),
+            (Err(first), Err(second)) => {
+                assert_eq!(first.code(), "infinity/limit", "protobuf refused");
+                assert_eq!(second.code(), "infinity/limit", "protobuf refused");
+            }
+            _ => panic!("the protobuf projection is not deterministic"),
         }
     }
 

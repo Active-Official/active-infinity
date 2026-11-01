@@ -103,3 +103,27 @@ fn the_cargo_docker_and_workflow_lanes_list_the_same_targets() {
         assert!(seeds > 0, "{target} has no committed seeds");
     }
 }
+
+/// The positive seeds must still parse; a seed that only reaches the refusal
+/// branch leaves the success oracle unexercised.
+#[cfg(all(feature = "signatures", feature = "json"))]
+#[test]
+fn the_positive_seeds_parse() {
+    let envelope = fs::read(root().join("fuzz/corpus/fuzz_signed_image/valid-envelope"))
+        .expect("envelope seed");
+    assert!(
+        active_infinity::SignedImage::from_bytes(&envelope).is_ok(),
+        "the envelope seed must verify"
+    );
+    let proof = fs::read_to_string(root().join("fuzz/corpus/fuzz_proof_sidecar/valid-proof.json"))
+        .expect("proof seed");
+    assert!(
+        active_infinity::Proof::from_json(&proof).is_ok(),
+        "the proof seed must parse"
+    );
+    let schema = fs::read(root().join("fuzz/corpus/fuzz_schema/schema.ainf")).expect("schema seed");
+    assert!(
+        active_infinity::Schema::from_bytes(&schema).is_ok(),
+        "the schema seed must parse"
+    );
+}

@@ -16,6 +16,7 @@ categories = ["command-line-utilities", "encoding"]
 [dependencies]
 active-infinity = { path = "../..", version = "2.3.0", features = ["active-core", "json", "zstd", "signatures"] }
 serde_json = "1"
+sha2 = "0.10"
 zeroize = "1"
 
 [[bin]]

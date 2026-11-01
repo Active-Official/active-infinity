@@ -689,7 +689,7 @@ fn conformance_uses_the_manifest_directory_as_its_base() {
     let manifest = dir.join("manifest.json");
     write(
         &manifest,
-        br#"{"version":"test","cases":[{"name":"case","kind":"valid","path":"case.ainf","content_hash":""}]}"#,
+        br#"{"format":"active-conformance/1","version":"test","cases":[{"name":"case","kind":"valid","path":"case.ainf","content_hash":""}]}"#,
     );
     let output = run(&[
         "conformance",
@@ -717,7 +717,7 @@ fn a_conformance_case_cannot_escape_the_manifest_directory() {
     let manifest = dir.join("manifest.json");
     write(
         &manifest,
-        br#"{"version":"test","cases":[{"name":"escape","kind":"valid","path":"../../etc/passwd"}]}"#,
+        br#"{"format":"active-conformance/1","version":"test","cases":[{"name":"escape","kind":"valid","path":"../../etc/passwd"}]}"#,
     );
     let output = run(&[
         "conformance",
@@ -1143,4 +1143,146 @@ fn bench_refuses_more_work_than_the_budget() {
     ]);
     assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
     assert!(stderr(&output).contains("exceed"), "{}", stderr(&output));
+}
+
+/// The base is a second root: an absolute base would discard the manifest's
+/// own directory.
+#[test]
+fn a_conformance_manifest_with_an_absolute_base_is_refused() {
+    let dir = sandbox("conformance-abs-base");
+    let manifest = dir.join("manifest.json");
+    let base = if cfg!(windows) {
+        "C:\\\\Windows"
+    } else {
+        "/etc"
+    };
+    write(
+        &manifest,
+        format!(
+            "{{\"format\":\"active-conformance/1\",\"version\":\"t\",\"base\":\"{}\",\"cases\":[{{\"name\":\"x\",\"kind\":\"invalid\",\"path\":\"passwd\"}}]}}",
+            base.replace('\\', "\\\\")
+        )
+        .as_bytes(),
+    );
+    let output = run(&[
+        "conformance",
+        "run",
+        "--manifest",
+        manifest.to_str().expect("utf8"),
+    ]);
+    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+    assert!(stderr(&output).contains("base"), "{}", stderr(&output));
+}
+
+/// An emptied case list must not pass a release gate having verified nothing.
+#[test]
+fn a_conformance_manifest_with_no_cases_is_refused() {
+    let dir = sandbox("conformance-empty");
+    let manifest = dir.join("manifest.json");
+    write(
+        &manifest,
+        br#"{"format":"active-conformance/1","version":"t","cases":[]}"#,
+    );
+    let output = run(&[
+        "conformance",
+        "run",
+        "--manifest",
+        manifest.to_str().expect("utf8"),
+    ]);
+    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+    assert!(stderr(&output).contains("no cases"), "{}", stderr(&output));
+}
+
+/// Every case is pinned by size and sha256: a substituted vector that still
+/// yields the declared error code must fail.
+#[test]
+fn a_conformance_case_must_match_its_pin() {
+    let dir = sandbox("conformance-pin");
+    write(&dir.join("case.ainf"), b"not the pinned bytes");
+    let manifest = dir.join("manifest.json");
+    write(
+        &manifest,
+        br#"{"format":"active-conformance/1","version":"t","cases":[{"name":"pin","kind":"invalid","path":"case.ainf","expected_code":"infinity/magic","sha256":"0000000000000000000000000000000000000000000000000000000000000000","size":20}]}"#,
+    );
+    let output = run(&[
+        "conformance",
+        "run",
+        "--manifest",
+        manifest.to_str().expect("utf8"),
+    ]);
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    let scorecard = stdout(&output);
+    assert!(scorecard.contains("declared sha256"), "{scorecard}");
+    assert!(
+        !scorecard.contains(dir.to_str().expect("utf8")),
+        "the scorecard leaked the runner's path: {scorecard}"
+    );
+}
+
+/// A bad seed and an empty sign-file path are usage errors and must not create
+/// the store directory.
+#[test]
+fn store_put_validates_the_seed_before_opening_the_store() {
+    let dir = sandbox("store-seed-order");
+    let path = dir.join("image.ainf");
+    write(&path, &image(6));
+    let root = dir.join("never");
+    let output = run(&[
+        "store",
+        "put",
+        path.to_str().expect("utf8"),
+        "--root",
+        root.to_str().expect("utf8"),
+        "--sign",
+        "zz",
+    ]);
+    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+    assert!(!root.exists(), "a bad seed created the store root");
+
+    let output = run(&[
+        "store",
+        "put",
+        path.to_str().expect("utf8"),
+        "--root",
+        root.to_str().expect("utf8"),
+        "--sign-file",
+        "",
+    ]);
+    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+    assert!(!root.exists(), "an empty sign-file created the store root");
+}
+
+/// A hash is hex only: `from_str_radix` accepts a leading `+`.
+#[test]
+fn a_hash_with_a_sign_is_refused() {
+    let dir = sandbox("hash-sign");
+    let root = dir.join("store");
+    let mut hash = "+0".repeat(32);
+    hash.truncate(64);
+    let output = run(&[
+        "store",
+        "get",
+        &hash,
+        "--root",
+        root.to_str().expect("utf8"),
+    ]);
+    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+}
+
+/// A manifest with another format string is not a conformance pack.
+#[test]
+fn a_conformance_manifest_with_another_format_is_refused() {
+    let dir = sandbox("conformance-format");
+    let manifest = dir.join("manifest.json");
+    write(
+        &manifest,
+        br#"{"format":"not-conformance","version":"t","cases":[{"name":"x","kind":"valid","path":"x.ainf"}]}"#,
+    );
+    let output = run(&[
+        "conformance",
+        "run",
+        "--manifest",
+        manifest.to_str().expect("utf8"),
+    ]);
+    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
 }

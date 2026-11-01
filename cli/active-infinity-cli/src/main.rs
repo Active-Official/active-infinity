@@ -145,8 +145,23 @@ fn run(args: Vec<String>) -> Result<(), String> {
             println!("exit codes: 0 success, 1 failure, 2 usage");
             Ok(())
         }
-        other => Err(format!("usage: unknown command {other}\n{}", usage())),
+        other => Err(format!("usage: unknown command {other:?}\n{}", usage())),
     }
+}
+
+/// Feed a decoder in bounded slices.
+///
+/// `push_bytes` drains the frames it consumed from its buffer, and each drain
+/// moves the remaining tail: feeding one big slice is quadratic in the frame
+/// count (a 17 MB stream took 36 s). 64 KiB also bounds the decoder's internal
+/// buffer to one chunk plus one frame.
+const FEED_CHUNK: usize = 64 << 10;
+
+fn feed(decoder: &mut StreamDecoder, bytes: &[u8]) -> active_infinity::Result<()> {
+    for piece in bytes.chunks(FEED_CHUNK) {
+        decoder.push_bytes(piece)?;
+    }
+    Ok(())
 }
 
 fn stream_command(args: &[String]) -> Result<(), String> {
@@ -159,9 +174,7 @@ fn stream_command(args: &[String]) -> Result<(), String> {
     // the frame overhead at the smallest chunk size.
     let bytes = read_capped(Path::new(&positional[0]), stream_ceiling())?;
     let mut decoder = StreamDecoder::new();
-    decoder
-        .push_bytes(&bytes)
-        .map_err(|error| format!("{}: {}", error.code(), error))?;
+    feed(&mut decoder, &bytes).map_err(|error| format!("{}: {}", error.code(), error))?;
     let streamed = decoder
         .finish()
         .map_err(|error| format!("{}: {}", error.code(), error))?;
@@ -197,12 +210,13 @@ fn store_command(args: &[String]) -> Result<(), String> {
             if flags.contains_key("--sign") && flags.contains_key("--sign-file") {
                 return Err("usage: --sign and --sign-file are mutually exclusive".to_string());
             }
-            // Open the store only after every argument is known to be valid: a
-            // typo must not create a store directory (it may later be committed).
+            // Validate every argument before the store exists: a typo must not
+            // create a store directory (it may later be committed).
+            let seed = signing_seed(&flags)?;
+            let image = read(&positional[1])?;
             let store = Store::open(store_root(&flags)?)
                 .map_err(|error| format!("{}: {}", error.code(), error))?;
-            let image = read(&positional[1])?;
-            let hash = match signing_seed(&flags)? {
+            let hash = match seed {
                 Some(mut seed) => {
                     let signed = SignedImage::sign_with_seed(image, &seed);
                     seed.zeroize();
@@ -391,10 +405,13 @@ fn proof_command(args: &[String]) -> Result<(), String> {
             check_positional(&positional, 2, usage)?;
             let schema = schema_arg(&flags)?;
             let image = read(&positional[1])?;
+            ensure_distinct(&positional[1], flags.get("--output").map(String::as_str))?;
+            if let Some(path) = flags.get("--schema") {
+                ensure_distinct(path, flags.get("--output").map(String::as_str))?;
+            }
             let proof = Proof::issue_with_schema(&image, schema.as_deref())
                 .map_err(|error| format!("{}: {error}", error.code()))?;
             let json = proof.to_json();
-            ensure_distinct(&positional[1], flags.get("--output").map(String::as_str))?;
             write_output(flags.get("--output").map(String::as_str), json.as_bytes())
         }
         "verify" => {
@@ -420,7 +437,7 @@ fn proof_command(args: &[String]) -> Result<(), String> {
             );
             Ok(())
         }
-        other => Err(format!("usage: unknown proof action {other}\n{usage}")),
+        other => Err(format!("usage: unknown proof action {other:?}\n{usage}")),
     }
 }
 
@@ -440,8 +457,9 @@ fn dict_command(args: &[String]) -> Result<(), String> {
             let ceiling = input_ceiling();
             let mut declared = 0u64;
             for sample in &positional[1..] {
-                let meta = fs::metadata(sample).map_err(|error| format!("{sample}: {error}"))?;
-                if !meta.is_file() {
+                let meta =
+                    fs::symlink_metadata(sample).map_err(|error| format!("{sample}: {error}"))?;
+                if !meta.file_type().is_file() {
                     return Err(format!("{sample}: not a regular file"));
                 }
                 declared = declared.checked_add(meta.len()).ok_or_else(|| {
@@ -464,6 +482,11 @@ fn dict_command(args: &[String]) -> Result<(), String> {
             let mut total = 0usize;
             for sample in &positional[1..] {
                 let remaining = ceiling.saturating_sub(total as u64);
+                if remaining == 0 {
+                    return Err(format!(
+                        "usage: samples together are larger than the {ceiling} byte input ceiling; train from fewer or smaller samples"
+                    ));
+                }
                 let bytes = read_capped(Path::new(sample), remaining)?;
                 total = total.checked_add(bytes.len()).ok_or_else(|| {
                     format!("usage: samples are larger than the {ceiling} byte input ceiling")
@@ -533,6 +556,7 @@ fn dict_command(args: &[String]) -> Result<(), String> {
                 .filter(|value| !value.is_empty())
                 .ok_or("usage: dict apply needs --dictionary <path>")?;
             ensure_distinct(dictionary_path, flags.get("--output").map(String::as_str))?;
+            ensure_distinct(&positional[1], flags.get("--output").map(String::as_str))?;
             let dictionary = read(dictionary_path)?;
             if dictionary.is_empty() {
                 return Err("usage: --dictionary must not be empty".to_string());
@@ -560,10 +584,9 @@ fn dict_command(args: &[String]) -> Result<(), String> {
                 compress_with_dictionary(&bytes, level, &dictionary)
             }
             .map_err(|error| format!("{}: {error}", error.code()))?;
-            ensure_distinct(&positional[1], flags.get("--output").map(String::as_str))?;
             write_output(flags.get("--output").map(String::as_str), &output)
         }
-        other => Err(format!("usage: unknown dict action {other}\n{usage}")),
+        other => Err(format!("usage: unknown dict action {other:?}\n{usage}")),
     }
 }
 
@@ -669,10 +692,22 @@ fn conformance(args: &[String]) -> Result<(), String> {
     let manifest = read_text(&manifest_path, MAX_MANIFEST_BYTES)?;
     let manifest: serde_json::Value = serde_json::from_str(&manifest)
         .map_err(|error| format!("manifest is not JSON: {error}"))?;
+    if manifest["format"].as_str() != Some("active-conformance/1") {
+        return Err("usage: the manifest format must be active-conformance/1".to_string());
+    }
     // Case paths resolve against the manifest's `base` (relative to the
     // manifest's own directory; the repository manifest uses `..` because its
     // paths are repository-relative).
     let base = manifest["base"].as_str().unwrap_or(".");
+    // The base is a second root: an absolute or rooted base would discard the
+    // manifest's own directory and read anywhere.
+    if Path::new(base).is_absolute()
+        || Path::new(base)
+            .components()
+            .any(|component| matches!(component, Component::Prefix(_) | Component::RootDir))
+    {
+        return Err("usage: the manifest base must be a relative directory".to_string());
+    }
     let base = Path::new(&manifest_path)
         .parent()
         .filter(|path| !path.as_os_str().is_empty())
@@ -690,6 +725,11 @@ fn conformance(args: &[String]) -> Result<(), String> {
         return Err(format!(
             "usage: a manifest may carry at most {MAX_CONFORMANCE_CASES} cases"
         ));
+    }
+    if cases.is_empty() {
+        // An emptied case list must not pass a release gate having verified
+        // nothing.
+        return Err("usage: the manifest declares no cases".to_string());
     }
     let mut results = Vec::new();
     let mut passed = 0usize;
@@ -741,7 +781,7 @@ fn conformance(args: &[String]) -> Result<(), String> {
                         "usage: the manifest's cases exceed the {MAX_CONFORMANCE_BYTES} byte read budget"
                     ));
                 }
-                check_case(kind, &bytes, case)
+                verify_case_pin(case, &bytes).and_then(|()| check_case(kind, &bytes, case))
             }
             // The reason matters; the runner's absolute path does not belong in
             // a published scorecard.
@@ -779,6 +819,31 @@ fn conformance(args: &[String]) -> Result<(), String> {
     } else {
         Err(format!("{}/{total} conformance cases passed", passed))
     }
+}
+
+/// Compare a case's bytes with the manifest's `sha256` and `size` pins.
+///
+/// Without this an invalid vector is pinned only by its error code, so a
+/// truncated, spliced or substituted file that still produces that code passes.
+fn verify_case_pin(case: &serde_json::Value, bytes: &[u8]) -> Result<(), String> {
+    use sha2::{Digest, Sha256};
+
+    if let Some(size) = case["size"].as_u64() {
+        if size != bytes.len() as u64 {
+            return Err("case bytes do not match the declared size".to_string());
+        }
+    }
+    if let Some(expected) = case["sha256"].as_str().filter(|text| !text.is_empty()) {
+        let digest = Sha256::digest(bytes);
+        let mut actual = String::with_capacity(64);
+        for byte in digest {
+            actual.push_str(&format!("{byte:02x}"));
+        }
+        if actual != expected.to_ascii_lowercase() {
+            return Err("case bytes do not match the declared sha256".to_string());
+        }
+    }
+    Ok(())
 }
 
 fn limits_from(case: &serde_json::Value) -> Result<Limits, String> {
@@ -869,7 +934,7 @@ fn check_case(kind: &str, bytes: &[u8], case: &serde_json::Value) -> Result<(), 
         }
         "invalid_stream" => {
             let mut decoder = StreamDecoder::new();
-            let error = match decoder.push_bytes(bytes) {
+            let error = match feed(&mut decoder, bytes) {
                 Ok(()) => decoder
                     .finish()
                     .err()
@@ -882,7 +947,7 @@ fn check_case(kind: &str, bytes: &[u8], case: &serde_json::Value) -> Result<(), 
             }
             Ok(())
         }
-        other => Err(format!("unknown case kind {other}")),
+        other => Err(format!("unknown case kind {other:?}")),
     }
 }
 
@@ -964,10 +1029,16 @@ fn write_output(output: Option<&str>, bytes: &[u8]) -> Result<(), String> {
         .and_then(|name| name.to_str())
         .ok_or("usage: --output needs a file name")?;
     static SLOT: AtomicU64 = AtomicU64::new(0);
+    // Seed the counter from the clock so a co-writer of the directory cannot
+    // pre-create the whole name set (the store does the same for scratch files).
+    let seed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| u64::from(elapsed.subsec_nanos()))
+        .unwrap_or(0);
     let mut temp = PathBuf::new();
     let mut file = None;
     for _ in 0..64 {
-        let slot = SLOT.fetch_add(1, Ordering::Relaxed);
+        let slot = seed.wrapping_add(SLOT.fetch_add(1, Ordering::Relaxed));
         temp = directory.join(format!(".{name}.tmp.{}.{slot}", std::process::id()));
         let mut options = fs::OpenOptions::new();
         options.write(true).create_new(true);
@@ -1021,6 +1092,9 @@ fn ensure_distinct(input: &str, output: Option<&str>) -> Result<(), String> {
 
 fn signing_seed(flags: &BTreeMap<String, String>) -> Result<Option<[u8; 32]>, String> {
     if let Some(path) = flags.get("--sign-file") {
+        if path.is_empty() {
+            return Err("usage: --sign-file needs a path".to_string());
+        }
         let text = read_text(path, MAX_SEED_BYTES)?;
         return parse_seed(text.trim()).map(Some);
     }
@@ -1055,6 +1129,10 @@ fn parse_public_key(text: &str) -> Result<[u8; 32], String> {
 
 fn parse_hash(text: &str) -> Result<[u8; 32], String> {
     if text.len() != 64 {
+        return Err("usage: hash must be 64 hex characters".to_string());
+    }
+    // `from_str_radix` accepts a leading `+`; a hash is hex only.
+    if !text.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err("usage: hash must be 64 hex characters".to_string());
     }
     let mut hash = [0u8; 32];

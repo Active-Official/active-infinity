@@ -21,7 +21,16 @@ fn wrap(bytes: &[u8]) -> Vec<u8> {
 
 fn summary(result: Merge) -> (bool, Vec<String>) {
     match result {
-        Merge::Clean(_) => (true, Vec::new()),
+        Merge::Clean(module) => {
+            // A clean merge must be a real module: encode and validate it, or a
+            // merge that leaves a dangling node would pass unnoticed.
+            let image = encode(&module).expect("a clean merge encodes");
+            assert!(
+                active_infinity::validate(&image).is_ok(),
+                "a clean merge produced an invalid image"
+            );
+            (true, Vec::new())
+        }
         Merge::Conflicts(conflicts) => (
             false,
             conflicts

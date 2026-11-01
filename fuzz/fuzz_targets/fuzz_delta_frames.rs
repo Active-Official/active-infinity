@@ -8,6 +8,7 @@ use libfuzzer_sys::fuzz_target;
 use active_infinity::stream::{
     encode_stream, Frame, FrameKind, StreamDecoder, MAX_FRAME_PAYLOAD,
 };
+use active_infinity::validate;
 
 fn fixture() -> Vec<u8> {
     let mut module = active_infinity::InfinityModule::new();
@@ -35,14 +36,26 @@ fuzz_target!(|data: &[u8]| {
 
     let mut decoder = StreamDecoder::new();
     match decoder.push_bytes(&stream) {
-        Ok(()) => {
-            if let Err(error) = decoder.finish() {
+        Ok(()) => match decoder.finish() {
+            Ok(streamed) => {
+                // An applied delta yields a module, and that module must be a
+                // valid canonical image: a partial arena would show up here.
                 assert!(
-                    error.code().starts_with("infinity/"),
-                    "delta finish without a codec code: {error}"
+                    validate(&streamed.image).is_ok(),
+                    "an applied delta produced an invalid image"
+                );
+                let module = active_infinity::decode(&streamed.image).expect("decodes");
+                assert_eq!(
+                    active_infinity::encode(&module).expect("encodes"),
+                    streamed.image,
+                    "an applied delta is not canonical"
                 );
             }
-        }
+            Err(error) => assert!(
+                error.code().starts_with("infinity/"),
+                "delta finish without a codec code: {error}"
+            ),
+        },
         Err(error) => assert!(
             error.code().starts_with("infinity/"),
             "delta refusal without a codec code: {error}"

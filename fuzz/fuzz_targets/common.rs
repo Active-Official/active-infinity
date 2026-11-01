@@ -253,7 +253,6 @@ pub fn repoint_ref(bytes: &mut [u8], node: u32, target: u32) -> bool {
     }
     // Read the old target before overwriting the record.
     let old_child = get_u64(bytes, record + 8).unwrap_or(u64::MAX) as u32;
-    put_u64(bytes, record + 8, target as u64);
 
     let Some(edges) = edges_offset(bytes) else {
         return false;
@@ -266,8 +265,8 @@ pub fn repoint_ref(bytes: &mut [u8], node: u32, target: u32) -> bool {
     }
     // The edge table is the derivation of every node, not just the Ref nodes.
     // Only one pair changes (the Ref's target), so the original table is the
-    // ground truth: replace that pair, re-sort and rehash. Rebuilding only the
-    // Ref edges and comparing against the total count rejected every input.
+    // ground truth. Locate the pair *before* writing anything: a `false` must
+    // leave the buffer byte-identical.
     let mut pairs = Vec::with_capacity(count as usize);
     for index in 0..count as usize {
         let from = get_u32(bytes, edges + index * 8).unwrap_or(u32::MAX);
@@ -282,6 +281,7 @@ pub fn repoint_ref(bytes: &mut [u8], node: u32, target: u32) -> bool {
     };
     pairs[position] = (target, node);
     pairs.sort_unstable();
+    put_u64(bytes, record + 8, target as u64);
     for (position, (from, to)) in pairs.iter().enumerate() {
         put_u32(bytes, edges + position * 8, *from);
         put_u32(bytes, edges + position * 8 + 4, *to);

@@ -922,3 +922,48 @@ Verification: `cargo check --manifest-path fuzz/Cargo.toml` builds all 14 target
 `cargo fuzz run fuzz_graph_cycles` in `active-fuzz:1.88` exercises the repaired
 oracle; the manifest reverse gate compares Cargo, the Docker driver, both
 workflows and the docs.
+
+### Re-audit round 3 (I-15) - 2026-10-31
+
+Reviewer: DeepSeek V4.1. Findings: 4 medium, 9 low.
+
+| # | Severity | Finding | Disposition |
+|---|---|---|---|
+| 1 | medium | `stream` fed the whole container in one `push_bytes`; each frame drain moves the tail, so the cost was quadratic (measured: 17.7 MB -> 36.5 s) | **fixed**: `feed()` pushes 64 KiB slices, which also bounds the decoder buffer |
+| 2 | medium | `manifest["base"]` was never validated: an absolute base discarded the manifest directory and re-opened the escape | **fixed**: a rooted/absolute base is a usage error; `a_conformance_manifest_with_an_absolute_base_is_refused` (pre-fix: exit 1) |
+| 3 | medium | an empty `cases` array passed the gate with exit 0 | **fixed**: `a_conformance_manifest_with_no_cases_is_refused` (pre-fix: exit 0) |
+| 4 | medium | the manifest's `sha256`/`size` pins were never checked, so a substituted vector that kept its error code passed | **fixed**: `verify_case_pin` (sha2) on every case; `a_conformance_case_must_match_its_pin` (pre-fix: exit 0) |
+| 5 | low | the store was opened before the seed or image was read | **fixed**: both are read first; `store_put_validates_the_seed_before_opening_the_store` (pre-fix: root created) |
+| 6 | low | `--sign-file ""` produced raw OS text with exit 1 | **fixed**: a usage error |
+| 7 | low | `parse_hash` accepted a leading `+` (`from_str_radix`) | **fixed**: hex-only; `a_hash_with_a_sign_is_refused` (pre-fix: exit 1) |
+| 8 | low | the output temp-name counter started at 0 with a predictable pid | **fixed**: seeded from the clock like the store's scratch names |
+| 9 | low | `println!` panics on a closed stdout (exit 101) | **documented residual**: a closed pipe is a shell-level condition; converting every result line to fallible writes is a larger change with no security effect |
+| 10 | low | argv tokens were interpolated into usage text (terminal control characters) | **fixed**: `{other:?}` at the four sites |
+| 11 | low | `proof issue --output` could overwrite `--schema`; `dict apply` checked distinctness only after the work | **fixed**: both checks run before the work |
+| 12 | low | `dict train`'s pre-pass followed symlinks and a full corpus produced a misleading error | **fixed**: `symlink_metadata`, and `remaining == 0` is a usage error |
+| 13 | low | `manifest["format"]` was unchecked and `name`/`kind` are echoed | **fixed** for the format (`a_conformance_manifest_with_another_format_is_refused`); names are JSON-escaped by serde |
+| 14 | residual | `stream_ceiling` assumes >=512-byte chunks | **documented**: the alternative is an unbounded read |
+
+Gate: 42 CLI tests, clippy clean; 6 new tests, each proved pre-fix.
+
+### Re-audit round 3 (I-16) - 2026-10-31
+
+Reviewer: DeepSeek V4.1, which replayed all 14 targets over ~42k inputs and
+found **no shipped-codec panic, hang or wrong code**. Findings: 1 high,
+3 medium, 3 low, all in the campaign.
+
+| # | Severity | Finding | Disposition |
+|---|---|---|---|
+| 1 | high | in `fuzz_canonical_roundtrip` the un-rehashed probe was built from the already-mutated image, so two flips at the same byte cancelled and the probe re-validated the pristine image (reproduced: `[192, 0]`) | **fixed**: the probe copies the pristine image; one flip can no longer cancel |
+| 2 | medium | the new signed/proof/schema seeds only reached refusal branches | **fixed**: `fuzz/examples/gen_seeds.rs` writes a real envelope, a complete sidecar and a schema image, asserting each parses; `tests/fuzz_manifest_tests.rs` re-checks them on every run |
+| 3 | medium | `fuzz_layout_sections` still swallowed a validated-but-undecodable image | **fixed**: `decode(...).expect(...)` |
+| 4 | medium | `fuzz_delta_frames` never verified a successful `finish` | **fixed**: the streamed image must validate, decode and re-encode |
+| 5 | medium | `fuzz_merge` discarded a clean merged module | **fixed**: a clean merge must encode and validate |
+| 6 | low | `repoint_ref` wrote the node before locating the edge pair | **fixed**: locate, then write; `a_failed_repoint_leaves_the_buffer_unchanged` |
+| 7 | low | the view oracle swallowed `node`/`children` errors | **fixed**: both are `expect` on a validated image |
+| 8 | low | the JSON projection was `expect`ed and protobuf swallowed every error | **fixed**: only `infinity/limit` is accepted, and both calls must agree |
+| 9 | low | `fuzz/README.md` said "Nine targets" and omitted the new five | **fixed**: fourteen, with a table and the seed generator command |
+
+Residual: no target drives the `active-core` bridge yet; `fuzz_merge` mostly
+reaches the one-field conflict path. Both are recorded here rather than fixed
+in this round.

@@ -80,6 +80,10 @@ fuzz_target!(|data: &[u8]| {
     assert_eq!(one, two, "construction order changed canonical bytes");
 
     // A one-bit change outside the hash field: fail closed or change the hash.
+    // The un-rehashed probe is built from the pristine image, never from the
+    // mutated one: two flips at the same byte would cancel and the probe would
+    // re-validate the original.
+    let pristine = one.clone();
     let mut mutated = one.clone();
     if !data.is_empty() && mutated.len() > 64 {
         let span = mutated.len() - 64;
@@ -90,7 +94,7 @@ fuzz_target!(|data: &[u8]| {
             .content_hash;
         // A change without a rehash must never validate: the stored hash
         // covers the bytes, and a padding byte must stay zero.
-        let mut unhashed = mutated.clone();
+        let mut unhashed = pristine.clone();
         let middle = unhashed.len() / 2;
         unhashed[middle] ^= 0x01;
         assert!(

@@ -1048,3 +1048,34 @@ Reviewer: DeepSeek V4.1, which also read the polyglot bindings. Findings:
 | 9-11 | low | signed WASM pointers, unbounded error scans, `ULong` truncation, `bounded_name` over-read | **carried to round 4** |
 
 Gate: 27 FFI tests, clippy clean.
+
+### Re-audit round 5 (I-12) and round 4 (I-14) - 2026-10-31
+
+Reviewer: DeepSeek V4.1. Both rounds are **not CLEAN**; the remaining items are
+recorded here with their fixes, and the one change that was made is noted.
+
+I-12 round 5:
+
+| # | Sev | Finding | Disposition |
+|---|---|---|---|
+| 1 | critical | the JSON export took its secret table from the uncanonicalized module, so a locator literal promoted at canonicalization was not redacted | **change made**: `project_root` now encodes and decodes first, so JSON projects the same canonical module as protobuf. The reviewer's exact probe was not reproduced by a reachable-literal construction in a host test, so round 6 must re-probe with the reviewer's input before this is called closed |
+| 2 | high | the redaction scan budget is per string, not cumulative, for metadata | **open**: thread one budget through `encode_provenance`/`encode_annotation`/`redacted_key_within` |
+| 3 | high | `hiding_placeholder` is recomputed per visit (measured 94 s / 320 KB) | **open**: compute the placeholder once per projection and pass it down |
+| 4 | medium | two bindings that redact to one name are emitted twice | **open**: apply the `Record` refusal to bindings |
+| 5 | medium | `secret_tainted_paths` fixpoint is O(V*depth) and allocates children per visit | **open**: reverse topological order, one pass |
+| 6-7 | low | provenance JSON drops a redacted-key collision; JSON/protobuf projected different modules | **6 open** (refuse); **7 addressed** by the same canonicalization |
+
+I-14 round 4 (bindings):
+
+| # | Sev | Finding | Disposition |
+|---|---|---|---|
+| 1 | high | the JNI shim trusts `out_len[0]` without clamping to `GetArrayLength` (JVM heap overflow) | **open**: clamp to the array length before the write |
+| 2 | high | the Go WASM host zero-fills on `crypto/rand` failure and returns success | **open**: return an error instead of zero-filling |
+| 3 | high | the AssemblyScript host copies the clipped length but passes the unclipped one | **open** |
+| 4 | medium | eight bindings write through a null `active_infinity_alloc` return | **open**: check the return and raise `infinity/limit` in Ruby, PHP, Lua, C#, Dart, JS, the AS host and Go |
+| 5 | medium | the AS host ignores the caller's `*outLen` capacity | **open** |
+| 6 | medium | `polyglot/rpc/client.c` writes an unbounded payload into a 1 MiB stack buffer | **open**: bound the encode or heap-allocate |
+| 7-11 | low | rustdoc/header wording, `isize::MAX` code, alloc panic path, signed WASM pointers, stale codes | **open** |
+
+The in-repo C ABI changes from round 3 (silent `alloc`, matching docs) are
+verified by the FFI suite.

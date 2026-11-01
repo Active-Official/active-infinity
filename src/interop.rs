@@ -733,6 +733,13 @@ pub enum Projected {
 /// secret table and the encoded image.
 #[cfg(feature = "json")]
 pub(crate) fn project_root(module: &InfinityModule) -> Result<Projected> {
+    // Project the *canonical* module, exactly as the protobuf path does. A
+    // locator literal is promoted to a secret entry only at canonicalization,
+    // so the secret table of a hand-built module would miss it and the
+    // projection would publish the literal.
+    let image = crate::encode(module)?;
+    let canonical = crate::decode(&image)?;
+    let module = &canonical;
     module.validate_structure(u32::MAX as u64, 4096)?;
     let secrets = secret_texts(module);
     let hash_secrets = secret_bytes(module);

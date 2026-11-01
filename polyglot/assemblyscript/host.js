@@ -74,6 +74,10 @@ function bind(reference, getAssemblyMemory) {
 	// caller's length would make the reference read past its own allocation.
 	const copyFromAs = (pointer, length) => {
 		if (length === 0) return { pointer: 0, length: 0 };
+		if (!Number.isInteger(length) || length < 0 || length > 0x7fffffff) {
+			// A negative or oversized length is a caller bug, not a heap range.
+			throw new Error("infinity/limit: length out of range");
+		}
 		const view = asMemory();
 		const end = Math.min(pointer + length, view.length);
 		const slice = view.subarray(pointer, Math.max(pointer, end));

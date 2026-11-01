@@ -220,6 +220,9 @@ Uint8List _output(Uint8List payload, _OutputInvoker invoke) {
         return;
       }
       final out = native.alloc(required);
+    if (out == nullptr) {
+      throw ActiveInfinityException('infinity/limit', -1);
+    }
       try {
         lengthPointer.value = required;
         status = invoke(native, pointer, length, out, lengthPointer);
@@ -240,6 +243,9 @@ Uint8List _output(Uint8List payload, _OutputInvoker invoke) {
 Pointer<IntPtr> _allocateSize(_Native native) {
   // `size_t` is `IntPtr`-sized; the C ABI only needs 4 or 8 bytes.
   final pointer = native.alloc(sizeOf<IntPtr>()).cast<IntPtr>();
+  if (pointer == nullptr) {
+    throw ActiveInfinityException('infinity/limit', -1);
+  }
   return pointer;
 }
 

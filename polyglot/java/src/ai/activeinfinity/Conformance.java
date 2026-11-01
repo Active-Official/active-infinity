@@ -56,6 +56,15 @@ public final class Conformance {
         ActiveInfinity.validate(first);
 
         byte[] full = Files.readAllBytes(root.resolve("tests/vectors/valid/full.ainf"));
+        // A claimed capacity larger than the array must be clamped by the shim;
+        // trusting it would let Java overflow the native buffer.
+        int[] claimed = {1 << 20};
+        byte[] tiny = new byte[8];
+        int clampStatus = Native.reencode(full, tiny, claimed);
+        if (clampStatus != -2) {
+            throw new IllegalStateException("a small array was not refused: " + clampStatus);
+        }
+
         String json = ActiveInfinity.redactedJson(full);
         if (json.contains("CANARY_SECRET_")) {
             throw new IllegalStateException("secret canary survived redaction");

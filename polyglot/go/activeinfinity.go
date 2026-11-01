@@ -50,6 +50,13 @@ func New(ctx context.Context, wasmPath string) (*Instance, error) {
 		return nil, err
 	}
 	runtime := wazero.NewRuntime(ctx)
+	// Every error path below must close the runtime; wazero holds OS resources.
+	ok := false
+	defer func() {
+		if !ok {
+			_ = runtime.Close(ctx)
+		}
+	}()
 	var moduleForRandom api.Module
 	host, err := runtime.NewHostModuleBuilder("env").
 		NewFunctionBuilder().
@@ -92,6 +99,7 @@ func New(ctx context.Context, wasmPath string) (*Instance, error) {
 	if abi != ABI {
 		return nil, &Error{Code: "infinity/abi-mismatch", Status: -1}
 	}
+	ok = true
 	return &Instance{runtime: runtime, module: module}, nil
 }
 

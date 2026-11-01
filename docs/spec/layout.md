@@ -592,6 +592,7 @@ messages. Every code below is part of the contract.
 | `infinity/stream-frame-len` | frame length exceeds its ceiling or the buffer |
 | `infinity/stream-frame-kind` | unknown frame kind |
 | `infinity/stream-flags` | unknown stream frame flag bits |
+| `infinity/stream-payload` | a complete stream frame's payload contradicts its kind |
 | `infinity/stream-sequence` | frame out of order |
 | `infinity/stream-state` | frame illegal in the current stream state |
 | `infinity/stream-hash` | a frame checksum or the reassembled hash disagrees |

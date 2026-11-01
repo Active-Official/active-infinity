@@ -88,11 +88,25 @@ impl FrameKind {
 }
 
 /// One stream frame.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// The payload is raw section bytes, including the secrets heap, so the type
+/// has no derived `Debug` and no byte-wise equality: a log line or an equality
+/// test would be an export path (see the crate's secret policy).
+#[derive(Clone)]
 pub struct Frame {
     pub kind: FrameKind,
     pub sequence: u64,
     pub payload: Vec<u8>,
+}
+
+impl std::fmt::Debug for Frame {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Frame")
+            .field("kind", &self.kind)
+            .field("sequence", &self.sequence)
+            .field("payload_len", &self.payload.len())
+            .finish()
+    }
 }
 
 impl Frame {
@@ -756,15 +770,25 @@ pub(crate) fn merge_fragment(
 }
 
 /// A reassembled stream generation.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone)]
 pub struct StreamedModule {
     pub module: InfinityModule,
     pub image: Vec<u8>,
     pub content_hash: [u8; 32],
 }
 
+impl std::fmt::Debug for StreamedModule {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StreamedModule")
+            .field("content_hash", &crate::ir::hash_hex(&self.content_hash))
+            .field("image_len", &self.image.len())
+            .field("module", &self.module)
+            .finish()
+    }
+}
+
 /// Streaming decoder state.
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct StreamDecoder {
     limits: crate::layout::Limits,
     sections: [Vec<u8>; SECTION_COUNT],
@@ -783,6 +807,22 @@ pub struct StreamDecoder {
     frames: u64,
     partial: Vec<u8>,
     cursor: usize,
+}
+
+impl std::fmt::Debug for StreamDecoder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Counts and flags only: `partial` holds raw section bytes.
+        f.debug_struct("StreamDecoder")
+            .field("partial_len", &self.partial.len())
+            .field("expected", &self.expected)
+            .field("begun", &self.begun)
+            .field("ended", &self.ended)
+            .field(
+                "sections_seen",
+                &self.seen.iter().filter(|seen| **seen).count(),
+            )
+            .finish()
+    }
 }
 
 impl StreamDecoder {
@@ -818,36 +858,43 @@ impl StreamDecoder {
     /// arrive in one call; partial frames are buffered.
     pub fn push_bytes(&mut self, buf: &[u8]) -> Result<()> {
         self.partial.extend_from_slice(buf);
+        // Parse against an offset and compact once: draining per frame moves the
+        // remaining tail, which made this quadratic in frames per call.
+        let mut consumed_total = 0usize;
         loop {
-            if self.partial.len() < FRAME_HEADER_SIZE {
-                return Ok(());
+            if self.partial.len() - consumed_total < FRAME_HEADER_SIZE {
+                break;
             }
-            match Frame::parse(&self.partial) {
+            match Frame::parse(&self.partial[consumed_total..]) {
                 Ok((frame, consumed)) => {
                     // Drain the frame even when its semantics are refused: the
                     // semantic state is rolled back inside `push`, and a caller
                     // that retries with corrected bytes must not have the bad
                     // frame replayed from the buffer first.
                     match self.push(&frame) {
-                        Ok(()) => {
-                            self.partial.drain(..consumed);
-                        }
+                        Ok(()) => consumed_total += consumed,
                         Err(error) => {
-                            self.partial.drain(..consumed);
+                            consumed_total += consumed;
+                            self.partial.drain(..consumed_total);
                             return Err(error);
                         }
                     }
                 }
                 // A short buffer is not an error: wait for the rest of the
-                // frame. A declared length above the frame ceiling is a real
-                // error and `Frame::parse` reports it before this match.
-                Err(Error::Truncated { .. }) => return Ok(()),
-                Err(Error::StreamFrameLen { declared, .. }) if declared <= MAX_FRAME_PAYLOAD => {
-                    return Ok(())
+                // frame. Every other parse fault is fatal for this buffer.
+                Err(Error::Truncated { .. }) => break,
+                Err(error) => {
+                    if consumed_total > 0 {
+                        self.partial.drain(..consumed_total);
+                    }
+                    return Err(error);
                 }
-                Err(error) => return Err(error),
             }
         }
+        if consumed_total > 0 {
+            self.partial.drain(..consumed_total);
+        }
+        Ok(())
     }
 
     /// Feed one parsed frame.
@@ -891,9 +938,10 @@ impl StreamDecoder {
                     return Err(Error::StreamState("begin after end"));
                 }
                 if frame.payload.len() != 24 {
-                    return Err(Error::StreamFrameLen {
-                        declared: 24,
-                        available: frame.payload.len() as u64,
+                    return Err(Error::StreamPayloadLen {
+                        kind: frame.kind.code(),
+                        expected: 24,
+                        found: frame.payload.len() as u64,
                     });
                 }
                 let major = u16::from_le_bytes([frame.payload[0], frame.payload[1]]);
@@ -939,9 +987,10 @@ impl StreamDecoder {
                     return Err(Error::StreamState("batch outside a generation"));
                 }
                 if frame.payload.len() < 9 {
-                    return Err(Error::StreamFrameLen {
-                        declared: 9,
-                        available: frame.payload.len() as u64,
+                    return Err(Error::StreamPayloadLen {
+                        kind: frame.kind.code(),
+                        expected: 9,
+                        found: frame.payload.len() as u64,
                     });
                 }
                 let section = frame.payload[0] as usize;
@@ -951,9 +1000,10 @@ impl StreamDecoder {
                 let count = read_u32(&frame.payload, 1)?;
                 let len = read_u32(&frame.payload, 5)? as usize;
                 if frame.payload.len() != 9 + len {
-                    return Err(Error::StreamFrameLen {
-                        declared: len as u32,
-                        available: (frame.payload.len() - 9) as u64,
+                    return Err(Error::StreamPayloadLen {
+                        kind: frame.kind.code(),
+                        expected: (9 + len) as u32,
+                        found: frame.payload.len() as u64,
                     });
                 }
                 let any_seen = self.seen.iter().any(|seen| *seen);
@@ -1044,9 +1094,10 @@ impl StreamDecoder {
                     return Err(Error::StreamState("end before begin"));
                 }
                 if frame.payload.len() != 40 {
-                    return Err(Error::StreamFrameLen {
-                        declared: 40,
-                        available: frame.payload.len() as u64,
+                    return Err(Error::StreamPayloadLen {
+                        kind: frame.kind.code(),
+                        expected: 40,
+                        found: frame.payload.len() as u64,
                     });
                 }
                 let mut hash = [0u8; 32];
@@ -1204,10 +1255,18 @@ impl StreamDecoder {
 }
 
 /// Stream encoder facade: prepares frames for a module and for deltas.
-#[derive(Debug)]
 pub struct StreamEncoder {
     frames: VecDeque<Frame>,
     sequence: u64,
+}
+
+impl std::fmt::Debug for StreamEncoder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StreamEncoder")
+            .field("frames", &self.frames.len())
+            .field("sequence", &self.sequence)
+            .finish()
+    }
 }
 
 impl StreamEncoder {

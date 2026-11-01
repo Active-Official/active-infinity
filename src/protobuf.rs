@@ -292,6 +292,7 @@ pub fn to_protobuf(module: &InfinityModule) -> Result<Vec<u8>> {
     // DAG must not get a fresh 100k allowance per binding.
     let mut budget = 0usize;
     let mut redaction = crate::interop::PROJECTION_REDACTION_BUDGET;
+    let mut projection_bytes = 256usize << 20;
     if let Some(root) = module.root() {
         let value = project_node_with(
             module,
@@ -300,6 +301,7 @@ pub fn to_protobuf(module: &InfinityModule) -> Result<Vec<u8>> {
             &raw_secrets,
             &mut budget,
             &mut redaction,
+            &mut projection_bytes,
         )?;
         // The body is built before its length prefix, so the peak is the body
         // plus the finished buffer. A value that could not fit half the cap is
@@ -325,6 +327,7 @@ pub fn to_protobuf(module: &InfinityModule) -> Result<Vec<u8>> {
             &raw_secrets,
             &mut budget,
             &mut redaction,
+            &mut projection_bytes,
         )?;
         if projected_size(&value) > MAX_PROTOBUF_BYTES / 2 {
             return Err(Error::Limit {
@@ -419,7 +422,10 @@ fn check_size(out: &[u8]) -> Result<()> {
 /// a module with many secrets and many large payloads is refused with
 /// `infinity/limit` instead of scanning quadratically.
 fn carries_secret(payload: &[u8], secrets: &[Vec<u8>], work: &mut usize) -> Result<bool> {
-    *work = work.saturating_add(payload.len().saturating_mul(secrets.len()));
+    // Each window comparison costs the secret's length, so charge by the bytes
+    // compared rather than by the window count alone.
+    let compared: usize = secrets.iter().map(Vec::len).sum();
+    *work = work.saturating_add(payload.len().saturating_mul(compared));
     if *work > crate::canonical::MAX_SECRET_SCAN_BYTES {
         return Err(Error::Limit {
             kind: "protobuf secret scan bytes",

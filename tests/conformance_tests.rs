@@ -39,6 +39,10 @@ const NON_IMAGE_CLASSES: &[(&str, &str)] = &[
         "FFI fallback when a code cannot be represented; never returned by the codec",
     ),
     (
+        "infinity/stream-payload",
+        "a complete frame with a kind-inconsistent payload is built in-process by the stream tests; a byte vector would need a recomputed frame checksum",
+    ),
+    (
         "infinity/invalid-argument",
         "caller-supplied argument (offset, depth, tag) outside its range",
     ),

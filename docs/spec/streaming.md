@@ -21,7 +21,7 @@ land on the identical whole-module encoding of the updated module.
 | 24 | 8 | first 8 bytes of Blake3(payload) |
 
 A frame payload larger than 64 MiB is refused with `infinity/stream-frame-len`.
-A wrong checksum is `infinity/hash-mismatch`; a wrong magic is
+A wrong checksum is `infinity/stream-hash`; a wrong magic is
 `infinity/stream-magic`; a skipped sequence number is
 `infinity/stream-sequence`.
 

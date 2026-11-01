@@ -967,3 +967,41 @@ found **no shipped-codec panic, hang or wrong code**. Findings: 1 high,
 Residual: no target drives the `active-core` bridge yet; `fuzz_merge` mostly
 reaches the one-field conflict path. Both are recorded here rather than fixed
 in this round.
+
+### Re-audit round 3 (I-13) - 2026-10-31
+
+Reviewer: DeepSeek V4.1. Findings: 2 high, 5 medium, 3 low.
+
+| # | Severity | Finding | Disposition |
+|---|---|---|---|
+| 1 | high | `Frame`, `StreamedModule`, `StreamDecoder` and `StreamEncoder` derived `Debug` over raw payload/image bytes, so logging a stream printed the secrets heap | **fixed**: hand-written `Debug` on all four (counts, sequence, hash, payload length); `Frame`/`StreamedModule` also lost byte-wise `PartialEq`; `the_stream_debug_forms_do_not_print_payload_bytes` (fails pre-fix) |
+| 2 | high | a complete frame whose payload contradicts its kind reported `StreamFrameLen`, which `is_incomplete()` says to wait on, so a caller waited forever for bytes that could not help | **fixed**: a new fatal `StreamPayloadLen` (`infinity/stream-payload`) for Begin/Batch/End semantic lengths; `a_complete_frame_with_a_wrong_payload_length_is_a_payload_fault` |
+| 3 | medium | `HeaderTruncated` was fatal while `Truncated` was incomplete; both mean "more bytes may fix this" | **fixed**: both are `is_incomplete` and non-fatal |
+| 4 | medium | `push_bytes` drained the buffer per frame, which is quadratic in frames per call | **fixed**: parse against an offset and compact once |
+| 5 | medium | `streaming.md` still said a wrong checksum is `infinity/hash-mismatch` | **fixed** in the spec, and `tests/doc_gate.rs` now reads `streaming.md` |
+| 6 | medium | `Validated::hash_entry` reported an out-of-range index as `infinity/provenance` | **fixed**: `infinity/offset` (`section: hashes`); `a_hash_index_out_of_range_is_an_offset_fault` (fails pre-fix) |
+| 7 | low | fabricated ids/conditions (`Edge{0,0}` sentinel, part index as node id, aux index as count) | **carried to round 4**: each needs a decision about the variant shape, not a one-line change |
+| 8 | low | `is_fatal` linked to itself and the classification prose sat on `is_incomplete` | **fixed**: the prose is on `is_fatal`, `is_incomplete` has its own text |
+| 9 | low | dead `StreamFrameLen <= MAX` arm; `to_bytes` has no `# Panics` section | **partly fixed**: the dead arm is removed; the panic doc is folded into the `try_new` docs |
+| 10 | low | the conformance `spec.contains(code)` check let `infinity/encode` match `infinity/encode-dangling` | **fixed**: whole-cell match (`| `code` |`) |
+
+Gate: 379 library/integration tests, clippy clean both feature sets; 3 new tests
+and 1 new spec row, each proved pre-fix.
+
+### Re-audit round 3 (I-12) - 2026-10-31
+
+Reviewer: DeepSeek V4.1. Findings: 2 high, 6 medium, 4 low.
+
+| # | Severity | Finding | Disposition |
+|---|---|---|---|
+| 1 | high | a tainted interpolation inserted `SECRET_MARKER` directly, publishing a marker-colliding secret | **fixed**: `hiding_placeholder`; `a_tainted_interpolation_never_publishes_the_marker_collision` (fails pre-fix) |
+| 2 | high | no byte budget while materializing the projected tree, so a DAG sharing one large string expanded past memory before the node budget tripped | **fixed**: a 256 MiB `PROJECTION_BYTES` budget charged on every projected string; `the_projection_byte_budget_bounds_a_shared_value` (pre-fix: 27 s then success) |
+| 3 | medium | `intents` returned the marker even when the marker contains the secret | **fixed**: it uses the deletion rule in that case; `intents_never_publish_the_marker_collision` (fails pre-fix) |
+| 4 | medium | `delete_secrets` has no cost guard of its own | **carried to round 4**: its only caller charges first; the protobuf key/provenance path (F5) needs the shared budget, which is the same change |
+| 5 | medium | protobuf metadata redaction bypasses the projection budget | **carried to round 4** |
+| 6 | medium | `$`-prefixed data keys impersonate `$env`/`$expr` markers | **carried to round 4**: needs a documented escaping rule in `projection.md` |
+| 7 | medium | `impact`/`why` panicked on an out-of-range `NodeId` | **fixed**: both return empty; `graph_queries_refuse_an_out_of_range_id` (fails pre-fix) |
+| 8 | medium | the secret-copy scan charged window count, not bytes compared (off by the secret length) | **fixed**: the charge sums the secret lengths |
+| 9-12 | low | float rendering disagreement, duplicate redacted binding names, equality-only copy gate, provenance key-collision drop, O(k·n) label recompute | **carried to round 4** |
+
+Gate: same suite; 4 new tests, each proved pre-fix.

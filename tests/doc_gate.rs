@@ -323,3 +323,20 @@ fn proof_and_signature_are_distinct_in_the_specs() {
     let signature = fs::read_to_string(repo_path("src/signature.rs")).expect("signature source");
     assert!(signature.contains("supply-chain evidence"));
 }
+
+/// The streaming spec and the code must agree on the frame-checksum code.
+#[test]
+fn the_streaming_spec_names_the_frame_checksum_code() {
+    let spec = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/spec/streaming.md"),
+    )
+    .expect("streaming spec");
+    assert!(
+        spec.contains("infinity/stream-hash"),
+        "the streaming spec must name the frame checksum code"
+    );
+    assert!(
+        !spec.contains("wrong checksum is `infinity/hash-mismatch`"),
+        "the streaming spec still routes a frame checksum to the image code"
+    );
+}

@@ -300,3 +300,48 @@ fn frame_try_new_refuses_an_oversized_payload() {
     assert_eq!(error.code(), "infinity/too-large", "{error}");
     assert!(Frame::try_new(FrameKind::Batch, 0, vec![0u8; 8]).is_ok());
 }
+
+/// A complete frame whose payload contradicts its kind cannot be fixed by more
+/// bytes, so it is a fatal payload fault rather than an incomplete read.
+#[test]
+fn a_complete_frame_with_a_wrong_payload_length_is_a_payload_fault() {
+    let frame = Frame::new(FrameKind::Begin, 0, vec![0u8; 23]);
+    let mut decoder = StreamDecoder::new();
+    let error = decoder
+        .push_bytes(&frame.to_bytes())
+        .expect_err("a 23-byte Begin is refused");
+    assert_eq!(error.code(), "infinity/stream-payload", "{error}");
+    assert!(error.is_fatal(), "{error}");
+    assert!(!error.is_incomplete(), "{error}");
+}
+
+/// The stream types carry raw section bytes, including the secrets heap, so
+/// their Debug output must be a summary.
+#[test]
+fn the_stream_debug_forms_do_not_print_payload_bytes() {
+    let mut module = InfinityModule::new();
+    let value = module.push(Inode::Str("prob".into()));
+    let secret = module.push(Inode::Secret(active_infinity::SecretBytes::from("prob")));
+    let root = module.push(Inode::Table {
+        fields: vec![("v".into(), value), ("s".into(), secret)],
+    });
+    module.set_root(Some(root));
+
+    let frames = encode_stream(&module, 64).expect("stream");
+    for frame in &frames {
+        let text = format!("{frame:?}");
+        assert!(
+            !text.contains("112, 114, 111, 98"),
+            "payload leaked: {text}"
+        );
+        assert!(text.contains("payload_len"), "{text}");
+    }
+    let mut bytes = Vec::new();
+    for frame in &frames {
+        bytes.extend_from_slice(&frame.to_bytes());
+    }
+    let streamed = decode_stream(&bytes).expect("decode");
+    let text = format!("{streamed:?}");
+    assert!(!text.contains("112, 114, 111, 98"), "image leaked: {text}");
+    assert!(text.contains("image_len"), "{text}");
+}

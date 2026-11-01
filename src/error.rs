@@ -124,6 +124,11 @@ pub enum Error {
     StreamVersion(u8),
     /// A stream frame length exceeds the limit or the available bytes.
     StreamFrameLen { declared: u32, available: u64 },
+    /// A complete stream frame's payload contradicts its kind.
+    ///
+    /// Distinct from [`Error::StreamFrameLen`], which reports bytes that have
+    /// not arrived yet: feeding more bytes cannot fix this one, so it is fatal.
+    StreamPayloadLen { kind: u8, expected: u32, found: u64 },
     /// A stream frame kind is unknown.
     StreamFrameKind(u8),
     /// A stream frame carries flag bits this reader does not implement.
@@ -194,6 +199,7 @@ impl Error {
             Error::StreamMagic => "infinity/stream-magic",
             Error::StreamVersion(_) => "infinity/stream-version",
             Error::StreamFrameLen { .. } => "infinity/stream-frame-len",
+            Error::StreamPayloadLen { .. } => "infinity/stream-payload",
             Error::StreamFrameKind(_) => "infinity/stream-frame-kind",
             Error::StreamFlags(_) => "infinity/stream-flags",
             Error::StreamSequence { .. } => "infinity/stream-sequence",
@@ -218,16 +224,27 @@ impl Error {
         }
     }
 
+    /// True when the input ended early and more bytes may make it valid.
+    ///
+    /// This is the streaming wait signal: [`crate::StreamDecoder::push_bytes`]
+    /// returns `Ok(())` for these faults and waits for the next chunk. They are
+    /// deliberately **not** fatal, so a caller that gates a retry on
+    /// [`Error::is_fatal`] does not throw away a healthy partial stream. A
+    /// one-shot reader has no more bytes to supply and treats every error as
+    /// terminal.
+    pub const fn is_incomplete(&self) -> bool {
+        matches!(
+            self,
+            Error::HeaderTruncated | Error::Truncated { .. } | Error::StreamFrameLen { .. }
+        )
+    }
+
     /// True when the failure means the input is untrusted or corrupt.
     ///
     /// A fatal error means the bytes cannot be trusted: drop the buffer rather
     /// than retrying with a different configuration. Structure, framing, hash,
-    /// canonical-form and stream-frame faults are fatal.
-    ///
-    /// An **incomplete** input is the one exception and is not fatal: see
-    /// [`Error::is_incomplete`]. A one-shot reader treats every error as
-    /// terminal because no more bytes exist to supply; a streaming caller feeds
-    /// more bytes instead of discarding the buffer.
+    /// canonical-form and stream-frame faults are fatal; an incomplete input is
+    /// the one exception (see [`Error::is_incomplete`]).
     ///
     /// A non-fatal error says the operation failed for a reason a different
     /// limit, a different companion file or a retry may fix: `limit` (raise the
@@ -236,24 +253,12 @@ impl Error {
     /// media-dependent), `signature` and `proof` (the sidecar, not the image),
     /// `encode` (the caller's own module), `stream-delta` and `stream-state`
     /// (the caller's protocol state).
-    /// True when the input ended early and more bytes may make it valid.
-    ///
-    /// This is the streaming wait signal: [`crate::StreamDecoder::push_bytes`]
-    /// returns `Ok(())` for these faults and waits for the next chunk. The
-    /// errors are deliberately **not** fatal, so a caller that gates a retry on
-    /// [`Error::is_fatal`] does not throw away a healthy partial stream.
-    pub const fn is_incomplete(&self) -> bool {
-        matches!(self, Error::Truncated { .. } | Error::StreamFrameLen { .. })
-    }
-
-    /// Whether every fault this error reports is fatal; see [`Error::is_fatal`].
     pub const fn is_fatal(&self) -> bool {
         matches!(
             self,
             Error::Magic
                 | Error::VersionMajor(_)
                 | Error::VersionMinor(_)
-                | Error::HeaderTruncated
                 | Error::HeaderSize(_)
                 | Error::UnknownFlags(_)
                 | Error::ReservedNonZero { .. }
@@ -285,6 +290,7 @@ impl Error {
                 | Error::StreamVersion(_)
                 | Error::StreamFrameKind(_)
                 | Error::StreamFlags(_)
+                | Error::StreamPayloadLen { .. }
                 | Error::StreamSequence { .. }
                 | Error::StreamHashMismatch
                 | Error::StreamUnterminated
@@ -364,6 +370,14 @@ impl fmt::Display for Error {
                 )
             }
             Error::StreamFrameKind(k) => write!(f, "unknown stream frame kind {k}"),
+            Error::StreamPayloadLen {
+                kind,
+                expected,
+                found,
+            } => write!(
+                f,
+                "stream frame kind {kind} needs {expected} payload bytes, found {found}"
+            ),
             Error::StreamSequence { expected, found } => {
                 write!(
                     f,
@@ -476,6 +490,11 @@ mod code_tests {
             },
             Error::StreamFrameKind(9),
             Error::StreamFlags(9),
+            Error::StreamPayloadLen {
+                kind: 2,
+                expected: 24,
+                found: 23,
+            },
             Error::StreamSequence {
                 expected: 1,
                 found: 2,
@@ -498,8 +517,8 @@ mod code_tests {
                 "two variants share the code {code}: {error:?}"
             );
             assert!(
-                spec.contains(code),
-                "docs/spec/layout.md must document {code}"
+                spec.contains(&format!("| `{code}` |")),
+                "docs/spec/layout.md must document {code} as its own table row"
             );
         }
         assert!(
@@ -523,6 +542,7 @@ mod code_tests {
         // An incomplete input may become valid once more bytes arrive, and a
         // caller-side encode fault says nothing about the input's trust.
         for incomplete in [
+            Error::HeaderTruncated,
             Error::Truncated {
                 needed: 4,
                 found: 0,

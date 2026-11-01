@@ -288,3 +288,73 @@ fn a_secret_behind_a_wrapper_taints_the_interpolation() {
     assert!(!json.contains("wrapper-canary"), "{json}");
     assert!(json.contains(SECRET_MARKER), "{json}");
 }
+
+/// A tainted interpolation must not publish a marker that contains the secret.
+#[cfg(feature = "json")]
+#[test]
+fn a_tainted_interpolation_never_publishes_the_marker_collision() {
+    use active_infinity::interop::to_redacted_json;
+
+    let mut module = InfinityModule::new();
+    let secret = module.push(Inode::Secret(SecretBytes::from("SECRET")));
+    let text = module.push(Inode::Interpolate {
+        parts: vec![
+            InterpPart::Literal("value=".into()),
+            InterpPart::Expr(secret),
+        ],
+    });
+    module.set_root(Some(text));
+    let json = to_redacted_json(&module).expect("project");
+    assert!(!json.contains("SECRET"), "{json}");
+}
+
+/// Projected text is bounded by bytes, not only by node visits: a DAG can
+/// reference one large string from many fields.
+#[cfg(feature = "json")]
+#[test]
+fn the_projection_byte_budget_bounds_a_shared_value() {
+    use active_infinity::interop::to_redacted_json;
+
+    let mut module = InfinityModule::new();
+    let text = module.push(Inode::Str("y".repeat(2 << 20)));
+    let mut fields = Vec::new();
+    for index in 0..200 {
+        fields.push((format!("f{index:03}"), text));
+    }
+    let root = module.push(Inode::Table { fields });
+    module.set_root(Some(root));
+    let error = to_redacted_json(&module).expect_err("the byte budget trips");
+    assert_eq!(error.code(), "infinity/limit", "{error}");
+    assert!(error.to_string().contains("projection bytes"), "{error}");
+}
+
+/// Agent queries must not panic on an id outside the module.
+#[test]
+fn graph_queries_refuse_an_out_of_range_id() {
+    let module = {
+        let mut module = InfinityModule::new();
+        let value = module.push(Inode::Int(1));
+        module.set_root(Some(value));
+        module
+    };
+    let missing = active_infinity::NodeId(9999);
+    assert!(active_infinity::interop::impact(&module, missing).is_empty());
+    assert!(active_infinity::interop::why(&module, missing).is_empty());
+}
+
+/// `intents` is a display surface: it must not insert a marker that contains
+/// the secret.
+#[test]
+fn intents_never_publish_the_marker_collision() {
+    use active_infinity::interop::intents;
+
+    let mut module = InfinityModule::new();
+    let secret = module.push(Inode::Secret(SecretBytes::from("SECRET")));
+    module.annotate(
+        secret,
+        active_infinity::AnnotationKind::Intent("my SECRET note".into()),
+    );
+    module.set_root(Some(secret));
+    let text = intents(&module, secret).join(" ");
+    assert!(!text.contains("SECRET"), "{text}");
+}

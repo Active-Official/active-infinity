@@ -659,3 +659,14 @@ fn a_forged_self_loop_out_of_range_is_an_edge() {
     let error = validate(&bytes).expect_err("a forged edge is refused");
     assert_eq!(error.code(), "infinity/edge", "{error:?}");
 }
+
+/// A hash-table range fault is an offset fault, not a provenance fault.
+#[test]
+fn a_hash_index_out_of_range_is_an_offset_fault() {
+    let bytes = two_tables();
+    let validated = active_infinity::Validated::new(&bytes, active_infinity::DecodeOpts::default())
+        .expect("valid");
+    let count = validated.header().span(Section::Hashes).count;
+    let error = validated.hash_entry(count).expect_err("out of range");
+    assert_eq!(error.code(), "infinity/offset", "{error}");
+}

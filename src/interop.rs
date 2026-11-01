@@ -738,6 +738,7 @@ pub(crate) fn project_root(module: &InfinityModule) -> Result<Projected> {
     let hash_secrets = secret_bytes(module);
     let mut budget = 0usize;
     let mut redaction = PROJECTION_REDACTION_BUDGET;
+    let mut bytes = PROJECTION_BYTES;
     build_projected(
         module,
         module.root(),
@@ -746,6 +747,7 @@ pub(crate) fn project_root(module: &InfinityModule) -> Result<Projected> {
         0,
         &mut budget,
         &mut redaction,
+        &mut bytes,
     )
 }
 
@@ -762,6 +764,7 @@ pub(crate) fn project_node_with(
     hash_secrets: &[Vec<u8>],
     budget: &mut usize,
     redaction: &mut usize,
+    bytes: &mut usize,
 ) -> Result<Projected> {
     build_projected(
         module,
@@ -771,6 +774,7 @@ pub(crate) fn project_node_with(
         0,
         budget,
         redaction,
+        bytes,
     )
 }
 
@@ -780,6 +784,20 @@ pub(crate) fn project_node_with(
 /// otherwise multiply it, so every redaction in one projection draws from this
 /// single budget.
 pub(crate) const PROJECTION_REDACTION_BUDGET: usize = 256 << 20;
+
+/// Bytes of projected text one projection may materialize.
+///
+/// A DAG can reference one large string from many fields, so a node-count
+/// budget alone lets the tree expand past memory before the visit budget trips.
+const PROJECTION_BYTES: usize = 256 << 20;
+
+fn charge_projection_bytes(budget: &mut usize, text: &str) -> Result<()> {
+    *budget = budget.checked_sub(text.len()).ok_or(Error::Limit {
+        kind: "projection bytes",
+        limit: PROJECTION_BYTES as u64,
+    })?;
+    Ok(())
+}
 
 /// The text a projection substitutes for secret material.
 ///
@@ -978,6 +996,7 @@ fn build_projected(
     depth: usize,
     budget: &mut usize,
     redaction: &mut usize,
+    bytes: &mut usize,
 ) -> Result<Projected> {
     if depth > PROJECTION_DEPTH {
         return Err(Error::Encode("projection nesting exceeds the limit"));
@@ -993,8 +1012,16 @@ fn build_projected(
             Inode::Bool(flag) => Projected::Bool(*flag),
             Inode::Int(number) => Projected::Int(*number),
             Inode::Float(number) => Projected::Float(*number),
-            Inode::Str(text) => Projected::Text(redacted_value_within(text, secrets, redaction)?),
-            Inode::Ident(text) => Projected::Text(redact_within(text, secrets, redaction)?),
+            Inode::Str(text) => {
+                let text = redacted_value_within(text, secrets, redaction)?;
+                charge_projection_bytes(bytes, &text)?;
+                Projected::Text(text)
+            }
+            Inode::Ident(text) => {
+                let text = redact_within(text, secrets, redaction)?;
+                charge_projection_bytes(bytes, &text)?;
+                Projected::Text(text)
+            }
             Inode::DurationMs(ms) => Projected::DurationMs(*ms),
             Inode::Quantity { value, unit } => Projected::Quantity(
                 Box::new(build_projected(
@@ -1005,8 +1032,13 @@ fn build_projected(
                     depth + 1,
                     budget,
                     redaction,
+                    bytes,
                 )?),
-                redact_within(unit.name(), secrets, redaction)?,
+                {
+                    let unit = redact_within(unit.name(), secrets, redaction)?;
+                    charge_projection_bytes(bytes, &unit)?;
+                    unit
+                },
             ),
             Inode::Array { elements } => Projected::Array(
                 elements
@@ -1020,6 +1052,7 @@ fn build_projected(
                             depth + 1,
                             budget,
                             redaction,
+                            bytes,
                         )
                     })
                     .collect::<Result<Vec<_>>>()?,
@@ -1027,8 +1060,10 @@ fn build_projected(
             Inode::Table { fields } => {
                 let mut projected = Vec::with_capacity(fields.len());
                 for (name, id) in fields {
+                    let key = redact_within(name, secrets, redaction)?;
+                    charge_projection_bytes(bytes, &key)?;
                     projected.push((
-                        redact_within(name, secrets, redaction)?,
+                        key,
                         build_projected(
                             module,
                             Some(*id),
@@ -1037,6 +1072,7 @@ fn build_projected(
                             depth + 1,
                             budget,
                             redaction,
+                            bytes,
                         )?,
                     ));
                 }
@@ -1061,8 +1097,13 @@ fn build_projected(
                 depth + 1,
                 budget,
                 redaction,
+                bytes,
             )?,
-            Inode::Env { name, .. } => Projected::Env(redact_within(name, secrets, redaction)?),
+            Inode::Env { name, .. } => {
+                let name = redact_within(name, secrets, redaction)?;
+                charge_projection_bytes(bytes, &name)?;
+                Projected::Env(name)
+            }
             Inode::Interpolate { parts } => {
                 let mut text = String::new();
                 let mut tainted = false;
@@ -1079,9 +1120,11 @@ fn build_projected(
                     }
                 }
                 if tainted {
-                    Projected::Text(SECRET_MARKER.to_string())
+                    Projected::Text(hiding_placeholder(secrets).to_string())
                 } else {
-                    Projected::Text(redacted_value(&text, secrets))
+                    let text = redacted_value(&text, secrets);
+                    charge_projection_bytes(bytes, &text)?;
+                    Projected::Text(text)
                 }
             }
             Inode::Binary { .. }
@@ -1102,6 +1145,7 @@ fn build_projected(
                 depth + 1,
                 budget,
                 redaction,
+                bytes,
             )?,
             Inode::Blob {
                 hash,
@@ -1125,7 +1169,9 @@ fn build_projected(
                     media_type: if *tainted {
                         hiding_placeholder(secrets).to_string()
                     } else {
-                        redact_within(media_type, secrets, redaction)?
+                        let media_type = redact_within(media_type, secrets, redaction)?;
+                        charge_projection_bytes(bytes, &media_type)?;
+                        media_type
                     },
                     tainted: *tainted,
                 }
@@ -1416,6 +1462,9 @@ fn walk(adjacency: &[Vec<NodeId>], start: NodeId) -> Vec<NodeId> {
 /// Parent tables are included: an agent asking "what does changing this node
 /// affect?" needs the tables that must be re-evaluated as much as the leaves.
 pub fn impact(module: &InfinityModule, id: NodeId) -> Vec<String> {
+    if id.index() >= module.node_count() {
+        return Vec::new();
+    }
     let (_, dependents) = adjacency(module);
     let mut labels: Vec<String> = walk(&dependents, id)
         .into_iter()
@@ -1428,6 +1477,9 @@ pub fn impact(module: &InfinityModule, id: NodeId) -> Vec<String> {
 
 /// Transitive dependencies (what a node is built from), sorted by label.
 pub fn why(module: &InfinityModule, id: NodeId) -> Vec<String> {
+    if id.index() >= module.node_count() {
+        return Vec::new();
+    }
     let (deps, _) = adjacency(module);
     let mut labels: Vec<String> = walk(&deps, id)
         .into_iter()
@@ -1605,7 +1657,13 @@ pub fn intents(module: &InfinityModule, id: NodeId) -> Vec<String> {
         .iter()
         .filter(|annotation| annotation.node == id)
         .filter_map(|annotation| match &annotation.kind {
-            AnnotationKind::Intent(text) => Some(redact_text(text, &secrets)),
+            AnnotationKind::Intent(text) => {
+                Some(if hiding_placeholder(&secrets) == SECRET_MARKER {
+                    redact_text(text, &secrets)
+                } else {
+                    delete_secrets(text, &secrets)
+                })
+            }
             _ => None,
         })
         .collect()

@@ -523,7 +523,13 @@ impl<'a> Validated<'a> {
     pub fn hash_entry(&self, index: u32) -> Result<[u8; 32]> {
         let count = self.header.span(Section::Hashes).count;
         if index >= count {
-            return Err(Error::Provenance("hash index out of range"));
+            // A hash-table range fault is an offset fault, not a provenance
+            // parse fault: a caller routing on the code must not hand it to the
+            // provenance reader.
+            return Err(Error::Offset {
+                section: "hashes",
+                offset: u64::from(index),
+            });
         }
         let offset = self.header.span(Section::Hashes).offset as usize + index as usize * 32;
         let mut hash = [0u8; 32];

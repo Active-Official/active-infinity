@@ -80,6 +80,28 @@ async function main() {
 		checked += 1;
 	}
 
+	// A capacity smaller than the result must return -2 with the required size
+	// and must not write into the caller's buffer.
+	{
+		const image = fs.readFileSync(
+			path.join(ROOT, "tests/vectors/valid/full.ainf"),
+		);
+		const input = alloc(image);
+		const tinyLength = exports.allocate(4);
+		const tinyBuffer = exports.allocate(8);
+		new DataView(exports.memory.buffer).setUint32(tinyLength, 8, true);
+		assert.strictEqual(
+			exports.reencode(input, image.length, tinyBuffer, tinyLength),
+			-2,
+			"a small capacity is refused",
+		);
+		const required = new DataView(exports.memory.buffer).getUint32(
+			tinyLength,
+			true,
+		);
+		assert.ok(required > 8, `required size reported (${required})`);
+	}
+
 	const source = Buffer.from('port = 8080\nname = "assemblyscript"\n');
 	const name = Buffer.from("as.active");
 	const sourcePointer = alloc(source);

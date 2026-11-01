@@ -29,8 +29,10 @@
  *
  * Allocation
  * ----------
- * `active_infinity_alloc` refuses more than 1 GiB (`infinity/limit`) and
- * returns NULL rather than aborting. Every live allocation is recorded, and
+ * `active_infinity_alloc` returns NULL for more than 1 GiB, or when the
+ * allocator fails, rather than aborting; a NULL return means the allocation
+ * failed, and (unlike the status-bearing calls) it does not set `last_error`.
+ * Every live allocation is recorded, and
  * `active_infinity_free` consults that record: a foreign pointer, a forged tag
  * and a wrong length are each a no-op (the buffer is leaked at worst) instead
  * of heap corruption. Buffers are 8-byte aligned.

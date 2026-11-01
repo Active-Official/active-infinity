@@ -12,8 +12,8 @@ for the RPC column at `59e58e2` (Rust and TypeScript clients, 20/20 live and
 | # | Language | Validate + hash | Redaction | Encode | RPC thin client | Result |
 |---|----------|-----------------|-----------|--------|-----------------|--------|
 | 1 | Rust | PASS | PASS | PASS | PASS (full kernel) | PASS |
-| 2 | C | PASS | PASS | PASS | PASS | PASS |
-| 3 | C++ | PASS | PASS | PASS | PASS | PASS |
+| 2 | C | PASS | PASS | reencode | PASS | PASS |
+| 3 | C++ | PASS | PASS | reencode | PASS | PASS |
 | 4 | Python | PASS | PASS | PASS | PASS | PASS |
 | 5 | Go | PASS | PASS | PASS | PASS | PASS |
 | 6 | TypeScript | PASS | PASS | PASS | PASS | PASS |
@@ -22,7 +22,7 @@ for the RPC column at `59e58e2` (Rust and TypeScript clients, 20/20 live and
 | 9 | C# / .NET | PASS | PASS | PASS | PASS | PASS |
 | 10 | Kotlin (JVM) | PASS | PASS | PASS | PASS | PASS |
 | 11 | Swift | PASS | PASS | PASS | PASS | PASS |
-| 12 | Zig | PASS | PASS | PASS | PASS | PASS |
+| 12 | Zig | PASS | PASS | reencode | PASS | PASS |
 | 13 | Ruby | PASS | PASS | PASS | PASS | PASS |
 | 14 | PHP | PASS | PASS | PASS | PASS | PASS |
 | 15 | Scala | PASS | PASS | PASS | PASS | PASS |
@@ -39,7 +39,9 @@ for the RPC column at `59e58e2` (Rust and TypeScript clients, 20/20 live and
 - **Redaction**: `redacted_json` (or the CLI's `decode`) is asserted to exclude
   the `CANARY_SECRET_` canary; Dart and shell assert the same fixture.
 - **Encode**: `reencode` returns canonical bytes, and active-source compilation
-  (`fromActive` / `encode`) produces an image the binding validates.
+  (`fromActive` / `encode`) produces an image the binding validates. C, C++ and
+  Zig exercise the reencode half only (their conformance drivers do not call
+  `active_infinity_from_active`); their Encode cell says so.
 - **RPC thin client**: native ARP1 over TCP against `active-rpc`'s real kernel
   peer — one successful `echo` with a server-minted capability carrying an AINF
   payload, one `rpc/method-not-granted` refusal, one `rpc/unknown-capability`

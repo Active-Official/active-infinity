@@ -403,3 +403,45 @@ fn a_data_key_cannot_impersonate_a_projection_marker() {
     assert!(json.contains("$$env"), "{json}");
     assert!(!json.contains("\"$env\""), "{json}");
 }
+
+/// Protobuf metadata redaction draws the same budget as the value tree: many
+/// long binding names with many secrets must be refused, not scanned for free.
+#[test]
+fn protobuf_metadata_redaction_draws_the_shared_budget() {
+    let mut module = InfinityModule::new();
+    let value = module.push(Inode::Int(1));
+    module.set_root(Some(value));
+    for index in 0..400 {
+        let secret = module.push(Inode::Secret(SecretBytes::from(format!(
+            "secret-{index:03}"
+        ))));
+        module.bind(format!("meta-{index:03}"), secret);
+    }
+    let long = "y".repeat(8 << 10);
+    for index in 0..12 {
+        module.bind(format!("{long}-{index:02}"), value);
+    }
+    let error = active_infinity::to_protobuf(&module).expect_err("the budget trips");
+    assert_eq!(error.code(), "infinity/limit", "{error}");
+    assert!(
+        error.to_string().contains("projection redaction"),
+        "{error}"
+    );
+}
+
+/// Two bindings that redact to one name would be one key twice in the
+/// projection; the encoder must refuse rather than merge them silently.
+#[test]
+fn duplicate_redacted_binding_names_are_refused() {
+    use active_infinity::interop::SECRET_MARKER;
+
+    let mut module = InfinityModule::new();
+    let value = module.push(Inode::Int(1));
+    let secret = module.push(Inode::Secret(SecretBytes::from("canary")));
+    module.set_root(Some(value));
+    module.bind("canary", secret);
+    module.bind(SECRET_MARKER.to_string(), value);
+    let error = active_infinity::to_protobuf(&module).expect_err("the collision is refused");
+    assert_eq!(error.code(), "infinity/encode", "{error}");
+    assert!(error.to_string().contains("binding names"), "{error}");
+}

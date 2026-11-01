@@ -115,10 +115,11 @@
 use crate::encode::{encode, hash_image};
 use crate::error::{Error, Result};
 use crate::interop::{
-    first_entry_per_key, project_node_with, redacted_key, redacted_value, secret_bytes,
+    first_entry_per_key, project_node_with, redact_within, redacted_value_within, secret_bytes,
     secret_table, Projected,
 };
 use crate::ir::{AnnotationKind, InfinityModule, ProvValue};
+use std::collections::BTreeSet;
 
 // ---------------------------------------------------------------------------
 // wire primitives
@@ -293,6 +294,7 @@ pub fn to_protobuf(module: &InfinityModule) -> Result<Vec<u8>> {
     let mut budget = 0usize;
     let mut redaction = crate::interop::PROJECTION_REDACTION_BUDGET;
     let mut projection_bytes = 256usize << 20;
+    let mut binding_names: BTreeSet<String> = BTreeSet::new();
     if let Some(root) = module.root() {
         let value = project_node_with(
             module,
@@ -336,7 +338,13 @@ pub fn to_protobuf(module: &InfinityModule) -> Result<Vec<u8>> {
             });
         }
         let mut binding = Vec::new();
-        string(&mut binding, 1, &redacted_key(name, &secrets));
+        let name = redact_within(name, &secrets, &mut redaction)?;
+        if !binding_names.insert(name.clone()) {
+            // Two bindings that redact to one name would be one key twice in
+            // the projection; refuse rather than silently merge them.
+            return Err(Error::Encode("two binding names redact to the same key"));
+        }
+        string(&mut binding, 1, &name);
         let mut encoded = Vec::new();
         encode_value(&value, &mut encoded);
         check_size(&encoded)?;
@@ -346,12 +354,20 @@ pub fn to_protobuf(module: &InfinityModule) -> Result<Vec<u8>> {
     }
 
     if let Some(prov) = module.provenance() {
-        message(&mut out, 5, &encode_provenance(prov, &secrets));
+        message(
+            &mut out,
+            5,
+            &encode_provenance(prov, &secrets, &mut redaction)?,
+        );
         check_size(&out)?;
     }
 
     for annotation in module.annotations() {
-        message(&mut out, 6, &encode_annotation(annotation, &secrets));
+        message(
+            &mut out,
+            6,
+            &encode_annotation(annotation, &secrets, &mut redaction)?,
+        );
         check_size(&out)?;
     }
 
@@ -439,53 +455,75 @@ fn carries_secret(payload: &[u8], secrets: &[Vec<u8>], work: &mut usize) -> Resu
     }))
 }
 
-fn encode_annotation(annotation: &crate::ir::Annotation, secrets: &[String]) -> Vec<u8> {
+fn encode_annotation(
+    annotation: &crate::ir::Annotation,
+    secrets: &[String],
+    budget: &mut usize,
+) -> Result<Vec<u8>> {
     let mut body = Vec::new();
     uint(&mut body, 1, annotation.node.index() as u64);
     match &annotation.kind {
-        AnnotationKind::Intent(text) => string(&mut body, 2, &redacted_value(text, secrets)),
+        AnnotationKind::Intent(text) => {
+            string(&mut body, 2, &redacted_value_within(text, secrets, budget)?)
+        }
         AnnotationKind::Constraint { source, expr } => {
             let mut constraint = Vec::new();
-            string(&mut constraint, 1, &redacted_value(source, secrets));
+            string(
+                &mut constraint,
+                1,
+                &redacted_value_within(source, secrets, budget)?,
+            );
             uint(&mut constraint, 2, expr.index() as u64);
             message(&mut body, 3, &constraint);
         }
         AnnotationKind::AiImmutable(flag) => boolean(&mut body, 4, *flag),
     }
-    body
+    Ok(body)
 }
 
-fn encode_provenance(prov: &crate::ir::Provenance, secrets: &[String]) -> Vec<u8> {
+fn encode_provenance(
+    prov: &crate::ir::Provenance,
+    secrets: &[String],
+    budget: &mut usize,
+) -> Result<Vec<u8>> {
     let mut body = Vec::new();
     string(
         &mut body,
         1,
-        &redacted_value(prov.producer.as_deref().unwrap_or(""), secrets),
+        &redacted_value_within(prov.producer.as_deref().unwrap_or(""), secrets, budget)?,
     );
     uint(&mut body, 2, prov.timestamp_ms);
     string(
         &mut body,
         3,
-        &redacted_value(prov.model.as_deref().unwrap_or(""), secrets),
+        &redacted_value_within(prov.model.as_deref().unwrap_or(""), secrets, budget)?,
     );
     string(
         &mut body,
         4,
-        &redacted_value(prov.tool.as_deref().unwrap_or(""), secrets),
+        &redacted_value_within(prov.tool.as_deref().unwrap_or(""), secrets, budget)?,
     );
     if let Some(parent) = &prov.parent {
         bytes(&mut body, 5, parent);
     }
     for entry in first_entry_per_key(&prov.entries) {
         let mut encoded = Vec::new();
-        string(&mut encoded, 1, &redacted_key(&entry.key, secrets));
+        string(
+            &mut encoded,
+            1,
+            &redact_within(&entry.key, secrets, budget)?,
+        );
         match &entry.value {
-            ProvValue::Text(text) => string(&mut encoded, 2, &redacted_value(text, secrets)),
+            ProvValue::Text(text) => string(
+                &mut encoded,
+                2,
+                &redacted_value_within(text, secrets, budget)?,
+            ),
             ProvValue::Int(number) => sint(&mut encoded, 3, *number),
             ProvValue::Flag(flag) => boolean(&mut encoded, 4, *flag),
             ProvValue::Hash(hash) => bytes(&mut encoded, 5, hash),
         }
         message(&mut body, 6, &encoded);
     }
-    body
+    Ok(body)
 }

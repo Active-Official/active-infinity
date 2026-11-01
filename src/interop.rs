@@ -838,7 +838,7 @@ pub(crate) fn hiding_placeholder(secrets: &[String]) -> &'static str {
 /// the marker, insertions are replaced by deletions and the pass repeats until
 /// the text is clean; a join that keeps recreating a secret collapses the whole
 /// value to the empty string.
-fn redact_within(text: &str, secrets: &[String], budget: &mut usize) -> Result<String> {
+pub(crate) fn redact_within(text: &str, secrets: &[String], budget: &mut usize) -> Result<String> {
     let cost = crate::canonical::redaction_cost(text, secrets);
     if cost > *budget {
         return Err(Error::Limit {
@@ -894,7 +894,11 @@ fn escape_line(text: &str) -> String {
 
 /// A value-position string: the whole text becomes the placeholder as soon as
 /// it contains a secret literal.
-fn redacted_value_within(text: &str, secrets: &[String], budget: &mut usize) -> Result<String> {
+pub(crate) fn redacted_value_within(
+    text: &str,
+    secrets: &[String],
+    budget: &mut usize,
+) -> Result<String> {
     let cost = crate::canonical::redaction_cost(text, secrets);
     if cost > *budget {
         return Err(Error::Limit {
@@ -1022,6 +1026,9 @@ fn build_projected(
     if *budget > PROJECTION_NODE_BUDGET {
         return Err(Error::Encode("projection node budget exceeded"));
     }
+    // One scan of the secret table per projection, not per node: with many
+    // secrets this was the dominant cost.
+    let placeholder = hiding_placeholder(secrets);
     let value = match id.and_then(|id| module.get(id)) {
         None => Projected::Null,
         Some(node) => match node {
@@ -1109,9 +1116,7 @@ fn build_projected(
                 }
                 Projected::Record(projected)
             }
-            Inode::Secret(_) | Inode::SecretRef { .. } => {
-                Projected::Text(hiding_placeholder(secrets).to_string())
-            }
+            Inode::Secret(_) | Inode::SecretRef { .. } => Projected::Text(placeholder.to_string()),
             Inode::Ref(id) => build_projected(
                 module,
                 Some(*id),
@@ -1143,7 +1148,7 @@ fn build_projected(
                     }
                 }
                 if tainted {
-                    Projected::Text(hiding_placeholder(secrets).to_string())
+                    Projected::Text(placeholder.to_string())
                 } else {
                     let text = redacted_value_within(&text, secrets, redaction)?;
                     charge_projection_bytes(bytes, &text)?;
@@ -1190,7 +1195,7 @@ fn build_projected(
                     hash: *hash,
                     size: *size,
                     media_type: if *tainted {
-                        hiding_placeholder(secrets).to_string()
+                        placeholder.to_string()
                     } else {
                         let media_type = redact_within(media_type, secrets, redaction)?;
                         charge_projection_bytes(bytes, &media_type)?;
@@ -1588,23 +1593,21 @@ pub fn secret_tainted_paths(module: &InfinityModule) -> Vec<String> {
     let mut tainted: Vec<bool> = vec![false; module.node_count()];
     // Fixpoint over the DAG: a node is tainted when it is a secret or any
     // child is tainted. Iterate to a fixed point (bounded by node count).
+    // `subgraph` is a breadth-first order from the roots, so every child comes
+    // after its parents. Taint flows child -> parent, so one pass in reverse is
+    // a fixpoint; iterating forward needed one sweep per depth level.
     let order = subgraph(module, &root_ids(module));
-    let mut changed = true;
-    while changed {
-        changed = false;
-        for id in &order {
-            let Some(node) = module.get(*id) else {
-                continue;
-            };
-            let value = node.is_secret()
-                || node
-                    .children()
-                    .iter()
-                    .any(|child| tainted.get(child.index()).copied().unwrap_or(false));
-            if value && !tainted[id.index()] {
-                tainted[id.index()] = true;
-                changed = true;
-            }
+    for id in order.iter().rev() {
+        let Some(node) = module.get(*id) else {
+            continue;
+        };
+        let value = node.is_secret()
+            || node
+                .children()
+                .iter()
+                .any(|child| tainted.get(child.index()).copied().unwrap_or(false));
+        if value {
+            tainted[id.index()] = true;
         }
     }
     let paths = value_paths(module);

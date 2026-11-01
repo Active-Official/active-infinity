@@ -17,8 +17,19 @@ CLI="$ROOT/cli/active-infinity-cli/target/release/active-infinity-cli"
 if [ -x "$CLI.exe" ]; then
   CLI="$CLI.exe"
 fi
-PY=python3
-command -v python3 >/dev/null 2>&1 || PY=python
+# Pick an interpreter that actually runs: on Windows the `python3` name can be a
+# Store stub that exits non-zero.
+PY=
+for candidate in python3 python; do
+  if command -v "$candidate" >/dev/null 2>&1 && "$candidate" -c "" >/dev/null 2>&1; then
+    PY="$candidate"
+    break
+  fi
+done
+if [ -z "$PY" ]; then
+  echo "the shell lane needs python3 or python" >&2
+  exit 1
+fi
 
 "$CLI" doctor
 "$CLI" conformance run --manifest conformance/manifest.json
@@ -33,12 +44,13 @@ for case in manifest["cases"]:
         print(f'{case["path"]}\t{case["content_hash"]}')
 PY
 )
+rows=${rows//$'\r'/}
 
 checked=0
 while IFS=$'\t' read -r path expected_hash; do
   [ -n "$path" ] || continue
   "$CLI" validate "$path" >/dev/null
-  actual_hash=$("$CLI" hash "$path")
+  actual_hash=$("$CLI" hash "$path" | tr -d '\r')
   if [ "$actual_hash" != "$expected_hash" ]; then
     echo "content hash mismatch for $path: expected $expected_hash, got $actual_hash" >&2
     exit 1

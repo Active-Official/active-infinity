@@ -245,22 +245,22 @@ pub extern "C" fn active_infinity_alloc(len: usize) -> *mut u8 {
 }
 
 fn alloc_tagged(len: usize) -> *mut u8 {
+    // `alloc` and `free` never touch `last_error`: a binding may call them
+    // between a failed FFI call and its read of the code, and an internal
+    // allocation must not overwrite the failure it is about to report. A null
+    // return means "allocation failed" (the ceiling or the allocator).
     if len > MAX_ALLOC_BYTES {
-        set_error("infinity/limit");
         return ptr::null_mut();
     }
     let Some(total) = len.checked_add(ALLOC_HEADER) else {
-        set_error("infinity/limit");
         return ptr::null_mut();
     };
     let Ok(layout) = Layout::from_size_align(total, ALLOC_ALIGN) else {
-        set_error("infinity/limit");
         return ptr::null_mut();
     };
     // SAFETY: `total` is non-zero and the layout is valid for the allocator.
     let base = unsafe { std::alloc::alloc_zeroed(layout) };
     if base.is_null() {
-        set_error("infinity/limit");
         return ptr::null_mut();
     }
     // SAFETY: the allocation holds `ALLOC_HEADER` bytes at `base`.
@@ -273,7 +273,6 @@ fn alloc_tagged(len: usize) -> *mut u8 {
     if !live_allocations().insert(pointer as usize) {
         // A fresh allocation cannot alias a live one; fail closed rather than
         // hand out two names for one buffer.
-        set_error("infinity/limit");
         // SAFETY: `base` came from `alloc_zeroed` with this layout.
         unsafe { std::alloc::dealloc(base, layout) };
         return ptr::null_mut();

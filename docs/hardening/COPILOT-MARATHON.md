@@ -857,7 +857,7 @@ rewritten allocator.
 | 5 | medium | `alloc` used `Vec` and `Vec::from_raw_parts(total, total)`, whose capacity can exceed the requested size (UB on dealloc) | **fixed**: `alloc_zeroed`/`dealloc` with one explicit `Layout` |
 | 6 | high (DeepSeek) | the header promised a double free is a no-op, which fails once the address is reused: the stale free then releases a live block | **documented, contract corrected**: the header and `free` docs state the true guarantee (no-op only while the address is unreused; null after free) |
 | 7 | medium (DeepSeek) | `input()` built a slice before any length bound, so `len = usize::MAX` violated `from_raw_parts` preconditions | **fixed**: a length above `isize::MAX` is `infinity/null-input`, and `from_active` checks its cap before slicing; `a_hostile_length_is_refused_before_the_slice` (pre-fix: STATUS_STACK_BUFFER_OVERRUN) |
-| 8 | medium (DeepSeek) | the FFI `content_hash` accepted a non-canonical image, splitting identity from the Rust API | **fixed**: it calls `validate_canonical` first; `content_hash_refuses_a_non_canonical_image` (fails pre-fix) |
+| 8 | medium (DeepSeek) | the FFI `content_hash` accepted a non-canonical image, splitting identity from the Rust API | **reverted as by design**: the FFI hash is the byte identity of a valid image and every language in the matrix hashes the same bytes; canonical form is a `validate_canonical`/signature question (see `6e6d323`) |
 | 9 | medium (DeepSeek) | `-3` is inert on `panic=abort` targets, including `wasm32-unknown-unknown` | **documented**: the header states the guarantee per target and that a trap is a failed call |
 | 10 | medium (DeepSeek) | no limits knob; a 1 GiB image needs decode plus re-encode inside a 4 GiB wasm space | **documented**: the shim runs the default profile and the host must cap input for a small instance |
 | 11 | low (DeepSeek) | `alloc`/`free` left a stale `last_error` after success | **fixed**: every call sets `infinity/ok`; `a_success_clears_the_last_error` (fails pre-fix) |
@@ -1005,3 +1005,46 @@ Reviewer: DeepSeek V4.1. Findings: 2 high, 6 medium, 4 low.
 | 9-12 | low | float rendering disagreement, duplicate redacted binding names, equality-only copy gate, provenance key-collision drop, O(k·n) label recompute | **carried to round 4** |
 
 Gate: same suite; 4 new tests, each proved pre-fix.
+
+### Re-audit round 4 (I-12) - 2026-10-31
+
+Reviewer: DeepSeek V4.1. Findings: 1 high, 5 medium, 3 low; every carried item
+was re-examined (none was a false alarm).
+
+| # | Severity | Finding | Disposition |
+|---|---|---|---|
+| 1 | high | the copy gate charged window count, not bytes compared, so a prefix-repeat extension payload scanned for hours under a 64 MiB charge (445 ms for 1 MiB vs 38 ms unmatchable; reachable from `encode` and from `validate_canonical`) | **fixed**: the charge is `(len - secret + 1) x secret` in `canonical::reject_secret_copies`, mirroring `protobuf::carries_secret` |
+| 2 | medium | protobuf metadata (binding names, provenance, annotations) redacts through the unbudgeted `redacted_key`/`redacted_value` | **carried to I-12 round 5** with the exact plan: make `redact_within`/`redacted_value_within` `pub(crate)`, thread `&mut redaction` into `encode_provenance`/`encode_annotation` and return `Result` |
+| 3 | medium | an interpolated string used `redacted_value` (uncharged) | **fixed**: `redacted_value_within` |
+| 4 | medium | `provenance_json_for`/`provenance_lines` compared hashes against the secrets' lossy text, so a non-UTF-8 32-byte secret was published as hex | **fixed**: both compare raw bytes; `a_non_utf8_secret_hash_is_marked_in_provenance_exports` (fails pre-fix) |
+| 5 | medium | a data key starting with `$` was byte-identical to a projection marker | **fixed**: escaped (`$env` -> `$$env`) and documented in `projection.md`; `a_data_key_cannot_impersonate_a_projection_marker` (fails pre-fix) |
+| 6 | medium | `node_label` rebuilt `value_paths` per node, so `impact`/`why` were O(n^2) | **fixed**: one map per query |
+| 7 | low | the spec said redacted table keys "may merge", the code refuses | **fixed**: the spec documents the refusal |
+| 8 | low | `hiding_placeholder` scans the secret table per visit | **carried to round 5** (cache per projection) |
+| 9 | low | `secret_tainted_paths` iterates parents before children | **carried to round 5** (reverse order) |
+| (d) | low | NaN renders as JSON `null` and as IEEE in protobuf | **documented** in `projection.md` (schema unchanged) |
+| (e) | low | duplicate redacted binding names are emitted twice | **carried to round 5** (apply the `Record` refusal to bindings) |
+| (f) | low | the copy gate is equality-only, so a short secret inside a hash can pass | **documented** in `projection.md` (equality gate, keyed-hash guidance) |
+| (g) | low | `provenance_json` drops a redacted-key collision | **carried to round 5** (refuse, matching the encoder) |
+
+Gate: 381 library/integration tests, clippy clean; 3 new tests, each proved
+pre-fix.
+
+### Re-audit round 3 (I-14) - 2026-10-31
+
+Reviewer: DeepSeek V4.1, which also read the polyglot bindings. Findings:
+1 latent high, 4 medium, 6 low.
+
+| # | Severity | Finding | Disposition |
+|---|---|---|---|
+| 1 | high (latent) | the Go WASM host zero-fills on `crypto/rand` failure and reports success, producing predictable secret material | **carried to I-14 round 4** (`polyglot/go/activeinfinity.go`): return an error instead of zero-filling |
+| 2 | medium | the JNI shim trusts `out_len[0]` without clamping to `GetArrayLength`, so Java can overflow the native buffer | **carried to round 4** (`polyglot/java/native/active_infinity_jni.c`): clamp to the array length |
+| 3 | medium | a failed `alloc` set `infinity/limit`, contradicting the header and clobbering the code a binding reads after a failed call | **fixed**: `alloc`/`free` never touch `last_error`; a null return means allocation failure; the header says so and the ABI test pins it |
+| 4 | medium | the AssemblyScript host copies the clipped length but passes the unclipped one | **carried to round 4** (`polyglot/assemblyscript/host.js`) |
+| 5 | medium | eight bindings write through a null `alloc` return for inputs over the 1 GiB allocation cap | **carried to round 4**: check the return and raise `infinity/limit` in Ruby, PHP, Lua, C#, Dart, JS, the AS host and Go |
+| 6 | low | `len > isize::MAX` reports `infinity/null-input` | **carried to round 4**: give it `infinity/limit` |
+| 7 | low | the `free` rustdoc still said a double free is UB while the header says no-op | **fixed**: both docs state the reuse caveat |
+| 8 | low | this log recorded the reverted FFI canonical-hash behaviour as a fix | **fixed**: the entry now records the revert |
+| 9-11 | low | signed WASM pointers, unbounded error scans, `ULong` truncation, `bounded_name` over-read | **carried to round 4** |
+
+Gate: 27 FFI tests, clippy clean.

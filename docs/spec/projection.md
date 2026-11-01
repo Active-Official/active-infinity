@@ -107,8 +107,14 @@ Structural names are the exception, in both directions:
   field the encoder must refuse.
 - the projections **do redact** those names, because an export must not carry a
   copy. A projection is therefore lossy for a module that embeds a secret inside
-  such a name: two keys may merge into one, and a consumer that needs the exact
-  names reads the AINF image instead.
+  such a name; a consumer that needs the exact names reads the AINF image
+  instead.
+- two names that redact to one key are **refused** (`infinity/encode`) rather
+  than merged: a JSON object with duplicate keys loses one silently, and a
+  lossy export is worse than a loud refusal. The same rule applies to bindings.
+- a data key that starts with `$` is escaped with a leading `$` (`$env` becomes
+  `$$env`) so module data cannot impersonate a projection marker such as
+  `{"$env": ...}` or `{"$active.blob": ...}`.
 
 Metadata prose (annotations and provenance) is redacted in the image itself, with
 each occurrence replaced, so a copy cannot be stored there either. String
@@ -117,6 +123,17 @@ leave through a projection.
 
 The test suite asserts that the secret literal does not appear anywhere in the
 projected bytes.
+
+Two limits are documented rather than hidden:
+
+- A non-finite float is `null` in JSON (JSON has no NaN or infinity) and a real
+  IEEE double in Protobuf. A consumer that needs to tell `null` from NaN reads
+  the AINF image or the Protobuf form.
+- The copy gate compares a hash against a secret **by value**. A 1-31 byte
+  secret embedded inside a 32-byte hash is only caught when it happens to equal
+  the whole value; finding it would require a substring search of every hash
+  against every secret at encode time. Use a 32-byte secret, or a keyed hash,
+  when a hash could carry a copy.
 
 ## 3. JSON
 

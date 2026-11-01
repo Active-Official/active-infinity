@@ -599,7 +599,10 @@ fn reject_secret_copies(
             if secret.is_empty() || secret.len() > payload.len() {
                 continue;
             }
-            work = work.saturating_add(payload.len() - secret.len());
+            // Each window comparison costs the secret's length, so charge the
+            // bytes compared, not the window count.
+            work = work
+                .saturating_add((payload.len() - secret.len() + 1).saturating_mul(secret.len()));
             if work > MAX_SECRET_SCAN_BYTES {
                 return Err(Error::Limit {
                     kind: "secret copy scan bytes",

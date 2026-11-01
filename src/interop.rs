@@ -799,6 +799,16 @@ fn charge_projection_bytes(budget: &mut usize, text: &str) -> Result<()> {
     Ok(())
 }
 
+/// [`hiding_placeholder`] for a raw-byte table: the marker is unsafe when any
+/// secret's text is a substring of it.
+fn hiding_placeholder_text(secrets: &[Vec<u8>]) -> &'static str {
+    let texts: Vec<String> = secrets
+        .iter()
+        .map(|secret| String::from_utf8_lossy(secret).into_owned())
+        .collect();
+    hiding_placeholder(&texts)
+}
+
 /// The text a projection substitutes for secret material.
 ///
 /// [`SECRET_MARKER`] unless a secret is itself a substring of the marker: then
@@ -1060,7 +1070,13 @@ fn build_projected(
             Inode::Table { fields } => {
                 let mut projected = Vec::with_capacity(fields.len());
                 for (name, id) in fields {
-                    let key = redact_within(name, secrets, redaction)?;
+                    let mut key = redact_within(name, secrets, redaction)?;
+                    // A data key that starts with `$` would be byte-identical
+                    // to a projection marker (`$env`, `$expr`, `$active.blob`),
+                    // so it is escaped with a leading `$`.
+                    if key.starts_with('$') {
+                        key.insert(0, '$');
+                    }
                     charge_projection_bytes(bytes, &key)?;
                     projected.push((
                         key,
@@ -1122,7 +1138,7 @@ fn build_projected(
                 if tainted {
                     Projected::Text(hiding_placeholder(secrets).to_string())
                 } else {
-                    let text = redacted_value(&text, secrets);
+                    let text = redacted_value_within(&text, secrets, redaction)?;
                     charge_projection_bytes(bytes, &text)?;
                     Projected::Text(text)
                 }
@@ -1259,16 +1275,31 @@ mod projection {
     /// Project provenance as JSON, redacting every text field and key against
     /// `secrets` (the module's secret literals).
     pub fn provenance_json(prov: &Provenance, secrets: &[String]) -> serde_json::Value {
+        // The text-only entry point compares against the secrets' text; a module
+        // caller (`provenance_json_for`) also passes the raw bytes, so a
+        // non-UTF-8 secret is not published as hex.
+        let raw: Vec<Vec<u8>> = secrets
+            .iter()
+            .map(|secret| secret.as_bytes().to_vec())
+            .collect();
+        provenance_json_with(prov, secrets, &raw)
+    }
+
+    fn provenance_json_with(
+        prov: &Provenance,
+        secrets: &[String],
+        raw_secrets: &[Vec<u8>],
+    ) -> serde_json::Value {
         let text = |value: &str| serde_json::Value::from(redacted_value(value, secrets));
         // A 32-byte secret can be copied into a hash field verbatim. A hash has
         // no textual form to redact, so a copy is replaced by the marker rather
         // than published as hex.
-        let hash_value = |hash: &[u8; 32], secrets: &[String]| -> serde_json::Value {
+        let hash_value = |hash: &[u8; 32], secrets: &[Vec<u8>]| -> serde_json::Value {
             if secrets
                 .iter()
-                .any(|secret| !secret.is_empty() && secret.as_bytes() == hash.as_slice())
+                .any(|secret| !secret.is_empty() && secret.as_slice() == hash)
             {
-                serde_json::Value::from(hiding_placeholder(secrets))
+                serde_json::Value::from(hiding_placeholder_text(secrets))
             } else {
                 serde_json::Value::from(crate::ir::hash_hex(hash))
             }
@@ -1290,7 +1321,7 @@ mod projection {
             map.insert("tool".into(), text(tool));
         }
         if let Some(parent) = prov.parent {
-            map.insert("parent".into(), hash_value(&parent, secrets));
+            map.insert("parent".into(), hash_value(&parent, raw_secrets));
         }
         let mut entries = serde_json::Map::new();
         for entry in first_entry_per_key(&prov.entries) {
@@ -1298,7 +1329,7 @@ mod projection {
                 ProvValue::Text(t) => text(t),
                 ProvValue::Int(number) => serde_json::Value::from(*number),
                 ProvValue::Flag(flag) => serde_json::Value::from(*flag),
-                ProvValue::Hash(hash) => hash_value(hash, secrets),
+                ProvValue::Hash(hash) => hash_value(hash, raw_secrets),
             };
             entries.insert(redacted_key(&entry.key, secrets), value);
         }
@@ -1309,9 +1340,10 @@ mod projection {
     /// Project a module's provenance, collecting its secret table first.
     pub fn provenance_json_for(module: &InfinityModule) -> Option<serde_json::Value> {
         let secrets = secret_literals(module);
+        let raw = secret_bytes(module);
         module
             .provenance()
-            .map(|prov| provenance_json(prov, &secrets))
+            .map(|prov| provenance_json_with(prov, &secrets, &raw))
     }
 }
 
@@ -1380,7 +1412,15 @@ pub fn value_paths(module: &InfinityModule) -> HashMap<NodeId, String> {
 /// output stays readable. Values are never included: a label must be safe to
 /// print for a module that holds secrets.
 pub fn node_label(module: &InfinityModule, id: NodeId) -> String {
-    if let Some(path) = value_paths(module).get(&id) {
+    node_label_with(&value_paths(module), module, id)
+}
+
+/// [`node_label`] with a precomputed path map.
+///
+/// `value_paths` is O(module); building it per node made `impact`/`why`
+/// quadratic.
+fn node_label_with(paths: &HashMap<NodeId, String>, module: &InfinityModule, id: NodeId) -> String {
+    if let Some(path) = paths.get(&id) {
         return path.clone();
     }
     match module.get(id) {
@@ -1466,9 +1506,10 @@ pub fn impact(module: &InfinityModule, id: NodeId) -> Vec<String> {
         return Vec::new();
     }
     let (_, dependents) = adjacency(module);
+    let paths = value_paths(module);
     let mut labels: Vec<String> = walk(&dependents, id)
         .into_iter()
-        .map(|node| node_label(module, node))
+        .map(|node| node_label_with(&paths, module, node))
         .collect();
     labels.sort();
     labels.dedup();
@@ -1481,9 +1522,10 @@ pub fn why(module: &InfinityModule, id: NodeId) -> Vec<String> {
         return Vec::new();
     }
     let (deps, _) = adjacency(module);
+    let paths = value_paths(module);
     let mut labels: Vec<String> = walk(&deps, id)
         .into_iter()
-        .map(|node| node_label(module, node))
+        .map(|node| node_label_with(&paths, module, node))
         .collect();
     labels.sort();
     labels.dedup();
@@ -1594,6 +1636,7 @@ pub fn provenance_lines(module: &InfinityModule) -> Vec<String> {
             _ => None,
         })
         .collect();
+    let raw_secrets = secret_bytes(module);
     let redact = |text: &str| -> String {
         if secrets
             .iter()
@@ -1618,11 +1661,11 @@ pub fn provenance_lines(module: &InfinityModule) -> Vec<String> {
         lines.push(format!("tool={}", escape_line(&redact(tool))));
     }
     let hash_text = |hash: &[u8; 32]| -> String {
-        if secrets
+        if raw_secrets
             .iter()
-            .any(|secret| !secret.is_empty() && secret.as_bytes() == hash.as_slice())
+            .any(|secret| !secret.is_empty() && secret.as_slice() == hash)
         {
-            hiding_placeholder(&secrets).to_string()
+            hiding_placeholder_text(&raw_secrets).to_string()
         } else {
             format!("blake3:{}", crate::ir::hash_hex(hash))
         }

@@ -235,9 +235,14 @@ fn version_reports_the_codec_and_the_shim() {
 fn alloc_refuses_an_impossible_request() {
     use active_infinity_ffi::active_infinity_alloc;
 
+    // A failed allocation returns null and leaves the thread's code alone: a
+    // binding may allocate between a failed call and its read of the code.
+    // SAFETY: the pointer is a 4-byte readable literal.
+    assert_eq!(unsafe { active_infinity_validate(b"junk".as_ptr(), 4) }, -1);
+    let before = last_error();
     let pointer = active_infinity_alloc(MAX_ALLOC_BYTES + 1);
     assert!(pointer.is_null(), "an oversized allocation returns null");
-    assert_eq!(last_error(), "infinity/limit");
+    assert_eq!(last_error(), before, "alloc must not change last_error");
 }
 
 #[test]

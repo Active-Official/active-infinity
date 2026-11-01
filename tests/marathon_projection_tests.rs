@@ -358,3 +358,48 @@ fn intents_never_publish_the_marker_collision() {
     let text = intents(&module, secret).join(" ");
     assert!(!text.contains("SECRET"), "{text}");
 }
+
+/// The hash comparisons in the module-based provenance exports use raw secret
+/// bytes, so a non-UTF-8 32-byte secret is not published as hex.
+#[cfg(feature = "json")]
+#[test]
+fn a_non_utf8_secret_hash_is_marked_in_provenance_exports() {
+    use active_infinity::interop::{provenance_json_for, provenance_lines};
+
+    let mut module = InfinityModule::new();
+    let secret = [0xFFu8; 32];
+    // A raw-byte secret: the text table cannot represent this value.
+    let node = module.push(Inode::Secret(active_infinity::SecretBytes::new(
+        secret.to_vec(),
+    )));
+    module.set_root(Some(node));
+    module.set_provenance(Some(Provenance {
+        parent: Some(secret),
+        ..Provenance::default()
+    }));
+
+    let json = provenance_json_for(&module).expect("provenance");
+    let text = json.to_string();
+    assert!(!text.contains(&"ff".repeat(32)), "{text}");
+
+    let lines = provenance_lines(&module).join("\\n");
+    assert!(!lines.contains(&"ff".repeat(32)), "{lines}");
+}
+
+/// A data key may not impersonate a projection marker: `$env` in a table is
+/// escaped to `$$env`.
+#[cfg(feature = "json")]
+#[test]
+fn a_data_key_cannot_impersonate_a_projection_marker() {
+    use active_infinity::interop::to_redacted_json;
+
+    let mut module = InfinityModule::new();
+    let value = module.push(Inode::Str("PATH".into()));
+    let root = module.push(Inode::Table {
+        fields: vec![("$env".into(), value)],
+    });
+    module.set_root(Some(root));
+    let json = to_redacted_json(&module).expect("project");
+    assert!(json.contains("$$env"), "{json}");
+    assert!(!json.contains("\"$env\""), "{json}");
+}

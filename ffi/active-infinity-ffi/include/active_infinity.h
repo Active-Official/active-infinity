@@ -40,8 +40,10 @@
  * releases that newer buffer. Always null the pointer after freeing it; using
  * a pointer after it was freed is undefined behaviour.
  *
- * The getters return NULL only if an internal panic occurred; bindings should
- * treat NULL as "unavailable".
+ * `active_infinity_alloc` returns NULL on failure and does not set
+ * `last_error`; treat NULL as an allocation failure. The getters return NULL
+ * only if an internal panic occurred; bindings should treat NULL as
+ * "unavailable".
  *
  * Untrusted input: the shim runs the default profile (1 GiB total bytes). A
  * wasm32 instance has a 4 GiB address space, so size the module's memory for

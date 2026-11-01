@@ -143,22 +143,25 @@ pub(crate) fn prepare(module: &InfinityModule) -> Result<Prepared> {
         .collect();
     bindings.sort_by(|a, b| a.0.cmp(&b.0));
 
+    // One cumulative redaction budget for the whole metadata block: a
+    // per-string ceiling multiplies by the number of annotations and entries.
+    let redaction = std::cell::Cell::new(MAX_REDACTION_SCAN_BYTES);
     let annotations: Vec<Annotation> = module
         .annotations()
         .iter()
         .map(|annotation| {
             let node = remap[annotation.node.index()];
-            let kind: Result<AnnotationKind> = match &annotation.kind {
-                AnnotationKind::Intent(text) => Ok(AnnotationKind::Intent(try_redact_text(
-                    text,
-                    &secret_literals,
-                )?)),
-                AnnotationKind::Constraint { source, expr } => Ok(AnnotationKind::Constraint {
-                    source: try_redact_text(source, &secret_literals)?,
-                    expr: remap[expr.index()],
-                }),
-                AnnotationKind::AiImmutable(flag) => Ok(AnnotationKind::AiImmutable(*flag)),
-            };
+            let kind: Result<AnnotationKind> =
+                match &annotation.kind {
+                    AnnotationKind::Intent(text) => Ok(AnnotationKind::Intent(
+                        try_redact_text_with(text, &secret_literals, &redaction)?,
+                    )),
+                    AnnotationKind::Constraint { source, expr } => Ok(AnnotationKind::Constraint {
+                        source: try_redact_text_with(source, &secret_literals, &redaction)?,
+                        expr: remap[expr.index()],
+                    }),
+                    AnnotationKind::AiImmutable(flag) => Ok(AnnotationKind::AiImmutable(*flag)),
+                };
             Ok(Annotation { node, kind: kind? })
         })
         .collect::<Result<Vec<Annotation>>>()?;
@@ -191,7 +194,7 @@ pub(crate) fn prepare(module: &InfinityModule) -> Result<Prepared> {
     let provenance = module
         .provenance()
         .cloned()
-        .map(|prov| redact_provenance(prov, &secret_literals))
+        .map(|prov| redact_provenance(prov, &secret_literals, &redaction))
         .transpose()?;
     if let Some(prov) = &provenance {
         if let Some(producer) = &prov.producer {
@@ -446,16 +449,27 @@ pub const SECRET_MARKER: &str = "***SECRET***";
 /// When a secret is a substring of [`SECRET_MARKER`], inserting the marker would
 /// publish that secret as part of the text the image stores. There is no safe
 /// substitution, so the encode fails instead of writing it.
-pub(crate) fn try_redact_text(text: &str, secrets: &[String]) -> Result<String> {
+/// [`try_redact_text`] drawing on one cumulative budget.
+///
+/// The per-call ceiling alone lets N metadata strings multiply it; `prepare`
+/// shares one budget across annotations and provenance.
+pub(crate) fn try_redact_text_with(
+    text: &str,
+    secrets: &[String],
+    budget: &std::cell::Cell<usize>,
+) -> Result<String> {
     // Every pass scans each secret once; a module with a million secrets and a
     // megabyte of prose would otherwise spend hours inside the encoder. The
     // estimate is charged before the first scan.
-    if redaction_cost(text, secrets) > MAX_REDACTION_SCAN_BYTES {
+    let cost = redaction_cost(text, secrets);
+    let remaining = budget.get();
+    if cost > remaining {
         return Err(Error::Limit {
             kind: "redaction scan bytes",
             limit: MAX_REDACTION_SCAN_BYTES as u64,
         });
     }
+    budget.set(remaining - cost);
     let marker_tainted = secrets
         .iter()
         .any(|secret| !secret.is_empty() && SECRET_MARKER.contains(secret.as_str()));
@@ -505,7 +519,10 @@ pub(crate) fn redact_text(text: &str, secrets: &[String]) -> String {
             return out;
         }
         if marker_tainted {
-            return SECRET_MARKER.to_string();
+            // The marker itself contains a secret, so inserting it would publish
+            // that secret. The only replacement that never contains one is the
+            // empty string; the fallible encoder path refuses instead.
+            return String::new();
         }
         // Longest first, then lexicographic: the result does not depend on the
         // order of the secret table.
@@ -517,28 +534,32 @@ pub(crate) fn redact_text(text: &str, secrets: &[String]) -> String {
     SECRET_MARKER.to_string()
 }
 
-fn redact_provenance(mut prov: Provenance, secrets: &[String]) -> Result<Provenance> {
+fn redact_provenance(
+    mut prov: Provenance,
+    secrets: &[String],
+    budget: &std::cell::Cell<usize>,
+) -> Result<Provenance> {
     if secrets.is_empty() {
         return Ok(prov);
     }
     prov.producer = prov
         .producer
-        .map(|text| try_redact_text(&text, secrets))
+        .map(|text| try_redact_text_with(&text, secrets, budget))
         .transpose()?;
     prov.model = prov
         .model
-        .map(|text| try_redact_text(&text, secrets))
+        .map(|text| try_redact_text_with(&text, secrets, budget))
         .transpose()?;
     prov.tool = prov
         .tool
-        .map(|text| try_redact_text(&text, secrets))
+        .map(|text| try_redact_text_with(&text, secrets, budget))
         .transpose()?;
     for entry in &mut prov.entries {
         // Keys live in the string heap too: a copy there would be stored in the
         // image even though the projections hide it.
-        entry.key = try_redact_text(&entry.key, secrets)?;
+        entry.key = try_redact_text_with(&entry.key, secrets, budget)?;
         if let ProvValue::Text(text) = &entry.value {
-            entry.value = ProvValue::Text(try_redact_text(text, secrets)?);
+            entry.value = ProvValue::Text(try_redact_text_with(text, secrets, budget)?);
         }
     }
     Ok(prov)

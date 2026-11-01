@@ -294,6 +294,7 @@ pub fn to_protobuf(module: &InfinityModule) -> Result<Vec<u8>> {
     let mut budget = 0usize;
     let mut redaction = crate::interop::PROJECTION_REDACTION_BUDGET;
     let mut projection_bytes = 256usize << 20;
+    let placeholder = crate::interop::hiding_placeholder(&secrets);
     let mut binding_names: BTreeSet<String> = BTreeSet::new();
     if let Some(root) = module.root() {
         let value = project_node_with(
@@ -301,6 +302,7 @@ pub fn to_protobuf(module: &InfinityModule) -> Result<Vec<u8>> {
             root,
             &secrets,
             &raw_secrets,
+            placeholder,
             &mut budget,
             &mut redaction,
             &mut projection_bytes,
@@ -327,6 +329,7 @@ pub fn to_protobuf(module: &InfinityModule) -> Result<Vec<u8>> {
             *id,
             &secrets,
             &raw_secrets,
+            placeholder,
             &mut budget,
             &mut redaction,
             &mut projection_bytes,

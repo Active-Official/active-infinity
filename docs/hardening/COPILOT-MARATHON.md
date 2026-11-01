@@ -1104,3 +1104,40 @@ Projection (`5a27749`, I-12 round-6 pre-work):
 | Taint order | `secret_tainted_paths` runs one reverse-BFS pass instead of a depth-sized fixpoint | behaviour tests unchanged |
 
 Gate: 383 library/integration tests, clippy clean both feature sets.
+
+### Re-audit round 6 (I-12) and round 5 (I-14) - 2026-10-31
+
+Reviewer: DeepSeek V4.1, which re-ran every lane it could on this host (FFI 27/27,
+Go ok, JS/AS/Python/C# conformance PASS). Commits `5a27749`, `1393eea`,
+`f18885d` (log), `+1` for round 6.
+
+**I-12 round 6: the round-5 critical is CLOSED.** The probe shape is a second
+carrier of the literal plus a `SecretRef`; on the fixed tree JSON renders
+`{"***SECRET***":1,"token":"***SECRET***"}` and protobuf is literal-free.
+
+| # | Sev | Finding | Disposition |
+|---|---|---|---|
+| F1 | high | the reverse-BFS single pass under-reported taint (a skewed-depth diamond lost a branch); regression from the round-6 "one reverse pass" | **fixed**: iterate the fixpoint in reverse; `every_path_to_a_secret_is_reported` (fails pre-fix) |
+| F2 | high | `secret_texts`/`secret_bytes` ignored `SecretRef` locators, so every non-projection export leaked on the authoring path (`secret("x")` produces `SecretRef`) | **fixed**: resolve the locator through `Str`/`Ident`/`Ref`/`Semantic`/`Quantity`/`Env` default, bounded at 8 hops; `a_secret_ref_locator_is_in_the_secret_table` (fails pre-fix) |
+| F3 | high | canonical metadata redaction had a per-string ceiling, not a cumulative one (measured 20 s for 1k entries) | **fixed**: `try_redact_text_with` + one `Cell` budget in `prepare`; `canonical_metadata_redaction_draws_one_budget` (fails pre-fix) |
+| F4 | medium | `hiding_placeholder` was computed per visit (the log claim was wrong) | **fixed**: computed once and threaded as `&'static str` |
+| F5 | medium | the public `redact_text` returned a marker that contains the secret | **fixed**: the marker-tainted branch returns the empty string; `redact_text_never_returns_a_marker_collision` (fails pre-fix) |
+| F6 | medium | a `let`-bound locator stays in the public string heap (bindings are roots, so promotion never fires) | **OPEN, scheduled for I-12 round 7**: this is a semantics decision (treat binding-root reachability as non-public for location material, or refuse at encode). Both options change the authoring contract and need an ADR note; round 7 starts with that choice and a `let pw` fixture |
+| F7 | low | `provenance_json` drops a redacted-key collision | **open (round 7)**: make `provenance_json_for` return `None` on a collision; the text-only helper stays first-wins, documented |
+| F8 | low | the projection node budget reports `infinity/encode`; the spec says `infinity/limit` | **open (round 7)**: switch to `Limit` and update the two redteam assertions |
+
+**I-14 round 5: no critical; the round-4 fixes hold** (all six claims verified,
+including the AS capacity read from AS memory and the Go/JS/AS lanes).
+
+| # | Sev | Finding | Disposition |
+|---|---|---|---|
+| 1 | medium | a null (`0`) AS output/out-len pointer was decoded as AS address 0 | **fixed**: `runOutput` returns `-2` for a null output, `content_hash` skips the write |
+| 2 | medium | the AS capacity enforcement has no regression test | **open (round 6)**: add a test that calls with a tiny capacity and expects `-2` + the required size |
+| 3 | medium | the JNI clamp is untested from the JVM lane | **open**: a JVM test that passes a small array with a huge `out_len[0]` and expects `-2`, not a crash |
+| 4 | medium | polyglot STATUS/README claim "Encode PASS" for C/C++/Zig, which never call `from_active` | **open**: correct the claim or add the call |
+| 5 | medium | the Go random-fill failure path is dead (no shipped path calls it) | **open**: wire `active_random_fill` into the module contract or document it as unused |
+| 6 | medium | the header still says an oversized `alloc` "refuses with infinity/limit" while the code leaves `last_error` untouched | **open**: reword the header sentence |
+| 7-12 | low | Dart `_allocateSize` null deref; JNI CESU-8 names; Go runtime leak on `New` error; AS negative index; Kotlin error type; Lua bare error | **open (round 6)** |
+
+Gate: 387 library/integration, 42 CLI, 27 FFI, clippy clean; JS and AS
+conformance PASS.

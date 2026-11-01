@@ -40,14 +40,43 @@ pub use crate::canonical::SECRET_MARKER;
 /// accessor that returns them would be an unlock API. Redaction helpers consume
 /// this; callers outside the crate get only redacted projections.
 pub(crate) fn secret_texts(module: &InfinityModule) -> Vec<String> {
-    module
+    let mut out: Vec<String> = module
         .nodes()
         .iter()
         .filter_map(|node| match node {
             Inode::Secret(secret) => Some(String::from_utf8_lossy(secret.expose()).into_owned()),
             _ => None,
         })
-        .collect()
+        .collect();
+    // The authoring path lowers `secret("x")` to `SecretRef { locator }`, whose
+    // literal is a `Str` node rather than an `Inode::Secret`. Resolve it, or
+    // every export surface is blind to the secret on that path.
+    for node in module.nodes() {
+        if let Inode::SecretRef { locator } = node {
+            if let Some(bytes) = locator_literal(module, *locator) {
+                out.push(String::from_utf8_lossy(&bytes).into_owned());
+            }
+        }
+    }
+    out
+}
+
+/// Resolve a secret locator to its literal through transparent wrappers.
+fn locator_literal(module: &InfinityModule, locator: NodeId) -> Option<Vec<u8>> {
+    let mut current = locator;
+    for _ in 0..8 {
+        match module.get(current)? {
+            Inode::Str(text) | Inode::Ident(text) => return Some(text.as_bytes().to_vec()),
+            Inode::Ref(next) | Inode::Semantic { inner: next, .. } => current = *next,
+            Inode::Quantity { value, .. } => current = *value,
+            Inode::Env {
+                default: Some(next),
+                ..
+            } => current = *next,
+            _ => return None,
+        }
+    }
+    None
 }
 
 /// Every secret literal in a module, as raw bytes.
@@ -58,14 +87,22 @@ pub(crate) fn secret_texts(module: &InfinityModule) -> Vec<String> {
 /// surface must compare against the real bytes, or a secret that is not valid
 /// UTF-8 would be lossily converted and never match its own copy.
 pub(crate) fn secret_bytes(module: &InfinityModule) -> Vec<Vec<u8>> {
-    module
+    let mut out: Vec<Vec<u8>> = module
         .nodes()
         .iter()
         .filter_map(|node| match node {
             Inode::Secret(secret) => Some(secret.expose().to_vec()),
             _ => None,
         })
-        .collect()
+        .collect();
+    for node in module.nodes() {
+        if let Inode::SecretRef { locator } = node {
+            if let Some(bytes) = locator_literal(module, *locator) {
+                out.push(bytes);
+            }
+        }
+    }
+    out
 }
 
 /// Replace every occurrence of a secret in `text` with the marker.
@@ -746,11 +783,13 @@ pub(crate) fn project_root(module: &InfinityModule) -> Result<Projected> {
     let mut budget = 0usize;
     let mut redaction = PROJECTION_REDACTION_BUDGET;
     let mut bytes = PROJECTION_BYTES;
+    let placeholder = hiding_placeholder(&secrets);
     build_projected(
         module,
         module.root(),
         &secrets,
         &hash_secrets,
+        placeholder,
         0,
         &mut budget,
         &mut redaction,
@@ -764,11 +803,13 @@ pub(crate) fn secret_table(module: &InfinityModule) -> Vec<String> {
 }
 
 /// Project one node with an already-computed secret table.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn project_node_with(
     module: &InfinityModule,
     id: NodeId,
     secrets: &[String],
     hash_secrets: &[Vec<u8>],
+    placeholder: &'static str,
     budget: &mut usize,
     redaction: &mut usize,
     bytes: &mut usize,
@@ -778,6 +819,7 @@ pub(crate) fn project_node_with(
         Some(id),
         secrets,
         hash_secrets,
+        placeholder,
         0,
         budget,
         redaction,
@@ -1014,6 +1056,7 @@ fn build_projected(
     id: Option<NodeId>,
     secrets: &[String],
     hash_secrets: &[Vec<u8>],
+    placeholder: &'static str,
     depth: usize,
     budget: &mut usize,
     redaction: &mut usize,
@@ -1026,9 +1069,6 @@ fn build_projected(
     if *budget > PROJECTION_NODE_BUDGET {
         return Err(Error::Encode("projection node budget exceeded"));
     }
-    // One scan of the secret table per projection, not per node: with many
-    // secrets this was the dominant cost.
-    let placeholder = hiding_placeholder(secrets);
     let value = match id.and_then(|id| module.get(id)) {
         None => Projected::Null,
         Some(node) => match node {
@@ -1053,6 +1093,7 @@ fn build_projected(
                     Some(*value),
                     secrets,
                     hash_secrets,
+                    placeholder,
                     depth + 1,
                     budget,
                     redaction,
@@ -1073,6 +1114,7 @@ fn build_projected(
                             Some(*id),
                             secrets,
                             hash_secrets,
+                            placeholder,
                             depth + 1,
                             budget,
                             redaction,
@@ -1099,6 +1141,7 @@ fn build_projected(
                             Some(*id),
                             secrets,
                             hash_secrets,
+                            placeholder,
                             depth + 1,
                             budget,
                             redaction,
@@ -1122,6 +1165,7 @@ fn build_projected(
                 Some(*id),
                 secrets,
                 hash_secrets,
+                placeholder,
                 depth + 1,
                 budget,
                 redaction,
@@ -1170,6 +1214,7 @@ fn build_projected(
                 Some(*inner),
                 secrets,
                 hash_secrets,
+                placeholder,
                 depth + 1,
                 budget,
                 redaction,
@@ -1593,21 +1638,27 @@ pub fn secret_tainted_paths(module: &InfinityModule) -> Vec<String> {
     let mut tainted: Vec<bool> = vec![false; module.node_count()];
     // Fixpoint over the DAG: a node is tainted when it is a secret or any
     // child is tainted. Iterate to a fixed point (bounded by node count).
-    // `subgraph` is a breadth-first order from the roots, so every child comes
-    // after its parents. Taint flows child -> parent, so one pass in reverse is
-    // a fixpoint; iterating forward needed one sweep per depth level.
+    // `subgraph` is a breadth-first order, which is not topological: a node
+    // reached through a shallow parent can precede a deeper one. Iterate the
+    // fixpoint in reverse (children before parents in practice), so the loop
+    // converges in one or two sweeps without ever reading an unset child.
     let order = subgraph(module, &root_ids(module));
-    for id in order.iter().rev() {
-        let Some(node) = module.get(*id) else {
-            continue;
-        };
-        let value = node.is_secret()
-            || node
-                .children()
-                .iter()
-                .any(|child| tainted.get(child.index()).copied().unwrap_or(false));
-        if value {
-            tainted[id.index()] = true;
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for id in order.iter().rev() {
+            let Some(node) = module.get(*id) else {
+                continue;
+            };
+            let value = node.is_secret()
+                || node
+                    .children()
+                    .iter()
+                    .any(|child| tainted.get(child.index()).copied().unwrap_or(false));
+            if value && !tainted[id.index()] {
+                tainted[id.index()] = true;
+                changed = true;
+            }
         }
     }
     let paths = value_paths(module);
@@ -1638,14 +1689,7 @@ pub fn provenance_lines(module: &InfinityModule) -> Vec<String> {
     let Some(prov) = module.provenance() else {
         return Vec::new();
     };
-    let secrets: Vec<String> = module
-        .nodes()
-        .iter()
-        .filter_map(|node| match node {
-            Inode::Secret(secret) => Some(String::from_utf8_lossy(secret.expose()).into_owned()),
-            _ => None,
-        })
-        .collect();
+    let secrets = secret_texts(module);
     let raw_secrets = secret_bytes(module);
     let redact = |text: &str| -> String {
         if secrets

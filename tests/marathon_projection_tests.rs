@@ -445,3 +445,96 @@ fn duplicate_redacted_binding_names_are_refused() {
     assert_eq!(error.code(), "infinity/encode", "{error}");
     assert!(error.to_string().contains("binding names"), "{error}");
 }
+
+/// A skewed-depth diamond: the shallow path reaches the secret first, so a
+/// single reverse BFS pass would report the deep branch clean.
+#[test]
+fn every_path_to_a_secret_is_reported() {
+    use active_infinity::interop::secret_tainted_paths;
+
+    let mut module = InfinityModule::new();
+    let secret = module.push(Inode::Secret(SecretBytes::from("taint-canary")));
+    let shallow = module.push(Inode::Ref(secret));
+    let mid = module.push(Inode::Ref(secret));
+    let up = module.push(Inode::Ref(mid));
+    let top = module.push(Inode::Ref(up));
+    let root = module.push(Inode::Table {
+        fields: vec![("a".into(), shallow), ("b".into(), top)],
+    });
+    module.set_root(Some(root));
+    let paths = secret_tainted_paths(&module);
+    assert!(paths.contains(&"a".to_string()), "{paths:?}");
+    assert!(paths.contains(&"b".to_string()), "{paths:?}");
+}
+
+/// The authoring path (`secret("x")` / `let` + `secret(pw)`) produces a
+/// `SecretRef` whose literal is a `Str`; the secret table must resolve it or
+/// every non-projection export publishes the literal.
+#[test]
+fn a_secret_ref_locator_is_in_the_secret_table() {
+    use active_infinity::interop::{intents, provenance_lines, value_paths};
+
+    let mut module = InfinityModule::new();
+    let locator = module.push(Inode::Str("authoring-canary".into()));
+    let secret = module.push(Inode::SecretRef { locator });
+    module.annotate(
+        secret,
+        active_infinity::AnnotationKind::Intent("note authoring-canary".into()),
+    );
+    module.set_provenance(Some(Provenance {
+        producer: Some("agent authoring-canary".into()),
+        ..Provenance::default()
+    }));
+    module.set_root(Some(secret));
+
+    let text = intents(&module, secret).join(" ");
+    assert!(!text.contains("authoring-canary"), "{text}");
+    let lines = provenance_lines(&module).join("\\n");
+    assert!(!lines.contains("authoring-canary"), "{lines}");
+    let paths = value_paths(&module);
+    assert!(
+        paths
+            .values()
+            .all(|path| !path.contains("authoring-canary")),
+        "{paths:?}"
+    );
+}
+
+/// The public redaction helper never returns text that contains a secret, even
+/// when the marker itself does.
+#[test]
+fn redact_text_never_returns_a_marker_collision() {
+    use active_infinity::interop::redact_text;
+
+    let text = redact_text("the SECRET value", &["SECRET".to_string()]);
+    assert!(!text.contains("SECRET"), "{text}");
+}
+
+/// Canonical metadata redaction draws one cumulative budget: many secrets and
+/// many provenance entries must be refused, not scanned one string at a time.
+#[test]
+fn canonical_metadata_redaction_draws_one_budget() {
+    let mut module = InfinityModule::new();
+    let value = module.push(Inode::Int(1));
+    module.set_root(Some(value));
+    for index in 0..400 {
+        let secret = module.push(Inode::Secret(SecretBytes::from(format!(
+            "secret-{index:03}"
+        ))));
+        module.bind(format!("meta-{index:03}"), secret);
+    }
+    let text = "y".repeat(8 << 10);
+    let entries: Vec<ProvEntry> = (0..12)
+        .map(|index| ProvEntry {
+            key: format!("k{index:02}"),
+            value: ProvValue::Text(text.clone()),
+        })
+        .collect();
+    module.set_provenance(Some(Provenance {
+        entries,
+        ..Provenance::default()
+    }));
+    let error = active_infinity::encode(&module).expect_err("the budget trips");
+    assert_eq!(error.code(), "infinity/limit", "{error}");
+    assert!(error.to_string().contains("redaction"), "{error}");
+}

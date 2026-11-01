@@ -107,8 +107,9 @@ function bind(reference, getAssemblyMemory) {
 			const required = reference.u32(sizePointer);
 			writeU32(outputLength, required);
 			if (status !== -2) return status;
-			if (required > capacity) {
-				// The caller retries with a bigger buffer.
+			if (required > capacity || !output) {
+				// The caller must provide a real buffer with enough capacity; a
+				// null pointer is not AS address zero.
 				return -2;
 			}
 			const buffer = allocOrThrow(required);
@@ -153,7 +154,7 @@ function bind(reference, getAssemblyMemory) {
 						input.length,
 						hash,
 					);
-					if (status === 0)
+					if (status === 0 && output)
 						writeToAs(
 							output,
 							new Uint8Array(reference.exports.memory.buffer, hash, 32),

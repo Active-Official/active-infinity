@@ -204,7 +204,9 @@ fn h2_04_expansion() -> Result<(), String> {
     }
     module.set_root(Some(current));
     let error = active_infinity::to_protobuf(&module).expect_err("exponential DAG");
-    if error.code() != "infinity/encode" {
+    // A visit budget is a limit, like the byte ceilings beside it; only the
+    // depth refusal is an encoding fault (`docs/spec/projection.md` §5).
+    if error.code() != "infinity/limit" {
         return Err(format!("unexpected protobuf code {}", error.code()));
     }
     if !error.to_string().contains("node budget") {
@@ -214,7 +216,7 @@ fn h2_04_expansion() -> Result<(), String> {
     {
         let error =
             active_infinity::interop::to_redacted_json(&module).expect_err("exponential DAG");
-        if error.code() != "infinity/encode" {
+        if error.code() != "infinity/limit" {
             return Err(format!("unexpected JSON code {}", error.code()));
         }
     }

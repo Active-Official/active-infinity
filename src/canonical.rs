@@ -498,12 +498,18 @@ pub(crate) fn redaction_cost(text: &str, secrets: &[String]) -> usize {
 pub(crate) fn redact_text(text: &str, secrets: &[String]) -> String {
     // The infallible form is used by projections: when the scan would be
     // unbounded, redact the whole value instead of scanning it.
-    if redaction_cost(text, secrets) > MAX_REDACTION_SCAN_BYTES {
-        return SECRET_MARKER.to_string();
-    }
     let marker_tainted = secrets
         .iter()
         .any(|secret| !secret.is_empty() && SECRET_MARKER.contains(secret.as_str()));
+    if redaction_cost(text, secrets) > MAX_REDACTION_SCAN_BYTES {
+        // Over budget, the whole value collapses to the placeholder. When the
+        // marker itself contains a secret, that placeholder is the empty string.
+        return if marker_tainted {
+            String::new()
+        } else {
+            SECRET_MARKER.to_string()
+        };
+    }
     let mut out = text.to_string();
     // A replacement can create a new secret by joining the text around it
     // (`hid` + `***SECRET***` + `den` is a secret again), so a pass repeats
@@ -670,11 +676,12 @@ fn promote_secret_locators(mut nodes: Vec<Inode>, module: &InfinityModule) -> Ve
     // would store the secret's bytes in the public string heap.
     let public_from_root = reachable(&nodes, module.root(), count);
 
-    // Every literal a `SecretRef` resolves to.
+    // Every literal a `SecretRef` resolves to (a `Str`, or the literal parts of
+    // an `Interpolate`).
     let mut locator_material = vec![false; count];
     for node in &nodes {
         if let Inode::SecretRef { locator } = node {
-            if let Some(index) = resolve_locator_str(&nodes, *locator) {
+            if let Some(index) = resolve_locator(&nodes, *locator) {
                 locator_material[index] = true;
             }
         }
@@ -705,6 +712,39 @@ fn promote_secret_locators(mut nodes: Vec<Inode>, module: &InfinityModule) -> Ve
             *node = Inode::Secret(crate::ir::SecretBytes::from(text.clone()));
         }
     }
+
+    // An interpolated locator (`secret("prefix-${name}")`) keeps its literal
+    // parts in the public string heap. Move each part into a `Secret` node and
+    // reference it from the interpolation, so those bytes leave the public heap
+    // exactly as a plain locator's do.
+    let mut rewrites: Vec<(usize, Vec<(usize, String)>)> = Vec::new();
+    for (index, node) in nodes.iter().enumerate() {
+        if !locator_material[index] || public_from_root[index] {
+            continue;
+        }
+        if let Inode::Interpolate { parts } = node {
+            let literals: Vec<(usize, String)> = parts
+                .iter()
+                .enumerate()
+                .filter_map(|(part, value)| match value {
+                    InterpPart::Literal(text) => Some((part, text.clone())),
+                    InterpPart::Expr(_) => None,
+                })
+                .collect();
+            if !literals.is_empty() {
+                rewrites.push((index, literals));
+            }
+        }
+    }
+    for (index, literals) in rewrites {
+        for (part, text) in literals {
+            let id = NodeId(nodes.len() as u32);
+            nodes.push(Inode::Secret(crate::ir::SecretBytes::from(text)));
+            if let Inode::Interpolate { parts } = &mut nodes[index] {
+                parts[part] = InterpPart::Expr(id);
+            }
+        }
+    }
     nodes
 }
 
@@ -732,13 +772,18 @@ fn reachable(nodes: &[Inode], roots: impl IntoIterator<Item = NodeId>, count: us
     public
 }
 
-/// Index of the `Str` a secret locator resolves to, through transparent
-/// wrappers, bounded so a malformed chain cannot loop.
-fn resolve_locator_str(nodes: &[Inode], locator: NodeId) -> Option<usize> {
+/// Index of the node a secret locator resolves to, through transparent
+/// wrappers: a `Str`/`Ident` literal or an `Interpolate` of literal parts.
+///
+/// The walk is bounded by the node count (a visited set would be larger than
+/// the chain it guards), so a malformed in-memory module cannot loop.
+fn resolve_locator(nodes: &[Inode], locator: NodeId) -> Option<usize> {
     let mut current = locator;
-    for _ in 0..8 {
+    for _ in 0..nodes.len() {
         match nodes.get(current.index())? {
-            Inode::Str(_) | Inode::Ident(_) => return Some(current.index()),
+            Inode::Str(_) | Inode::Ident(_) | Inode::Interpolate { .. } => {
+                return Some(current.index())
+            }
             Inode::Ref(next) | Inode::Semantic { inner: next, .. } => current = *next,
             Inode::Quantity { value, .. } => current = *value,
             Inode::Env {
@@ -957,6 +1002,42 @@ fn remap_node_in_place(node: &mut Inode, remap: &[NodeId]) -> Result<()> {
         | Inode::Patch(PatchOp::Remove { .. } | PatchOp::Rename { .. }) => {}
     }
     Ok(())
+}
+
+/// Total bytes of rendered ordering keys one module may hold.
+///
+/// Every annotation subject and constraint expression needs a key, and a key is
+/// a full render of its subtree. The per-key ceiling bounds one key; this bound
+/// covers all of them, so a module with tens of thousands of large subjects is
+/// refused (`infinity/limit`) instead of driving peak memory to the sum.
+pub(crate) const MAX_ANNOTATION_KEY_BYTES: usize = 64 << 20;
+
+/// Render a subject's content key once and remember its position.
+///
+/// Keys are kept in one `Vec` and referenced by index, so a subject annotated
+/// many times shares one allocation instead of one per annotation.
+fn key_index(
+    nodes: &[crate::ir::Inode],
+    id: NodeId,
+    keys: &mut Vec<String>,
+    index: &mut HashMap<NodeId, usize>,
+    total: &mut usize,
+) -> Result<usize> {
+    if let Some(found) = index.get(&id) {
+        return Ok(*found);
+    }
+    let key = content_key(nodes, id)?;
+    *total = total.saturating_add(key.len());
+    if *total > MAX_ANNOTATION_KEY_BYTES {
+        return Err(Error::Limit {
+            kind: "annotation key bytes",
+            limit: MAX_ANNOTATION_KEY_BYTES as u64,
+        });
+    }
+    let position = keys.len();
+    keys.push(key);
+    index.insert(id, position);
+    Ok(position)
 }
 
 /// A content-defined key for a subtree, independent of arena ids.
@@ -1280,23 +1361,37 @@ fn canonical_order(nodes: &[Inode], module: &InfinityModule) -> Result<Vec<NodeI
     // An annotation subject may be a node nothing else reaches, so its position
     // in the annotation list is the only thing that could order it. Order by the
     // subtree's content instead; equal keys mean interchangeable subtrees.
-    let mut subjects: Vec<(String, NodeId)> = module
+    let mut keys: Vec<String> = Vec::new();
+    let mut index: HashMap<NodeId, usize> = HashMap::new();
+    let mut total = 0usize;
+    let mut subjects: Vec<(usize, NodeId)> = module
         .annotations()
         .iter()
-        .map(|annotation| Ok((content_key(nodes, annotation.node)?, annotation.node)))
+        .map(|annotation| {
+            Ok((
+                key_index(nodes, annotation.node, &mut keys, &mut index, &mut total)?,
+                annotation.node,
+            ))
+        })
         .collect::<Result<Vec<_>>>()?;
-    subjects.sort();
+    // Same order as sorting the `(key, id)` pairs: key bytes, then the id.
+    subjects.sort_by(|a, b| keys[a.0].cmp(&keys[b.0]).then_with(|| a.1.cmp(&b.1)));
     roots.extend(subjects.into_iter().map(|(_, id)| id));
-    let mut exprs: Vec<(String, NodeId)> = module
+    let mut exprs: Vec<(usize, NodeId)> = module
         .annotations()
         .iter()
         .filter_map(|annotation| match &annotation.kind {
             AnnotationKind::Constraint { expr, .. } => Some(*expr),
             _ => None,
         })
-        .map(|expr| Ok((content_key(nodes, expr)?, expr)))
+        .map(|expr| {
+            Ok((
+                key_index(nodes, expr, &mut keys, &mut index, &mut total)?,
+                expr,
+            ))
+        })
         .collect::<Result<Vec<_>>>()?;
-    exprs.sort();
+    exprs.sort_by(|a, b| keys[a.0].cmp(&keys[b.0]).then_with(|| a.1.cmp(&b.1)));
     roots.extend(exprs.into_iter().map(|(_, id)| id));
 
     let mut order = Vec::with_capacity(nodes.len());

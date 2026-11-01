@@ -102,7 +102,9 @@ fn projection_budget_fails_fast_on_a_shared_dag() {
     module.set_root(Some(current));
     let start = Instant::now();
     let error = active_infinity::to_protobuf(&module).expect_err("budget must fire");
-    assert_eq!(error.code(), "infinity/encode");
+    // A budget is a limit, like the byte and redaction ceilings beside it; only
+    // the depth refusal is an encoding fault (`docs/spec/projection.md` §5).
+    assert_eq!(error.code(), "infinity/limit");
     assert!(
         start.elapsed() < Duration::from_secs(1),
         "the budget fired after {:?}",

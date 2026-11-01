@@ -21,3 +21,6 @@ __pycache__/
 
 # Polyglot toolchain cache (Kotlin/Native, scala-cli)
 .polyglot-cache/
+
+# javac output from the polyglot Java lane
+polyglot/java/out/

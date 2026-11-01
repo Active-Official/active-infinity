@@ -567,3 +567,43 @@ fn a_let_bound_locator_does_not_stay_public() {
     let json = to_redacted_json(&module).expect("project");
     assert!(!json.contains(literal), "{json}");
 }
+
+/// `secret("prefix-${name}")` is an interpolated locator: its literal parts are
+/// locator material and must move out of the public string heap.
+#[cfg(feature = "json")]
+#[test]
+fn an_interpolated_secret_locator_is_promoted() {
+    use active_infinity::interop::to_redacted_json;
+
+    let mut module = InfinityModule::new();
+    let name = module.push(Inode::Str("svc".into()));
+    let interp = module.push(Inode::Interpolate {
+        parts: vec![
+            InterpPart::Literal("hunter-prefix-".into()),
+            InterpPart::Expr(name),
+        ],
+    });
+    let secret = module.push(Inode::SecretRef { locator: interp });
+    let root = module.push(Inode::Table {
+        fields: vec![("s".into(), secret)],
+    });
+    module.set_root(Some(root));
+
+    let image = active_infinity::encode(&module).expect("encode");
+    let decoded = active_infinity::decode(&image).expect("decode");
+    for node in decoded.nodes() {
+        match node {
+            Inode::Str(text) => assert_ne!(text, "hunter-prefix-"),
+            Inode::Interpolate { parts } => {
+                for part in parts {
+                    if let InterpPart::Literal(text) = part {
+                        assert_ne!(text, "hunter-prefix-");
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    let json = to_redacted_json(&module).expect("project");
+    assert!(!json.contains("hunter-prefix-"), "{json}");
+}

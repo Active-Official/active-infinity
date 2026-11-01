@@ -761,7 +761,9 @@ fn projection_budget_refuses_an_exponential_dag() {
     module.set_root(Some(current));
 
     let error = active_infinity::to_protobuf(&module).expect_err("exponential DAG");
-    assert_eq!(error.code(), "infinity/encode");
+    // A visit budget is a limit, like the byte ceilings beside it; only the
+    // depth refusal is an encoding fault (`docs/spec/projection.md` §5).
+    assert_eq!(error.code(), "infinity/limit");
     assert!(
         error.to_string().contains("node budget"),
         "the diagnostic must name the budget: {error}"
@@ -770,7 +772,7 @@ fn projection_budget_refuses_an_exponential_dag() {
     #[cfg(feature = "json")]
     {
         let error = to_redacted_json(&module).expect_err("exponential DAG");
-        assert_eq!(error.code(), "infinity/encode");
+        assert_eq!(error.code(), "infinity/limit");
         assert!(error.to_string().contains("node budget"));
     }
 
@@ -886,7 +888,7 @@ fn projection_budget_is_shared_across_every_binding() {
     // Two hundred aliases of the same DAG would materialise ~200k nodes if the
     // budget reset per binding. It must be one budget for the whole projection.
     let error = active_infinity::to_protobuf(&diamond(10, 200)).expect_err("per-binding bypass");
-    assert_eq!(error.code(), "infinity/encode");
+    assert_eq!(error.code(), "infinity/limit");
     assert!(
         error.to_string().contains("node budget"),
         "the diagnostic must name the budget: {error}"

@@ -53,7 +53,7 @@ pub(crate) fn secret_texts(module: &InfinityModule) -> Vec<String> {
     // every export surface is blind to the secret on that path.
     for node in module.nodes() {
         if let Inode::SecretRef { locator } = node {
-            if let Some(bytes) = locator_literal(module, *locator) {
+            for bytes in locator_literals(module, *locator) {
                 out.push(String::from_utf8_lossy(&bytes).into_owned());
             }
         }
@@ -61,22 +61,37 @@ pub(crate) fn secret_texts(module: &InfinityModule) -> Vec<String> {
     out
 }
 
-/// Resolve a secret locator to its literal through transparent wrappers.
-fn locator_literal(module: &InfinityModule, locator: NodeId) -> Option<Vec<u8>> {
+/// Resolve a secret locator to its literal parts through transparent wrappers.
+///
+/// An interpolated locator contributes each literal part: those are the bytes
+/// that would otherwise sit in the public string heap.
+fn locator_literals(module: &InfinityModule, locator: NodeId) -> Vec<Vec<u8>> {
     let mut current = locator;
-    for _ in 0..8 {
-        match module.get(current)? {
-            Inode::Str(text) | Inode::Ident(text) => return Some(text.as_bytes().to_vec()),
-            Inode::Ref(next) | Inode::Semantic { inner: next, .. } => current = *next,
-            Inode::Quantity { value, .. } => current = *value,
-            Inode::Env {
+    // Bounded by the node count: a malformed in-memory module cannot loop.
+    for _ in 0..module.node_count() {
+        match module.get(current) {
+            Some(Inode::Str(text)) | Some(Inode::Ident(text)) => {
+                return vec![text.as_bytes().to_vec()]
+            }
+            Some(Inode::Interpolate { parts }) => {
+                return parts
+                    .iter()
+                    .filter_map(|part| match part {
+                        crate::ir::InterpPart::Literal(text) => Some(text.as_bytes().to_vec()),
+                        crate::ir::InterpPart::Expr(_) => None,
+                    })
+                    .collect();
+            }
+            Some(Inode::Ref(next)) | Some(Inode::Semantic { inner: next, .. }) => current = *next,
+            Some(Inode::Quantity { value, .. }) => current = *value,
+            Some(Inode::Env {
                 default: Some(next),
                 ..
-            } => current = *next,
-            _ => return None,
+            }) => current = *next,
+            _ => return Vec::new(),
         }
     }
-    None
+    Vec::new()
 }
 
 /// Every secret literal in a module, as raw bytes.
@@ -97,9 +112,7 @@ pub(crate) fn secret_bytes(module: &InfinityModule) -> Vec<Vec<u8>> {
         .collect();
     for node in module.nodes() {
         if let Inode::SecretRef { locator } = node {
-            if let Some(bytes) = locator_literal(module, *locator) {
-                out.push(bytes);
-            }
+            out.extend(locator_literals(module, *locator));
         }
     }
     out
@@ -834,6 +847,41 @@ pub(crate) fn project_node_with(
 /// single budget.
 pub(crate) const PROJECTION_REDACTION_BUDGET: usize = 256 << 20;
 
+/// Scan budget for one non-projection export.
+///
+/// `provenance_lines`, `provenance_json_for`, `value_paths` and `intents` hand
+/// text to logs and agents rather than a wire image, so they cannot refuse.
+/// Past this budget every remaining value and key saturates to the hiding
+/// placeholder: fail-closed, and the work is bounded by the budget itself.
+pub(crate) const EXPORT_REDACTION_BUDGET: usize = 64 << 20;
+
+/// Charge one redaction against an export budget; `false` means it is spent.
+fn charge_export(text: &str, secrets: &[String], budget: &mut usize) -> bool {
+    let cost = crate::canonical::redaction_cost(text, secrets);
+    if cost > *budget {
+        *budget = 0;
+        return false;
+    }
+    *budget -= cost;
+    true
+}
+
+/// [`redacted_value`] that saturates to the placeholder once the budget is spent.
+fn redacted_value_capped(text: &str, secrets: &[String], budget: &mut usize) -> String {
+    if !charge_export(text, secrets, budget) {
+        return hiding_placeholder(secrets).to_string();
+    }
+    redacted_value(text, secrets)
+}
+
+/// [`redacted_key`] that saturates to the placeholder once the budget is spent.
+fn redacted_key_capped(text: &str, secrets: &[String], budget: &mut usize) -> String {
+    if !charge_export(text, secrets, budget) {
+        return hiding_placeholder(secrets).to_string();
+    }
+    redacted_key(text, secrets)
+}
+
 /// Bytes of projected text one projection may materialize.
 ///
 /// A DAG can reference one large string from many fields, so a node-count
@@ -1001,7 +1049,10 @@ fn resolves_to_secret(
 ) -> Result<bool> {
     *budget = budget.saturating_add(1);
     if *budget > PROJECTION_NODE_BUDGET {
-        return Err(Error::Encode("projection node budget exceeded"));
+        return Err(Error::Limit {
+            kind: "projection node budget",
+            limit: PROJECTION_NODE_BUDGET as u64,
+        });
     }
     if depth > PROJECTION_DEPTH {
         // A pathological chain is treated as secret: fail closed.
@@ -1067,7 +1118,10 @@ fn build_projected(
     }
     *budget += 1;
     if *budget > PROJECTION_NODE_BUDGET {
-        return Err(Error::Encode("projection node budget exceeded"));
+        return Err(Error::Limit {
+            kind: "projection node budget",
+            limit: PROJECTION_NODE_BUDGET as u64,
+        });
     }
     let value = match id.and_then(|id| module.get(id)) {
         None => Projected::Null,
@@ -1126,13 +1180,7 @@ fn build_projected(
             Inode::Table { fields } => {
                 let mut projected = Vec::with_capacity(fields.len());
                 for (name, id) in fields {
-                    let mut key = redact_within(name, secrets, redaction)?;
-                    // A data key that starts with `$` would be byte-identical
-                    // to a projection marker (`$env`, `$expr`, `$active.blob`),
-                    // so it is escaped with a leading `$`.
-                    if key.starts_with('$') {
-                        key.insert(0, '$');
-                    }
+                    let key = redact_within(name, secrets, redaction)?;
                     charge_projection_bytes(bytes, &key)?;
                     projected.push((
                         key,
@@ -1307,7 +1355,15 @@ mod projection {
             Projected::Record(fields) => {
                 let mut map = serde_json::Map::new();
                 for (name, value) in fields {
-                    map.insert(name.clone(), to_serde(value));
+                    // A data key that starts with `$` would be byte-identical
+                    // to a JSON marker (`$env`, `$expr`, `$active.blob`), so it
+                    // is escaped here, in the JSON renderer only: the protobuf
+                    // projection has no markers and keeps the module's names.
+                    let mut key = name.clone();
+                    if key.starts_with('$') {
+                        key.insert(0, '$');
+                    }
+                    map.insert(key, to_serde(value));
                 }
                 serde_json::Value::Object(map)
             }
@@ -1339,15 +1395,23 @@ mod projection {
             .iter()
             .map(|secret| secret.as_bytes().to_vec())
             .collect();
-        provenance_json_with(prov, secrets, &raw)
+        let mut budget = EXPORT_REDACTION_BUDGET;
+        // This helper has a `Value` return, so it cannot report a redacted-key
+        // collision; it keeps the first entry (the same rule as
+        // `provenance_lines`). `provenance_json_for` is strict.
+        match provenance_json_with(prov, secrets, &raw, &mut budget, false) {
+            Some(value) => value,
+            None => serde_json::Value::Null,
+        }
     }
 
     fn provenance_json_with(
         prov: &Provenance,
         secrets: &[String],
         raw_secrets: &[Vec<u8>],
-    ) -> serde_json::Value {
-        let text = |value: &str| serde_json::Value::from(redacted_value(value, secrets));
+        budget: &mut usize,
+        strict_collisions: bool,
+    ) -> Option<serde_json::Value> {
         // A 32-byte secret can be copied into a hash field verbatim. A hash has
         // no textual form to redact, so a copy is replaced by the marker rather
         // than published as hex.
@@ -1363,7 +1427,10 @@ mod projection {
         };
         let mut map = serde_json::Map::new();
         if let Some(producer) = &prov.producer {
-            map.insert("producer".into(), text(producer));
+            map.insert(
+                "producer".into(),
+                serde_json::Value::from(redacted_value_capped(producer, secrets, budget)),
+            );
         }
         if prov.timestamp_ms != 0 {
             map.insert(
@@ -1372,35 +1439,53 @@ mod projection {
             );
         }
         if let Some(model) = &prov.model {
-            map.insert("model".into(), text(model));
+            map.insert(
+                "model".into(),
+                serde_json::Value::from(redacted_value_capped(model, secrets, budget)),
+            );
         }
         if let Some(tool) = &prov.tool {
-            map.insert("tool".into(), text(tool));
+            map.insert(
+                "tool".into(),
+                serde_json::Value::from(redacted_value_capped(tool, secrets, budget)),
+            );
         }
         if let Some(parent) = prov.parent {
             map.insert("parent".into(), hash_value(&parent, raw_secrets));
         }
         let mut entries = serde_json::Map::new();
         for entry in first_entry_per_key(&prov.entries) {
+            let key = redacted_key_capped(&entry.key, secrets, budget);
+            if entries.contains_key(&key) {
+                // Two keys redacted to one. The line codec keeps the first
+                // entry, so this one must agree; a wire caller is refused.
+                if strict_collisions {
+                    return None;
+                }
+                continue;
+            }
             let value = match &entry.value {
-                ProvValue::Text(t) => text(t),
+                ProvValue::Text(t) => {
+                    serde_json::Value::from(redacted_value_capped(t, secrets, budget))
+                }
                 ProvValue::Int(number) => serde_json::Value::from(*number),
                 ProvValue::Flag(flag) => serde_json::Value::from(*flag),
                 ProvValue::Hash(hash) => hash_value(hash, raw_secrets),
             };
-            entries.insert(redacted_key(&entry.key, secrets), value);
+            entries.insert(key, value);
         }
         map.insert("entries".into(), serde_json::Value::Object(entries));
-        serde_json::Value::Object(map)
+        Some(serde_json::Value::Object(map))
     }
 
     /// Project a module's provenance, collecting its secret table first.
     pub fn provenance_json_for(module: &InfinityModule) -> Option<serde_json::Value> {
         let secrets = secret_literals(module);
         let raw = secret_bytes(module);
+        let mut budget = EXPORT_REDACTION_BUDGET;
         module
             .provenance()
-            .map(|prov| provenance_json_with(prov, &secrets, &raw))
+            .and_then(|prov| provenance_json_with(prov, &secrets, &raw, &mut budget, true))
     }
 }
 
@@ -1418,46 +1503,51 @@ pub fn value_paths(module: &InfinityModule) -> HashMap<NodeId, String> {
     // A binding or field name can contain a copy of a secret, and these paths are
     // handed to agents and logs, so keys are redacted here too.
     let secrets = secret_texts(module);
+    let mut budget = EXPORT_REDACTION_BUDGET;
     let mut paths: HashMap<NodeId, String> = HashMap::new();
     for (name, id) in module.bindings() {
-        paths.insert(*id, redacted_key(name, &secrets));
+        paths.insert(*id, redacted_key_capped(name, &secrets, &mut budget));
     }
+    let mut expanded = std::collections::HashSet::new();
+    let mut stack: Vec<(NodeId, String)> = Vec::new();
     if let Some(root) = module.root() {
-        let mut stack = vec![(root, String::new())];
-        let mut expanded = std::collections::HashSet::new();
-        while let Some((id, path)) = stack.pop() {
-            // A cyclic hand-built module must not hang the query.
-            if !expanded.insert(id) {
-                continue;
-            }
-            match module.get(id) {
-                Some(Inode::Table { fields }) => {
-                    for (key, child) in fields {
-                        let key = redacted_key(key, &secrets);
-                        let child_path = if path.is_empty() {
-                            key
-                        } else {
-                            format!("{path}.{key}")
-                        };
-                        paths.entry(*child).or_insert_with(|| child_path.clone());
-                        stack.push((*child, child_path));
-                    }
-                }
-                Some(Inode::SchemaTable { fields, .. }) => {
-                    for (key, child) in fields {
-                        let key = redacted_key(key, &secrets);
-                        let child_path = if path.is_empty() {
-                            key
-                        } else {
-                            format!("{path}.{key}")
-                        };
-                        paths.entry(*child).or_insert_with(|| child_path.clone());
-                        stack.push((*child, child_path));
-                    }
-                }
-                _ => {}
-            }
+        stack.push((root, String::new()));
+    }
+    // An annotation subject can be a subtree that nothing else reaches. Walk
+    // those too (under a synthetic label) or an agent asking for the paths of a
+    // secret-tainted module is told there are none.
+    for (index, annotation) in module.annotations().iter().enumerate() {
+        stack.push((annotation.node, format!("@annotation[{index}]")));
+        if let AnnotationKind::Constraint { expr, .. } = &annotation.kind {
+            stack.push((*expr, format!("@constraint[{index}]")));
         }
+    }
+    // Depth-first, parents before children; a node keeps the first path that
+    // reaches it, so the root's names win over a synthetic annotation label.
+    let mut order: Vec<(NodeId, String)> = Vec::new();
+    while let Some((id, path)) = stack.pop() {
+        // A cyclic hand-built module must not hang the query.
+        if !expanded.insert(id) {
+            continue;
+        }
+        order.push((id, path.clone()));
+        match module.get(id) {
+            Some(Inode::Table { fields }) | Some(Inode::SchemaTable { fields, .. }) => {
+                for (key, child) in fields {
+                    let key = redacted_key_capped(key, &secrets, &mut budget);
+                    let child_path = if path.is_empty() {
+                        key
+                    } else {
+                        format!("{path}.{key}")
+                    };
+                    stack.push((*child, child_path));
+                }
+            }
+            _ => {}
+        }
+    }
+    for (id, path) in order {
+        paths.entry(id).or_insert(path);
     }
     paths
 }
@@ -1636,30 +1726,19 @@ pub fn subgraph(module: &InfinityModule, roots: &[NodeId]) -> Vec<NodeId> {
 /// secret, including ancestors, plus the secret node's own path. Labels only.
 pub fn secret_tainted_paths(module: &InfinityModule) -> Vec<String> {
     let mut tainted: Vec<bool> = vec![false; module.node_count()];
-    // Fixpoint over the DAG: a node is tainted when it is a secret or any
-    // child is tainted. Iterate to a fixed point (bounded by node count).
-    // `subgraph` is a breadth-first order, which is not topological: a node
-    // reached through a shallow parent can precede a deeper one. Iterate the
-    // fixpoint in reverse (children before parents in practice), so the loop
-    // converges in one or two sweeps without ever reading an unset child.
-    let order = subgraph(module, &root_ids(module));
-    let mut changed = true;
-    while changed {
-        changed = false;
-        for id in order.iter().rev() {
-            let Some(node) = module.get(*id) else {
-                continue;
-            };
-            let value = node.is_secret()
-                || node
-                    .children()
-                    .iter()
-                    .any(|child| tainted.get(child.index()).copied().unwrap_or(false));
-            if value && !tainted[id.index()] {
-                tainted[id.index()] = true;
-                changed = true;
-            }
-        }
+    // A node is tainted when it is a secret or any child is tainted. One
+    // depth-first post-order pass sees every child before its parents, so the
+    // fixpoint is linear; a sweep-per-depth loop was quadratic.
+    let (deps, _) = adjacency(module);
+    for id in postorder(&deps, &root_ids(module)) {
+        let Some(node) = module.get(id) else {
+            continue;
+        };
+        let value = node.is_secret()
+            || deps[id.index()]
+                .iter()
+                .any(|child| tainted.get(child.index()).copied().unwrap_or(false));
+        tainted[id.index()] = value;
     }
     let paths = value_paths(module);
     let mut out: Vec<String> = module
@@ -1674,12 +1753,62 @@ pub fn secret_tainted_paths(module: &InfinityModule) -> Vec<String> {
     out
 }
 
+/// Depth-first post-order over the reachable graph: every child precedes its
+/// parents, so one pass computes any child-dependent property. A node reached
+/// twice is emitted once; a cycle terminates instead of recursing.
+fn postorder(deps: &[Vec<NodeId>], roots: &[NodeId]) -> Vec<NodeId> {
+    #[derive(Clone, Copy, PartialEq)]
+    enum Mark {
+        New,
+        Open,
+        Done,
+    }
+    let mut marks = vec![Mark::New; deps.len()];
+    let mut out = Vec::with_capacity(deps.len());
+    let mut stack: Vec<(NodeId, usize)> = Vec::new();
+    for root in roots {
+        if marks.get(root.index()).copied() != Some(Mark::New) {
+            continue;
+        }
+        stack.push((*root, 0));
+        while let Some((id, next)) = stack.pop() {
+            let Some(edges) = deps.get(id.index()) else {
+                continue;
+            };
+            match marks[id.index()] {
+                Mark::New => marks[id.index()] = Mark::Open,
+                Mark::Done => continue,
+                Mark::Open => {}
+            }
+            if next < edges.len() {
+                stack.push((id, next + 1));
+                let child = edges[next];
+                if marks.get(child.index()).copied() == Some(Mark::New) {
+                    stack.push((child, 0));
+                }
+            } else {
+                marks[id.index()] = Mark::Done;
+                out.push(id);
+            }
+        }
+    }
+    out
+}
+
 fn root_ids(module: &InfinityModule) -> Vec<NodeId> {
     let mut roots = Vec::new();
     if let Some(root) = module.root() {
         roots.push(root);
     }
     roots.extend(module.bindings().iter().map(|(_, id)| *id));
+    // Annotation subjects and constraint expressions are roots too: a secret
+    // below an annotation-only subtree still taints that subtree.
+    for annotation in module.annotations() {
+        roots.push(annotation.node);
+        if let AnnotationKind::Constraint { expr, .. } = &annotation.kind {
+            roots.push(*expr);
+        }
+    }
     roots
 }
 
@@ -1691,28 +1820,22 @@ pub fn provenance_lines(module: &InfinityModule) -> Vec<String> {
     };
     let secrets = secret_texts(module);
     let raw_secrets = secret_bytes(module);
-    let redact = |text: &str| -> String {
-        if secrets
-            .iter()
-            .any(|secret| !secret.is_empty() && text.contains(secret.as_str()))
-        {
-            hiding_placeholder(&secrets).to_string()
-        } else {
-            text.to_string()
-        }
-    };
+    let mut budget = EXPORT_REDACTION_BUDGET;
     let mut lines = Vec::new();
     if let Some(producer) = &prov.producer {
-        lines.push(format!("producer={}", escape_line(&redact(producer))));
+        let producer = redacted_value_capped(producer, &secrets, &mut budget);
+        lines.push(format!("producer={}", escape_line(&producer)));
     }
     if prov.timestamp_ms != 0 {
         lines.push(format!("timestamp_ms={}", prov.timestamp_ms));
     }
     if let Some(model) = &prov.model {
-        lines.push(format!("model={}", escape_line(&redact(model))));
+        let model = redacted_value_capped(model, &secrets, &mut budget);
+        lines.push(format!("model={}", escape_line(&model)));
     }
     if let Some(tool) = &prov.tool {
-        lines.push(format!("tool={}", escape_line(&redact(tool))));
+        let tool = redacted_value_capped(tool, &secrets, &mut budget);
+        lines.push(format!("tool={}", escape_line(&tool)));
     }
     let hash_text = |hash: &[u8; 32]| -> String {
         if raw_secrets
@@ -1727,17 +1850,23 @@ pub fn provenance_lines(module: &InfinityModule) -> Vec<String> {
     if let Some(parent) = prov.parent {
         lines.push(format!("parent={}", hash_text(&parent)));
     }
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     for entry in first_entry_per_key(&prov.entries) {
+        let key = redacted_key_capped(&entry.key, &secrets, &mut budget);
+        // Two keys that redact to one must not produce two lines for one key;
+        // the JSON projection keeps the same first entry.
+        if !seen.insert(key.clone()) {
+            continue;
+        }
         let value = match &entry.value {
-            ProvValue::Text(text) => escape_line(&redacted_value(text, &secrets)),
+            ProvValue::Text(text) => {
+                escape_line(&redacted_value_capped(text, &secrets, &mut budget))
+            }
             ProvValue::Int(number) => number.to_string(),
             ProvValue::Flag(flag) => flag.to_string(),
             ProvValue::Hash(hash) => hash_text(hash),
         };
-        lines.push(format!(
-            "{}={value}",
-            escape_line(&redacted_key(&entry.key, &secrets))
-        ));
+        lines.push(format!("{}={value}", escape_line(&key)));
     }
     lines
 }
@@ -1749,18 +1878,15 @@ pub fn provenance_lines(module: &InfinityModule) -> Vec<String> {
 /// yields: canonicalization stores annotations in that form.
 pub fn intents(module: &InfinityModule, id: NodeId) -> Vec<String> {
     let secrets = secret_texts(module);
+    let mut budget = EXPORT_REDACTION_BUDGET;
     module
         .annotations()
         .iter()
         .filter(|annotation| annotation.node == id)
         .filter_map(|annotation| match &annotation.kind {
-            AnnotationKind::Intent(text) => {
-                Some(if hiding_placeholder(&secrets) == SECRET_MARKER {
-                    redact_text(text, &secrets)
-                } else {
-                    delete_secrets(text, &secrets)
-                })
-            }
+            // `redacted_key` is exactly the storage rule: replace each
+            // occurrence, keeping the marker when the marker is safe.
+            AnnotationKind::Intent(text) => Some(redacted_key_capped(text, &secrets, &mut budget)),
             _ => None,
         })
         .collect()

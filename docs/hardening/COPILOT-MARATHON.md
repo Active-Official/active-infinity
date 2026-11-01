@@ -1141,3 +1141,53 @@ including the AS capacity read from AS memory and the Go/JS/AS lanes).
 
 Gate: 387 library/integration, 42 CLI, 27 FFI, clippy clean; JS and AS
 conformance PASS.
+
+### Re-audit round 7 (I-12) and round 6 (I-14) - 2026-10-31
+
+Reviewer: DeepSeek V4.1 through the Copilot CLI (`xhigh`). I-12 round 7 reopened
+the projection surface after the round-6 fixes and found one **critical**, two
+**high**, three **medium** and five **low** items. All are fixed on the shipped
+path; each behavioural test below was proved to fail against the round-6 tree.
+I-14 round 6 closes its section: no critical, high or medium finding remains.
+
+**I-12 round 7**
+
+| # | Sev | Finding | Disposition |
+|---|-----|---------|-------------|
+| 1 | critical | an interpolated secret locator (`secret("hunter-${name}")`) was never promoted, so its literal stayed in the public string heap and every export copied it | **fixed**: `promote_secret_locators` treats `Interpolate` as locator material and rewrites each `InterpPart::Literal` to a `Secret` node when the interpolation is not root-public; `locator_literals` resolves every literal part; `an_interpolated_secret_locator_is_promoted` (fails pre-fix) |
+| 2 | high | `content_key` rendered one full key per annotation and per constraint expression with no memo and no cumulative bound (686 MB peak from a 561 KB image) | **fixed**: one render per distinct subject, referenced by index, with `MAX_ANNOTATION_KEY_BYTES` (64 MiB) across all keys -> `infinity/limit`; `annotation_ordering_keys_are_bounded_in_total` and `many_annotations_on_one_subject_share_one_ordering_key` (the first fails pre-fix) |
+| 3 | high | the non-projection exports scanned without a shared budget (`provenance_lines`, `provenance_json_for`, `value_paths`, `intents`); `delete_secrets` had no guard | **fixed**: one `EXPORT_REDACTION_BUDGET` (64 MiB) per call, saturating to the placeholder past it; six tests in `marathon_export_budget_tests.rs`, five proved pre-fix |
+| 4 | medium | the taint fixpoint re-swept the graph per depth (`children()` allocated per node per sweep) | **fixed**: one depth-first post-order pass over `adjacency` (O(V+E)); no measurable difference on the shapes rebuilt here (4.42 ms -> 2.06 ms at depth 2000), linear by construction |
+| 5 | medium | annotation-only roots were ignored, so a secret under a subtree that only an annotation names was reported untainted | **fixed**: `root_ids` and `value_paths` include annotation subjects and constraint expressions (`@annotation[n]`, `@constraint[n]`); `a_secret_under_an_annotation_only_subject_is_reported` (fails pre-fix) |
+| 6 | medium | locator resolution gave up after 8 hops and failed open on in-memory modules | **fixed**: the walk is bounded by the node count; `a_long_locator_chain_stays_redacted` (64 hops, fails pre-fix) |
+| 7 | medium | `redact_text` returned a marker that contains the secret when over its per-call ceiling | **fixed**: the marker-tainted over-budget branch returns the empty string (round-7 pre-work; test in round 6) |
+| 8 | low | F7: a redacted-key collision was silently dropped by JSON and duplicated by the line codec | **fixed**: `provenance_json_for` returns `None`, `provenance_lines` keeps the first entry in stored order; `a_redacted_key_collision_is_refused_in_provenance` (fails pre-fix) |
+| 9 | low | F8: the node budget reported `infinity/encode` while sibling ceilings report `infinity/limit`; the spec assigned no code | **fixed**: `infinity/limit` with kind `projection node budget`, `projection.md` §5 updated, `perf_budget.rs` assertion updated |
+| 10 | low | the JSON `$`-escape rewrote Protobuf `Field.name` (`$env` -> `$$env`) although Protobuf has no markers | **fixed** (round-7 pre-work): the escape lives in `to_serde` only |
+| 11 | low | `projection.md` §2 still said the canonicalizer falls back to the marker | **fixed**: the spec now says it refuses (`infinity/encode`) and that the infallible paths return the empty string |
+
+Measured on this host (release-off test build, same machine, same shapes):
+
+| Shape | Before | After |
+|---|---|---|
+| 500 000 annotations on one subject, `encode` | 3.30 s | 0.93 s |
+| `provenance_lines`, 20k secrets x 200 KiB x 2 entries | 17.1 s, 409 615 bytes emitted | 11.6 ms, 39 bytes |
+| `provenance_lines`, 50 entries x 200 KiB, 20k secrets | 463.8 s, 10 240 350 bytes emitted | 27.7 ms, 44 bytes |
+| 90 distinct ordering keys of ~820 KiB | 74 MB retained, no refusal | `infinity/limit` |
+| taint, depth-2000 shortcut shape | 4.42 ms | 2.06 ms |
+
+**I-14 round 6: CLEAN for critical, high and medium.** Committed `9cbfe21`
+(pushed). The round-5 AS capacity read from AS memory, the Go entropy path, the
+JVM clamp test, the Go runtime cleanup and the Dart null guards all verify.
+Round 6 then fixed: C/C++/Zig/AS request builders now refuse a payload past the
+frame ceiling (stack overflow removed), the AS hash shim is fail-closed on a
+null output, thirteen RPC thin clients bound a peer-controlled length, the Rust
+and TypeScript value readers cap nesting depth, JNI sends UTF-8 for
+supplementary names, Lua and Kotlin/Native raise typed errors, and the null
+`last_error` scan is guarded in JS/AS/Go/Dart. Residual lows are documented:
+the ABI is the trust boundary for a replaced library, no binding exposes
+`validate_canonical`, names truncate at a NUL, and the 1 MiB client frame
+ceiling is a policy choice.
+
+Gate after round 7: 397 library/integration tests (9 new), 42 CLI, 27 FFI,
+clippy clean on both feature sets, `cargo fmt --check` clean.

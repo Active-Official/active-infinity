@@ -77,9 +77,10 @@ Redaction is structural, not textual:
   no-threshold rule, so a copy cannot survive in the image and then be hidden
   only by the projections;
 - a replacement can create a new secret by joining the text around it, so the
-  canonicalizer repeats the pass until the text is clean and falls back to the
-  marker. That makes redaction a fixpoint for every secret set, including a
-  secret that is itself part of `***SECRET***`;
+  canonicalizer repeats the pass until the text is clean. When the marker itself
+  contains a secret, no marker can hide it: the encoder refuses the module
+  (`infinity/encode`), and the paths that cannot refuse substitute the empty
+  string. Redaction is a fixpoint for every secret set either way;
 - **binary surfaces are not text.** A provenance `parent` or hash entry whose
   bytes equal a 32-byte secret, and an opaque extension payload that contains a
   secret literal, cannot use the marker: there is no textual form to replace.
@@ -112,6 +113,10 @@ Structural names are the exception, in both directions:
 - two names that redact to one key are **refused** (`infinity/encode`) rather
   than merged: a JSON object with duplicate keys loses one silently, and a
   lossy export is worse than a loud refusal. The same rule applies to bindings.
+- the provenance exports follow the same rule: `provenance_json_for` returns
+  `None` on a redacted-key collision, and `provenance_lines` keeps the first
+  entry (in stored key order), so the two exports cannot disagree about which
+  value the module holds.
 - a data key that starts with `$` is escaped with a leading `$` (`$env` becomes
   `$$env`) so module data cannot impersonate a projection marker such as
   `{"$env": ...}` or `{"$active.blob": ...}`.
@@ -279,7 +284,13 @@ Two resource ceilings turn a hostile module into a refusal instead of a stall:
 
 - the shared node budget (`PROJECTION_NODE_BUDGET`, 100 000 visits) covers the
   value tree *and* every secret-taint walk, so a hostile interpolation shape
-  cannot spend an unbounded number of lookups;
+  cannot spend an unbounded number of lookups; it reports `infinity/limit`;
 - the Protobuf output is capped at `MAX_PROTOBUF_BYTES` (1 GiB) and the
   extension secret scan at `MAX_SECRET_SCAN_BYTES` (64 MiB of comparisons), both
-  `infinity/limit`.
+  `infinity/limit`;
+- the non-projection exports — `provenance_lines`, `provenance_json_for`,
+  `value_paths` and `intents` — share one `EXPORT_REDACTION_BUDGET` (64 MiB of
+  scan bytes). They return text rather than a `Result`, so past the budget every
+  remaining value and key saturates to the marker: the output stays
+  conservative and the work stays bounded. A caller that needs a refusal uses
+  the JSON or Protobuf projection.

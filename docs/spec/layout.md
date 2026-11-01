@@ -433,7 +433,10 @@ canonical image reproduces it byte for byte:
    then bindings in name order, then annotation subjects and their constraint
    expressions. Children are visited in node order (§3.1), which is itself
    canonical after step 1. Nodes unreachable from the roots are **dropped**; a
-   canonical image never carries hidden data.
+   canonical image never carries hidden data. An annotation root is ordered by a
+   content key, a full render of its subtree; one render is kept per distinct
+   subject and all of them together are capped at
+   `MAX_ANNOTATION_KEY_BYTES` (64 MiB), refused with `infinity/limit` past it.
 4. **Sort tables.** Strings (byte order), units (`(discriminant, name)`), types
    (`(code, flags, aux entries)` — content, never the allocator's start/count),
    blobs (`(hash, size)`), hashes,

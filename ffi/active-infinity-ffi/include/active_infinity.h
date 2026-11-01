@@ -11,8 +11,11 @@
  *   panics on unwinding targets; on `panic=abort` targets, including
  *   `wasm32-unknown-unknown`, a panic traps the instance instead of returning
  *   -3, so a host must treat a trap as a failed call.
- * - After every call, active_infinity_last_error() gives the stable
- *   `infinity/...` code for the calling thread (`infinity/ok` on success).
+ * - After a call that reports a status, active_infinity_last_error() gives the
+ *   stable `infinity/...` code for the calling thread (`infinity/ok` on
+ *   success). `active_infinity_alloc` and `active_infinity_free` never change
+ *   it: they are allocation primitives, and a binding may free an internal
+ *   buffer between a failed call and its read of the code.
  *   Copy the string immediately: the pointer is owned by the library and is
  *   released by the next call on that thread. Never keep it.
  * - Output functions take `out` and `out_len`. On entry `*out_len` is the
@@ -37,9 +40,8 @@
  * releases that newer buffer. Always null the pointer after freeing it; using
  * a pointer after it was freed is undefined behaviour.
  *
- * Every call sets `last_error`, including `alloc` and `free` (`infinity/ok` on
- * success). The getters return NULL only if an internal panic occurred;
- * bindings should treat NULL as "unavailable".
+ * The getters return NULL only if an internal panic occurred; bindings should
+ * treat NULL as "unavailable".
  *
  * Untrusted input: the shim runs the default profile (1 GiB total bytes). A
  * wasm32 instance has a 4 GiB address space, so size the module's memory for
@@ -101,7 +103,10 @@ int32_t active_infinity_validate(const uint8_t *ptr, size_t len);
 /* Validate and prove the canonical form (re-encodes to the same bytes). */
 int32_t active_infinity_validate_canonical(const uint8_t *ptr, size_t len);
 
-/* Compute the 32-byte Blake3 content hash of a valid image. */
+/* Compute the 32-byte Blake3 content hash of a valid image. The value is the
+ * byte identity: it equals the header's stored hash and the reference
+ * `content_hash(bytes)`. Canonical form is a separate question, answered by
+ * active_infinity_validate_canonical and by signature verification. */
 int32_t active_infinity_content_hash(const uint8_t *ptr, size_t len,
                                      uint8_t out32[32]);
 

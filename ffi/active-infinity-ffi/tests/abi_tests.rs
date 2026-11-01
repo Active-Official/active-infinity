@@ -447,32 +447,32 @@ fn a_hostile_length_is_refused_before_the_slice() {
     assert_eq!(last_error(), "infinity/null-input");
 }
 
-/// The FFI hash is the canonical identity: a non-canonical image would hash to
-/// bytes that re-encode to a different address.
+/// The FFI hash is the byte identity: it equals the stored header hash and the
+/// reference `content_hash`, for a canonical image and for a non-canonical one
+/// whose bytes are still valid. Every language in the matrix hashes the same
+/// bytes to the same value.
 #[test]
-fn content_hash_refuses_a_non_canonical_image() {
+fn content_hash_matches_the_reference_for_any_valid_image() {
     use active_infinity_ffi::active_infinity_content_hash;
 
-    let bytes = vector("non_canonical.ainf");
-    let mut hash = [0u8; 32];
-    // SAFETY: the buffer is readable and `hash` is 32 writable bytes.
-    let status =
-        unsafe { active_infinity_content_hash(bytes.as_ptr(), bytes.len(), hash.as_mut_ptr()) };
-    assert_eq!(status, -1);
-    assert_eq!(last_error(), "infinity/not-canonical");
-
-    // The canonical vector still hashes.
-    let bytes = vector("full.ainf");
-    // SAFETY: same contract.
-    let status =
-        unsafe { active_infinity_content_hash(bytes.as_ptr(), bytes.len(), hash.as_mut_ptr()) };
-    assert_eq!(status, 0, "{}", last_error());
+    for name in ["full.ainf", "non_canonical.ainf"] {
+        let bytes = vector(name);
+        let mut hash = [0u8; 32];
+        // SAFETY: the buffer is readable and `hash` is 32 writable bytes.
+        let status =
+            unsafe { active_infinity_content_hash(bytes.as_ptr(), bytes.len(), hash.as_mut_ptr()) };
+        assert_eq!(status, 0, "{name}: {}", last_error());
+        assert_eq!(
+            hash,
+            active_infinity::content_hash(&bytes).expect("reference")
+        );
+    }
 }
 
-/// A successful `alloc` and `free` clear a stale failure code; a binding that
-/// logs `last_error` on every call must not report a phantom failure.
+/// `alloc` and `free` are primitives: a binding may call them between a failed
+/// call and its read of `last_error`, so they must not clobber the code.
 #[test]
-fn a_success_clears_the_last_error() {
+fn alloc_and_free_do_not_change_the_last_error() {
     use active_infinity_ffi::{active_infinity_alloc, active_infinity_free};
 
     // SAFETY: the pointer is a 4-byte readable literal.
@@ -480,9 +480,22 @@ fn a_success_clears_the_last_error() {
     assert_eq!(last_error(), "infinity/magic");
     let pointer = active_infinity_alloc(8);
     assert!(!pointer.is_null());
-    assert_eq!(last_error(), "infinity/ok");
+    assert_eq!(last_error(), "infinity/magic");
     // SAFETY: the pointer and length come from the allocation above.
     unsafe { active_infinity_free(pointer, 8) };
+    assert_eq!(last_error(), "infinity/magic");
+    // A status-bearing call still reports its own result.
+    let bytes = vector("full.ainf");
+    let mut out = vec![0u8; 64];
+    // SAFETY: buffers follow the contract.
+    let status = unsafe {
+        active_infinity_ffi::active_infinity_content_hash(
+            bytes.as_ptr(),
+            bytes.len(),
+            out.as_mut_ptr(),
+        )
+    };
+    assert_eq!(status, 0);
     assert_eq!(last_error(), "infinity/ok");
 }
 

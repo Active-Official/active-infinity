@@ -278,7 +278,6 @@ fn alloc_tagged(len: usize) -> *mut u8 {
         unsafe { std::alloc::dealloc(base, layout) };
         return ptr::null_mut();
     }
-    set_error("infinity/ok");
     pointer
 }
 
@@ -305,9 +304,9 @@ fn free_tagged(ptr: *mut u8, len: usize) {
     // forged tag and a double free a no-op: only an address this library
     // recorded can be reconstructed, and only once.
     if !live_allocations().remove(&(ptr as usize)) {
-        // A foreign pointer or a double free: no-op, and the call itself
-        // succeeded, so the thread's code reflects that.
-        set_error("infinity/ok");
+        // A foreign pointer or a double free: no-op. `free` never changes the
+        // thread's code: a binding reads it after a failing call, and an
+        // internal alloc/free between the failure and the read must not hide it.
         return;
     }
     // SAFETY: the registry proved this address came from `alloc_tagged`, so the
@@ -332,7 +331,6 @@ fn free_tagged(ptr: *mut u8, len: usize) {
     unsafe { ptr::write_bytes(base, 0, ALLOC_HEADER) };
     // SAFETY: `base` came from `alloc_zeroed` with exactly this layout.
     unsafe { std::alloc::dealloc(base, layout) };
-    set_error("infinity/ok");
 }
 
 /// Validate an AINF image. Returns 0 for a structurally valid image.
@@ -407,13 +405,6 @@ pub unsafe extern "C" fn active_infinity_content_hash(
         };
         if out32.is_null() {
             set_error("infinity/null-output");
-            return INVALID;
-        }
-        // Identity is the canonical form: a non-canonical image hashes to
-        // different bytes than the image it re-encodes to, so the shim refuses
-        // it exactly as `SignedImage::content_hash` does.
-        if let Err(error) = validate_canonical(bytes, active_infinity::Limits::default()) {
-            set_error(error.code());
             return INVALID;
         }
         match content_hash(bytes) {

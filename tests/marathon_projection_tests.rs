@@ -7,9 +7,10 @@
 //! the module or the projection instead.
 
 use active_infinity::{
-    encode, Constraint, InfinityModule, Inode, InterpPart, ProvEntry, ProvValue, Provenance,
-    SecretBytes,
+    encode, InfinityModule, Inode, ProvEntry, ProvValue, Provenance, SecretBytes,
 };
+#[cfg(feature = "json")]
+use active_infinity::{Constraint, InterpPart};
 
 /// Exactly 32 bytes, so its bytes can be confused with a content hash.
 const SECRET: &str = "0123456789abcdef0123456789abcdef";

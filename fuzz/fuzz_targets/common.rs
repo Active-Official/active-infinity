@@ -105,22 +105,39 @@ pub fn kind(bytes: &[u8], node: u32) -> Option<u8> {
     bytes.get(at).copied()
 }
 
-/// Children of a `Table` node, read from the children table.
+/// Children of a `Table` node, read from the *fields* table.
+///
+/// A table's `a`/`b` words index `Section::Fields` (16-byte entries: name,
+/// reserved, node, reserved), not `Section::Children`. Reading the wrong
+/// section returned an empty list for every table and silently disabled every
+/// oracle built on this helper.
 pub fn table_children(bytes: &[u8], node: u32) -> Vec<u32> {
     let Ok(header) = Header::parse(bytes) else {
         return Vec::new();
     };
     let nodes = header.span(Section::Nodes).offset as usize;
-    let at = nodes + node as usize * 32;
+    let Some(at) = (node as usize)
+        .checked_mul(32)
+        .and_then(|offset| nodes.checked_add(offset))
+    else {
+        return Vec::new();
+    };
     if at + 32 > bytes.len() || bytes[at] != 8 {
         return Vec::new();
     }
     let first = get_u64(bytes, at + 8).unwrap_or(0) as usize;
     let count = get_u64(bytes, at + 16).unwrap_or(0) as usize;
-    let table = header.span(Section::Children).offset as usize + first * 4;
+    let fields = header.span(Section::Fields).offset as usize;
     let mut out = Vec::with_capacity(count.min(1024));
     for index in 0..count.min(1024) {
-        if let Some(value) = get_u32(bytes, table + index * 4) {
+        let Some(entry) = index.checked_mul(16).and_then(|offset| {
+            first
+                .checked_mul(16)
+                .and_then(|base| base.checked_add(offset))
+        }) else {
+            break;
+        };
+        if let Some(value) = get_u32(bytes, fields + entry + 8) {
             out.push(value);
         }
     }
@@ -234,6 +251,8 @@ pub fn repoint_ref(bytes: &mut [u8], node: u32, target: u32) -> bool {
     if bytes[record] != 11 {
         return false;
     }
+    // Read the old target before overwriting the record.
+    let old_child = get_u64(bytes, record + 8).unwrap_or(u64::MAX) as u32;
     put_u64(bytes, record + 8, target as u64);
 
     let Some(edges) = edges_offset(bytes) else {
@@ -245,32 +264,27 @@ pub fn repoint_ref(bytes: &mut [u8], node: u32, target: u32) -> bool {
     if count as usize * 8 + edges > bytes.len() {
         return false;
     }
-    // Every Ref node contributes (child, node). Rebuild all of them from the
-    // node records so the table still equals the derivation.
-    let Some(node_count) = Header::parse(bytes)
-        .ok()
-        .map(|header| header.span(Section::Nodes).count)
+    // The edge table is the derivation of every node, not just the Ref nodes.
+    // Only one pair changes (the Ref's target), so the original table is the
+    // ground truth: replace that pair, re-sort and rehash. Rebuilding only the
+    // Ref edges and comparing against the total count rejected every input.
+    let mut pairs = Vec::with_capacity(count as usize);
+    for index in 0..count as usize {
+        let from = get_u32(bytes, edges + index * 8).unwrap_or(u32::MAX);
+        let to = get_u32(bytes, edges + index * 8 + 4).unwrap_or(u32::MAX);
+        pairs.push((from, to));
+    }
+    let Some(position) = pairs
+        .iter()
+        .position(|(from, to)| *from == old_child && *to == node)
     else {
         return false;
     };
-    let mut pairs = Vec::new();
-    for index in 0..node_count {
-        let at = nodes + index as usize * 32;
-        if at + 32 > bytes.len() {
-            return false;
-        }
-        if bytes[at] == 11 {
-            let child = get_u64(bytes, at + 8).unwrap_or(u64::MAX) as u32;
-            pairs.push((child, index));
-        }
-    }
-    if pairs.len() != count as usize {
-        return false;
-    }
+    pairs[position] = (target, node);
     pairs.sort_unstable();
-    for (position, (child, owner)) in pairs.iter().enumerate() {
-        put_u32(bytes, edges + position * 8, *child);
-        put_u32(bytes, edges + position * 8 + 4, *owner);
+    for (position, (from, to)) in pairs.iter().enumerate() {
+        put_u32(bytes, edges + position * 8, *from);
+        put_u32(bytes, edges + position * 8 + 4, *to);
     }
     rehash(bytes)
 }

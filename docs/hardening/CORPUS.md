@@ -120,3 +120,13 @@ Interpretation:
    near-miss variants, not replacements.
 5. CI runs a short campaign on pull requests and a longer campaign on `main`
    and nightly (H1.20).
+
+- `fuzz_signed_image`: untrusted-input target added in the I-16 re-audit.
+
+- `fuzz_proof_sidecar`: untrusted-input target added in the I-16 re-audit.
+
+- `fuzz_schema`: untrusted-input target added in the I-16 re-audit.
+
+- `fuzz_delta_frames`: untrusted-input target added in the I-16 re-audit.
+
+- `fuzz_merge`: untrusted-input target added in the I-16 re-audit.

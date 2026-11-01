@@ -32,10 +32,15 @@ jobs:
             fuzz_secret_positions \
             fuzz_unit_discriminants \
             fuzz_projection_agreement \
+            fuzz_signed_image \
+            fuzz_proof_sidecar \
+            fuzz_schema \
+            fuzz_delta_frames \
+            fuzz_merge \
             fuzz_compressed_frame; do
             echo "== $target =="
             cargo fuzz run "$target" -- \
-              -max_total_time="$FUZZ_SECONDS" -timeout=25 -rss_limit_mb=2048 \
+              -max_total_time="$FUZZ_SECONDS" -timeout=10 -rss_limit_mb=2048 \
               -print_final_stats=1 || status=1
           done
           exit "$status"

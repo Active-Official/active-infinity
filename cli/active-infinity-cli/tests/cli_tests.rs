@@ -959,3 +959,188 @@ fn dict_apply_refuses_an_empty_dictionary() {
     );
 }
 
+/// A set-but-empty `--key` is a variable that did not expand; treating it as
+/// absent would drop the pinned signer and accept any self-consistent envelope.
+#[test]
+fn store_get_refuses_an_empty_key_and_root() {
+    let dir = sandbox("store-empty-flags");
+    let path = dir.join("image.ainf");
+    write(&path, &image(4));
+    let root = dir.join("store");
+    let put = run(&[
+        "store",
+        "put",
+        path.to_str().expect("utf8"),
+        "--root",
+        root.to_str().expect("utf8"),
+    ]);
+    assert!(put.status.success(), "{}", stderr(&put));
+    let hash = stdout(&put).trim().to_string();
+
+    let get = run(&[
+        "store",
+        "get",
+        &hash,
+        "--root",
+        root.to_str().expect("utf8"),
+        "--verify",
+        "--key",
+        "",
+    ]);
+    assert_eq!(get.status.code(), Some(2), "{}", stderr(&get));
+    assert!(stderr(&get).contains("usage:"), "{}", stderr(&get));
+
+    let get = run(&[
+        "store",
+        "get",
+        &hash,
+        "--root",
+        root.to_str().expect("utf8"),
+        "--key",
+        "",
+    ]);
+    assert_eq!(get.status.code(), Some(2), "{}", stderr(&get));
+
+    let get = run(&["store", "get", &hash, "--root", ""]);
+    assert_eq!(get.status.code(), Some(2), "{}", stderr(&get));
+}
+
+/// A usage error must not create a store directory: `.active-store` in a repo
+/// root can be committed later.
+#[test]
+fn a_usage_error_does_not_create_the_store() {
+    let dir = sandbox("store-not-created");
+    let root = dir.join("never");
+    let output = run(&["store", "bogus", "--root", root.to_str().expect("utf8")]);
+    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+    assert!(
+        !root.exists(),
+        "the store root was created by a usage error"
+    );
+}
+
+/// An empty `--schema` would silently disable schema validation.
+#[test]
+fn proof_refuses_an_empty_schema() {
+    let dir = sandbox("proof-empty-schema");
+    let image = dir.join("image.ainf");
+    write(&image, &image_bytes_for_proof());
+    let proof = dir.join("proof.json");
+    let issued = run(&[
+        "proof",
+        "issue",
+        image.to_str().expect("utf8"),
+        "--schema",
+        "",
+        "--output",
+        proof.to_str().expect("utf8"),
+    ]);
+    assert_eq!(issued.status.code(), Some(2), "{}", stderr(&issued));
+    assert!(stderr(&issued).contains("--schema"), "{}", stderr(&issued));
+}
+
+/// An empty `--name` is not a request for the default name.
+#[test]
+fn encode_refuses_an_empty_name() {
+    let dir = sandbox("encode-empty-name");
+    let source = dir.join("input.active");
+    write(&source, b"port = 8080\n");
+    let output = run(&[
+        "encode",
+        source.to_str().expect("utf8"),
+        "--name",
+        "",
+        "--output",
+        dir.join("out.ainf").to_str().expect("utf8"),
+    ]);
+    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+}
+
+/// `Path::push` replaces the base for a rooted or prefixed path, so containment
+/// must be proved on the canonical result, not on the spelling.
+#[test]
+fn a_conformance_case_outside_the_base_is_refused() {
+    let dir = sandbox("conformance-escape");
+    let manifest = dir.join("manifest.json");
+    // A rooted path without a prefix is not `is_absolute` on Windows.
+    let escape = if cfg!(windows) {
+        "\\Windows\\win.ini"
+    } else {
+        "/etc/passwd"
+    };
+    write(
+        &manifest,
+        format!(
+            "{{\"format\":\"active-conformance/1\",\"version\":\"test\",\"cases\":[{{\"kind\":\"valid\",\"name\":\"escape\",\"path\":\"{}\",\"expected_code\":\"\",\"sha256\":\"\",\"size\":0}}]}}",
+            escape.replace('\\', "\\\\")
+        )
+        .as_bytes(),
+    );
+    let output = run(&[
+        "conformance",
+        "run",
+        "--manifest",
+        manifest.to_str().expect("utf8"),
+    ]);
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    let scorecard = stdout(&output);
+    assert!(
+        scorecard.contains("escapes the manifest directory"),
+        "{scorecard}"
+    );
+}
+
+/// A megabyte manifest can name millions of cases; the run is bounded.
+#[test]
+fn a_conformance_manifest_over_the_case_cap_is_refused() {
+    let dir = sandbox("conformance-cases");
+    let manifest = dir.join("manifest.json");
+    let cases: Vec<String> = (0..4097)
+        .map(|index| {
+            format!(
+                "{{\"kind\":\"valid\",\"name\":\"c{index}\",\"path\":\"c{index}.ainf\",\"expected_code\":\"\",\"sha256\":\"\",\"size\":0}}"
+            )
+        })
+        .collect();
+    write(
+        &manifest,
+        format!(
+            "{{\"format\":\"active-conformance/1\",\"version\":\"test\",\"cases\":[{}]}}",
+            cases.join(",")
+        )
+        .as_bytes(),
+    );
+    let output = run(&[
+        "conformance",
+        "run",
+        "--manifest",
+        manifest.to_str().expect("utf8"),
+    ]);
+    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+    assert!(stderr(&output).contains("at most"), "{}", stderr(&output));
+}
+
+/// A bench invocation is bounded by the bytes it processes.
+#[test]
+fn bench_refuses_more_work_than_the_budget() {
+    let dir = sandbox("bench-budget");
+    let input = dir.join("input.bin");
+    // A 1 MiB image: the iteration count stays under the iteration cap while
+    // the product clears the 8 GiB work budget.
+    let source = format!("name = \"{}\"\n", "x".repeat(1 << 20));
+    let module = from_active_source(&source, "bench.active").expect("parse");
+    let bytes = encode(&module).expect("encode");
+    write(&input, &bytes);
+    let bytes = bytes.len() as u64;
+    // Pick an iteration count whose product clears 8 GiB.
+    let iterations = (8u64 << 30) / bytes + 2;
+    let output = run(&[
+        "bench",
+        "validate",
+        input.to_str().expect("utf8"),
+        "--iterations",
+        &iterations.to_string(),
+    ]);
+    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+    assert!(stderr(&output).contains("exceed"), "{}", stderr(&output));
+}

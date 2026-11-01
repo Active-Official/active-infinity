@@ -57,6 +57,22 @@ fuzz_target!(|data: &[u8]| {
 
     // A hostile dictionary is as untrusted as the frame.
     let split = data.len() / 2;
-    let _ = decompress_with_dictionary(&data[..split], 64, &data[split..]);
-    let _ = decompress_with_dictionary(data, 64, data);
+    // Fail-closed cases that a regression could turn into an empty success.
+    assert_eq!(
+        decompress(&[], 64).expect_err("empty input").code(),
+        "infinity/compression"
+    );
+    let skippable_only = [0x50u8, 0x2A, 0x4D, 0x18, 4, 0, 0, 0, 0, 0, 0, 0];
+    assert_eq!(
+        decompress(&skippable_only, 64)
+            .expect_err("skippable-only input")
+            .code(),
+        "infinity/compression"
+    );
+    if let Ok(output) = decompress_with_dictionary(&data[..split], 64, &data[split..]) {
+        assert!(output.len() <= 64, "dictionary decode passed the ceiling");
+    }
+    if let Ok(output) = decompress_with_dictionary(data, 64, data) {
+        assert!(output.len() <= 64, "dictionary decode passed the ceiling");
+    }
 });

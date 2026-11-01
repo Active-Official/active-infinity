@@ -643,3 +643,19 @@ fn a_reversed_min_max_constraint_is_refused() {
     assert_eq!(error.code(), "infinity/node", "{error}");
     assert!(error.to_string().contains("min bound"), "{error}");
 }
+
+/// A forged self-loop with out-of-range endpoints is a forged edge, not a
+/// graph property: a caller that alerts on `infinity/edge` must see it.
+#[test]
+fn a_forged_self_loop_out_of_range_is_an_edge() {
+    let mut bytes = two_tables();
+    let edges = Header::parse(&bytes).expect("header").span(Section::Edges);
+    assert!(edges.count > 0);
+    // The last row, so the sortedness check cannot fire first.
+    let at = edges.offset as usize + (edges.count as usize - 1) * 8;
+    bytes[at..at + 4].copy_from_slice(&u32::MAX.to_le_bytes());
+    bytes[at + 4..at + 8].copy_from_slice(&u32::MAX.to_le_bytes());
+    rewrite_hash(&mut bytes);
+    let error = validate(&bytes).expect_err("a forged edge is refused");
+    assert_eq!(error.code(), "infinity/edge", "{error:?}");
+}

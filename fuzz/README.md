@@ -58,3 +58,13 @@ deterministic, contain no customer data, and are treated as hostile input.
 Pull requests run a short campaign per target; `main` and the nightly lane run
 a longer one. A crash, an assertion failure, or a new artifact fails the lane;
 the artifact is attached to the issue with the input that produced it.
+
+- `fuzz_signed_image`: untrusted-input target added in the I-16 re-audit.
+
+- `fuzz_proof_sidecar`: untrusted-input target added in the I-16 re-audit.
+
+- `fuzz_schema`: untrusted-input target added in the I-16 re-audit.
+
+- `fuzz_delta_frames`: untrusted-input target added in the I-16 re-audit.
+
+- `fuzz_merge`: untrusted-input target added in the I-16 re-audit.

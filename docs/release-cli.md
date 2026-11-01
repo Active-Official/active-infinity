@@ -8,7 +8,7 @@ library. Release it only after the library version it pins is live.
 1. `Cargo.toml` `version` is higher than the reserved crate on crates.io
    (`cargo info active-infinity-cli`).
 2. `active-infinity = { version = "X.Y.Z" }` names a published library version,
-   and every feature the CLI enables (`active-core`, `json`, `zstd`) exists in
+   and every feature the CLI enables (`active-core`, `json`, `zstd`, `signatures`) exists in
    that release.
 3. `Cargo.lock` is committed (CI runs `cargo test --locked`).
 4. `README.md`, description, keywords, categories and both license files are in

@@ -31,6 +31,11 @@ TARGETS = [
     "fuzz_unit_discriminants",
     "fuzz_projection_agreement",
     "fuzz_compressed_frame",
+    "fuzz_signed_image",
+    "fuzz_proof_sidecar",
+    "fuzz_schema",
+    "fuzz_delta_frames",
+    "fuzz_merge",
 ]
 
 

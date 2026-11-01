@@ -60,24 +60,30 @@ fuzz_target!(|data: &[u8]| {
     while cursor < stream.len() {
         let take = 1 + (data[selector % data.len()] as usize % 41);
         let end = (cursor + take).min(stream.len());
-        if decoder.push_bytes(&stream[cursor..end]).is_err() {
-            break;
-        }
+        decoder
+            .push_bytes(&stream[cursor..end])
+            .expect("a legal split is accepted");
         cursor = end;
         selector += 1;
     }
-    if cursor == stream.len() {
-        let streamed = decoder
-            .finish()
-            .expect("a fully consumed valid stream must finish");
-        assert_eq!(streamed.image, whole, "split reassembly changed the image");
-    }
+    assert_eq!(cursor, stream.len(), "every byte was fed");
+    let streamed = decoder
+        .finish()
+        .expect("a fully consumed valid stream must finish");
+    assert_eq!(streamed.image, whole, "split reassembly changed the image");
 
-    // 3. Arbitrary bytes are total.
-    let _ = decode_stream(data);
+    // 3. Arbitrary bytes are total and every refusal carries a stream code.
+    if let Err(error) = decode_stream(data) {
+        assert!(
+            error.code().starts_with("infinity/"),
+            "arbitrary input produced a non-codec error: {error}"
+        );
+    }
     let mut arbitrary = StreamDecoder::new();
-    if arbitrary.push_bytes(data).is_ok() {
-        let _ = arbitrary.finish();
+    if let Err(error) = arbitrary.push_bytes(data) {
+        assert!(error.code().starts_with("infinity/"));
+    } else if let Err(error) = arbitrary.finish() {
+        assert!(error.code().starts_with("infinity/"));
     }
 
     // 4. Corrupt one frame byte and require a clean refusal or a canonical
@@ -85,7 +91,7 @@ fuzz_target!(|data: &[u8]| {
     // input is too small to reach a payload.
     if data.len() > 1 && !frames.is_empty() {
         let mut corrupted = stream.clone();
-        let index = 1 + (data[1] as usize % corrupted.len());
+        let index = (1 + (data[1] as usize % corrupted.len())).min(corrupted.len() - 1);
         corrupted[index] ^= 1 << (data[0] % 8);
         match decode_stream(&corrupted) {
             // A one-bit change either fails the frame checksum or reaches the
@@ -102,13 +108,22 @@ fuzz_target!(|data: &[u8]| {
         }
     }
 
-    // 5. Truncating the stream never panics.
+    // 5. Truncating the stream never panics and never finishes successfully.
     for cut in [1usize, 3, 7, stream.len() / 2] {
         if cut < stream.len() {
             let mut decoder = StreamDecoder::new();
-            if decoder.push_bytes(&stream[..cut]).is_ok() {
-                let _ = decoder.finish();
-            }
+            let truncated = match decoder.push_bytes(&stream[..cut]) {
+                Ok(()) => decoder.finish(),
+                Err(error) => Err(error),
+            };
+            let error = truncated.expect_err("a truncated stream must not finish");
+            assert!(
+                matches!(
+                    error.code(),
+                    "infinity/truncated" | "infinity/stream-unterminated" | "infinity/stream-state"
+                ),
+                "truncation code: {error}"
+            );
         }
     }
 

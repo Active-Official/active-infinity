@@ -51,7 +51,7 @@ Without `--output`, commands that emit bytes write to stdout.
 | Code | Meaning |
 |------|---------|
 | `0` | Success. |
-| `1` | Validation, verification, I/O or codec failure (message starts with the stable `infinity/...` code). |
+| `1` | Validation, verification, codec or I/O failure. Codec and verification failures start with the stable `infinity/...` code; I/O failures are plain text, as the man page says. |
 | `2` | Usage error (unknown command, missing argument, bad flag). |
 
 ## Examples

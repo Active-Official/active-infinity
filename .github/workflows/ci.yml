@@ -463,9 +463,14 @@ jobs:
             fuzz_secret_positions \
             fuzz_unit_discriminants \
             fuzz_projection_agreement \
+            fuzz_signed_image \
+            fuzz_proof_sidecar \
+            fuzz_schema \
+            fuzz_delta_frames \
+            fuzz_merge \
             fuzz_compressed_frame; do
             echo "== $target =="
-            cargo fuzz run "$target" -- -runs=2000 -timeout=25 -rss_limit_mb=2048 -print_final_stats=1
+            cargo fuzz run "$target" -- -runs=2000 -timeout=10 -rss_limit_mb=2048 -print_final_stats=1
           done
       # A crash is only actionable if the input survives the runner.
       - name: Upload crashing inputs

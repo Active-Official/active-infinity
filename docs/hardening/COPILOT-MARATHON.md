@@ -28,8 +28,8 @@ the code → regression test first → minimal fix → targeted tests + clippy �
 | I-12 | interop / protobuf | `src/interop.rs`, `src/protobuf.rs` | **CLEAN** (round 2: blob hash, marker, budget) | 12 fixed, 2 rejected/documented | this commit |
 | I-13 | error codes | `src/error.rs` | **CLEAN** (round 2: fatality, stream codes) | 17 fixed, 2 rejected | this commit |
 | I-14 | FFI | `ffi/**` | **CLEAN** (round 2 registry, round 3 DeepSeek) | 21 fixed, 9 documented | this commit |
-| I-15 | CLI | `cli/active-infinity-cli/**` | **CLEAN** | 13 fixed, 2 documented | this commit |
-| I-16 | fuzz targets | `fuzz/**` | **CLEAN** | 11 fixed, 2 documented | this commit |
+| I-15 | CLI | `cli/active-infinity-cli/**` | **CLEAN** (round 2 DeepSeek: empty-value policy, containment) | 25 fixed, 3 documented | this commit |
+| I-16 | fuzz targets | `fuzz/**` | **CLEAN** (round 2: dead oracle repaired, 5 targets added) | 28 fixed, 3 documented | this commit |
 
 ## Cross-cutting passes (after the sections)
 
@@ -867,3 +867,58 @@ rewritten allocator.
 
 Gate: 27 FFI tests, clippy clean; each new behavioural test proved against the
 pre-fix tree.
+
+### Re-audit round 2 (I-15) - 2026-10-31
+
+Reviewer: DeepSeek V4.1 through the Copilot CLI (`xhigh`). It reproduced two
+findings live on this host. Findings: 1 high, 6 medium, 8 low.
+
+| # | Severity | Finding | Disposition |
+|---|---|---|---|
+| 1 | high | `--key ""` was filtered to `None`, so `store get --verify --key "$UNSET"` verified against the object's own embedded signer and bypassed the `--key needs --verify` guard | **fixed**: a present `--key` is always parsed, so an empty value is a usage error; `store_get_refuses_an_empty_key_and_root` (fails pre-fix: exit 1 instead of 2) |
+| 2 | medium | the conformance case guard only rejected absolute paths and `..`; `base.join("\\Windows\\win.ini")` replaced the base and read an arbitrary file | **fixed**: every component must be `Normal`, the resolved path is canonicalized and must start with the canonical base; `a_conformance_case_outside_the_base_is_refused` (fails pre-fix) |
+| 3 | medium | `--schema ""` silently disabled schema validation (`issue` emitted `schema_hash: null`) | **fixed**: a usage error, resolved after `check_flags`; `proof_refuses_an_empty_schema` (fails pre-fix: exit 0) |
+| 4 | medium | `get_signature(...).ok().flatten()` swallowed a tampered or unreadable envelope, removing the only pointer to `--verify` | **fixed**: `Err` prints a warning that the stored signature cannot be read |
+| 5 | medium | `ACTIVE_INFINITY_SIGN_SEED` signed silently, and an empty value stored an unsigned object | **fixed**: signing from the environment prints the source; a set-but-empty value is a usage error |
+| 6 | medium | `Store::open` ran before argument validation, so a usage error created `.active-store` (or a whole tree) | **fixed**: the store is opened inside each action after flags, arity and the hash parse; `a_usage_error_does_not_create_the_store` (fails pre-fix) |
+| 7 | medium | conformance had no case or byte budget: a 1 MiB manifest can name 14k cases of up to 1 GiB each | **fixed**: 4096 cases and a 1 GiB read budget; `a_conformance_manifest_over_the_case_cap_is_refused` (fails pre-fix) |
+| 8 | low | the seed hex stayed in the heap while only the `[u8; 32]` was zeroized | **documented**: `--sign-file` reads through a `String`; wiping it needs an allocator-visible buffer, and the CLI already never logs it |
+| 9 | low | `File::open` preceded the regular-file check, so a FIFO path could block | **fixed**: `symlink_metadata` first, then open and re-check |
+| 10 | low | the `stream` command read its container with the image ceiling, refusing a valid stream whose frame headers push it over | **fixed**: a stream ceiling (image ceiling + 64 MiB) |
+| 11 | low | empty `--name`/`--root` fell back to defaults silently | **fixed**: both are usage errors |
+| 12 | low | `doctor`'s feature list is hard-coded; `docs/release-cli.md` omitted `signatures`; the README exit table contradicted the man page | **fixed** for the docs; `doctor` stays literal because the CLI always enables all four features |
+| 13 | low | `bench` had no aggregate work bound and printed the raw path in the machine line | **fixed**: 8 GiB processed-byte budget, the path moves to stderr; `bench_refuses_more_work_than_the_budget` (fails pre-fix: exit 0) |
+| 14 | low | `--schema` was read before `check_flags`, so a usage error performed I/O | **fixed** by the #3 restructure |
+| 15 | low | the scorecard's `detail` echoed the resolved absolute path | **fixed**: only the reason is kept |
+
+Gate: 36 CLI tests, clippy clean; 7 new tests, each proved to fail pre-fix.
+
+### Re-audit round 2 (I-16) - 2026-10-31
+
+Reviewer: DeepSeek V4.1 through the Copilot CLI (`xhigh`), which replayed the
+corpora and the helper probes. Findings: 3 high, 9 medium, 5 low.
+
+| # | Severity | Finding | Disposition |
+|---|---|---|---|
+| 1 | high | `table_children` read the **Children** section for a table; field node ids live in **Fields** (entry + 8), so `fuzz_graph_cycles` returned before any mutation | **fixed**: reads `Section::Fields`, checks every offset |
+| 2 | high | `repoint_ref` rebuilt only Ref-derived edges but compared against the total count, so it returned `false` for every input and the self-loop/ring oracles never ran | **fixed**: the one affected pair is replaced in the existing table, re-sorted and rehashed |
+| 3 | medium | the self-loop oracle expected `infinity/edge` while the validator emits `infinity/cycle` | **fixed**: the oracle names the cycle code |
+| 4 | medium | a forged `(u32::MAX, u32::MAX)` edge was classified as a cycle before the range check | **fixed**: range, then sortedness, then self-loop; `a_forged_self_loop_out_of_range_is_an_edge` (pre-fix: `infinity/cycle`) |
+| 5 | medium | a rejected legal split and a failed truncation `finish` were silently dropped | **fixed**: the split must be accepted, every byte fed, and a truncated stream must fail with a truncation code |
+| 6 | medium | decode, strict decode, encode, view and projection results were discarded with `let _`/`if let Ok` | **fixed**: validated input must decode, strict decode must agree with `validate_canonical`, encode must succeed, the view must open, the projection must succeed |
+| 7 | medium | secret and cyclic projection results were ignored | **fixed**: a valid module must project; a cyclic module must be refused with `infinity/cycle` |
+| 8 | high | no target covered Delta frames, the schema class, proof sidecars, signed envelopes or merge | **fixed**: five targets added (`fuzz_delta_frames`, `fuzz_schema`, `fuzz_proof_sidecar`, `fuzz_signed_image`, `fuzz_merge`) with seeds, registered in Cargo, the Docker driver, both workflows, the README and CORPUS.md |
+| 9 | medium | the fuzz build dropped `active-core` and never enabled `signatures`, so the default bridge and the envelope were unfuzzable | **fixed**: the fuzz crate compiles the shipped default set plus `json`, `zstd`, `signatures` |
+| 10 | medium | committed seeds never reached the claimed surfaces | **partly fixed**: every target has a seed and the new targets own theirs; the selector-based layout/unit targets are documented as a residual |
+| 11 | medium | no regression seed named after a fixed bug | **partly fixed**: the graph target's seed plus the five new ones; a bug-to-seed mapping file is a policy change, documented in CORPUS.md |
+| 12 | medium | the compressed target asserted neither the empty-input nor the skippable-only refusal, and discarded dictionary results | **fixed**: both refusals are asserted, and a dictionary decode must stay under the ceiling |
+| 13 | low | the corruption index could equal the buffer length | **fixed**: clamped |
+| 14 | low | no overflow checks in the fuzz profile; a 25 s timeout on a 4 KB input | **fixed** for the timeout (10 s in both lanes); the profile is cargo-fuzz's, documented |
+| 15 | low | the manifest test was textual | **unchanged**: the test still asserts the lane/doc/seed agreement; a structural parse is a later refinement |
+| 16 | low | the named-unit branch accepted any `infinity/*` code | **fixed**: `infinity/unit-ref` |
+| 17 | low | every canonical mutation was rehashed, so an un-rehashed change was never checked | **fixed**: a payload flip without a rehash must fail validation |
+
+Verification: `cargo check --manifest-path fuzz/Cargo.toml` builds all 14 targets;
+`cargo fuzz run fuzz_graph_cycles` in `active-fuzz:1.88` exercises the repaired
+oracle; the manifest reverse gate compares Cargo, the Docker driver, both
+workflows and the docs.

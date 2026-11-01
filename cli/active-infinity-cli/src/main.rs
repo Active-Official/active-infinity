@@ -28,6 +28,17 @@ const MAX_SEED_BYTES: u64 = 4 << 10;
 /// Largest `bench --iterations` value.
 const MAX_BENCH_ITERATIONS: usize = 1_000_000;
 
+/// Cases one manifest may declare. A megabyte manifest can name millions of
+/// files; the cap keeps a hostile pack from turning the scorecard into a bulk
+/// reader.
+const MAX_CONFORMANCE_CASES: usize = 4096;
+
+/// Total case bytes one conformance run may read.
+const MAX_CONFORMANCE_BYTES: u64 = 1 << 30;
+
+/// Total bytes one bench invocation may process (iterations x input size).
+const MAX_BENCH_BYTES: u64 = 8 << 30;
+
 fn main() -> ExitCode {
     match run(std::env::args().skip(1).collect()) {
         Ok(()) => ExitCode::SUCCESS,
@@ -83,11 +94,15 @@ fn run(args: Vec<String>) -> Result<(), String> {
             let (positional, flags) = split_args(&args[1..])?;
             check_flags(&flags, &["--name", "--output"], usage)?;
             check_positional(&positional, 1, usage)?;
-            let name = flags
-                .get("--name")
-                .filter(|value| !value.is_empty())
-                .cloned()
-                .unwrap_or_else(|| "module.active".to_string());
+            let name = match flags.get("--name") {
+                None => "module.active".to_string(),
+                // A set-but-empty value is a variable that did not expand, not
+                // a request for the default name.
+                Some(value) if value.is_empty() => {
+                    return Err("usage: --name needs a value".to_string())
+                }
+                Some(value) => value.clone(),
+            };
             let source = read_text(&positional[0], MAX_SOURCE_BYTES)?;
             let module = from_active_source(&source, &name)
                 .map_err(|error| format!("{}: {}", error.code(), error))?;
@@ -139,7 +154,10 @@ fn stream_command(args: &[String]) -> Result<(), String> {
     let (positional, flags) = split_args(&args[1..])?;
     check_flags(&flags, &[], usage)?;
     check_positional(&positional, 1, usage)?;
-    let bytes = read(&positional[0])?;
+    // A stream carries a 32-byte header per frame, so a valid container is
+    // larger than the image it describes. The stream ceiling leaves room for
+    // the frame overhead at the smallest chunk size.
+    let bytes = read_capped(Path::new(&positional[0]), stream_ceiling())?;
     let mut decoder = StreamDecoder::new();
     decoder
         .push_bytes(&bytes)
@@ -159,16 +177,19 @@ fn stream_command(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+/// The store directory from `--root`; a set-but-empty value is a usage error.
+fn store_root(flags: &BTreeMap<String, String>) -> Result<String, String> {
+    match flags.get("--root") {
+        None => Ok(".active-store".to_string()),
+        Some(value) if value.is_empty() => Err("usage: --root needs a directory".to_string()),
+        Some(value) => Ok(value.clone()),
+    }
+}
+
 fn store_command(args: &[String]) -> Result<(), String> {
     let usage = "usage: store put <image> [--root DIR] [--sign SEED_HEX | --sign-file PATH]\n       store get <hash> [--root DIR] [--output PATH] [--verify] [--key PUBLIC_HEX]\n       store signature <hash> [--root DIR]";
     let (positional, flags) = split_args(&args[1..])?;
     let action = positional.first().ok_or_else(|| usage.to_string())?;
-    let root = flags
-        .get("--root")
-        .filter(|value| !value.is_empty())
-        .cloned()
-        .unwrap_or_else(|| ".active-store".to_string());
-    let store = Store::open(root).map_err(|error| format!("{}: {}", error.code(), error))?;
     match action.as_str() {
         "put" => {
             check_flags(&flags, &["--root", "--sign", "--sign-file"], usage)?;
@@ -176,6 +197,10 @@ fn store_command(args: &[String]) -> Result<(), String> {
             if flags.contains_key("--sign") && flags.contains_key("--sign-file") {
                 return Err("usage: --sign and --sign-file are mutually exclusive".to_string());
             }
+            // Open the store only after every argument is known to be valid: a
+            // typo must not create a store directory (it may later be committed).
+            let store = Store::open(store_root(&flags)?)
+                .map_err(|error| format!("{}: {}", error.code(), error))?;
             let image = read(&positional[1])?;
             let hash = match signing_seed(&flags)? {
                 Some(mut seed) => {
@@ -197,23 +222,39 @@ fn store_command(args: &[String]) -> Result<(), String> {
             check_flags(&flags, &["--root", "--output", "--verify", "--key"], usage)?;
             check_positional(&positional, 2, usage)?;
             let hash = parse_hash(&positional[1])?;
-            let trusted = flags.get("--key").filter(|key| !key.is_empty());
+            // A present `--key` is always parsed: an empty value is a variable
+            // that did not expand, and treating it as absent would silently drop
+            // the pinned signer.
+            let trusted = flags
+                .get("--key")
+                .map(|key| parse_public_key(key))
+                .transpose()?;
             let verifying = flags.contains_key("--verify");
             if trusted.is_some() && !verifying {
                 return Err("usage: --key needs --verify".to_string());
             }
+            let store = Store::open(store_root(&flags)?)
+                .map_err(|error| format!("{}: {}", error.code(), error))?;
             let image = if verifying {
                 match trusted {
                     Some(public) => store
-                        .get_verified_with_key(&hash, &parse_public_key(public)?)
+                        .get_verified_with_key(&hash, &public)
                         .map_err(|error| format!("{}: {error}", error.code()))?,
                     None => store
                         .get_verified(&hash, None)
                         .map_err(|error| format!("{}: {error}", error.code()))?,
                 }
             } else {
-                if store.get_signature(&hash).ok().flatten().is_some() {
-                    eprintln!("note: this object has a signature; pass --verify to require it");
+                // A signature that cannot be read is still evidence that one
+                // exists: fail open only after saying so.
+                match store.get_signature(&hash) {
+                    Ok(Some(_)) => {
+                        eprintln!("note: this object has a signature; pass --verify to require it");
+                    }
+                    Ok(None) => {}
+                    Err(_) => eprintln!(
+                        "warning: a stored signature for this object cannot be read; pass --verify to check it"
+                    ),
                 }
                 store
                     .get(&hash)
@@ -225,6 +266,8 @@ fn store_command(args: &[String]) -> Result<(), String> {
             check_flags(&flags, &["--root"], usage)?;
             check_positional(&positional, 2, usage)?;
             let hash = parse_hash(&positional[1])?;
+            let store = Store::open(store_root(&flags)?)
+                .map_err(|error| format!("{}: {}", error.code(), error))?;
             let signed = store
                 .get_signature(&hash)
                 .map_err(|error| format!("{}: {error}", error.code()))?
@@ -325,18 +368,28 @@ fn flag_number(
     }
 }
 
+/// Read `--schema`, refusing a set-but-empty value.
+///
+/// An empty path would otherwise disable schema validation silently: `issue`
+/// would emit `schema_hash: null` and `verify` would stop requiring the
+/// companion the operator meant to enforce.
+fn schema_arg(flags: &BTreeMap<String, String>) -> Result<Option<Vec<u8>>, String> {
+    match flags.get("--schema") {
+        None => Ok(None),
+        Some(path) if path.is_empty() => Err("usage: --schema needs a path".to_string()),
+        Some(path) => Ok(Some(read(path)?)),
+    }
+}
+
 fn proof_command(args: &[String]) -> Result<(), String> {
     let (positional, flags) = split_args(&args[1..])?;
     let usage = "usage: proof issue <image> [--schema PATH] [--output PATH]\n       proof verify <image> <proof> [--schema PATH]";
     let action = positional.first().ok_or_else(|| usage.to_string())?;
-    let schema = match flags.get("--schema").filter(|path| !path.is_empty()) {
-        Some(path) => Some(read(path)?),
-        None => None,
-    };
     match action.as_str() {
         "issue" => {
             check_flags(&flags, &["--schema", "--output"], usage)?;
             check_positional(&positional, 2, usage)?;
+            let schema = schema_arg(&flags)?;
             let image = read(&positional[1])?;
             let proof = Proof::issue_with_schema(&image, schema.as_deref())
                 .map_err(|error| format!("{}: {error}", error.code()))?;
@@ -347,6 +400,7 @@ fn proof_command(args: &[String]) -> Result<(), String> {
         "verify" => {
             check_flags(&flags, &["--schema"], usage)?;
             check_positional(&positional, 3, usage)?;
+            let schema = schema_arg(&flags)?;
             let image = read(&positional[1])?;
             let text = read_text(
                 &positional[2],
@@ -527,6 +581,11 @@ fn bench_command(args: &[String]) -> Result<(), String> {
         ));
     }
     let bytes = read(path)?;
+    if (bytes.len() as u64).saturating_mul(iterations as u64) > MAX_BENCH_BYTES {
+        return Err(format!(
+            "usage: iterations x input bytes must not exceed {MAX_BENCH_BYTES}"
+        ));
+    }
     let decoded = if operation == "encode" {
         Some(
             decode_with(&bytes, DecodeOpts::default())
@@ -547,13 +606,16 @@ fn bench_command(args: &[String]) -> Result<(), String> {
         samples.push(start.elapsed().as_nanos() as u64);
     }
     samples.sort_unstable();
+    // The line is machine-parsed: keep the input path out of it (a path can
+    // contain spaces, `=`, or a newline).
     println!(
-        "op={operation} file={path} bytes={} iterations={iterations} p50_ns={} p95_ns={} p99_ns={}",
+        "op={operation} bytes={} iterations={iterations} p50_ns={} p95_ns={} p99_ns={}",
         bytes.len(),
         percentile(&samples, 50),
         percentile(&samples, 95),
         percentile(&samples, 99)
     );
+    eprintln!("benched {path}");
     Ok(())
 }
 
@@ -609,28 +671,37 @@ fn conformance(args: &[String]) -> Result<(), String> {
         .map_err(|error| format!("manifest is not JSON: {error}"))?;
     // Case paths resolve against the manifest's `base` (relative to the
     // manifest's own directory; the repository manifest uses `..` because its
-    // paths are repository-relative). A case path itself may not be absolute
-    // or climb out with `..`.
+    // paths are repository-relative).
     let base = manifest["base"].as_str().unwrap_or(".");
     let base = Path::new(&manifest_path)
         .parent()
         .filter(|path| !path.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."))
         .join(base);
+    // Containment is proved on the canonical path, not on the spelling: a
+    // `Component::Prefix` or a rooted path makes `join` replace the base, and a
+    // symlinked case file can point anywhere.
+    let canonical_base = fs::canonicalize(&base)
+        .map_err(|error| format!("manifest base {}: {error}", base.display()))?;
     let cases = manifest["cases"]
         .as_array()
         .ok_or_else(|| "manifest has no cases array".to_string())?;
+    if cases.len() > MAX_CONFORMANCE_CASES {
+        return Err(format!(
+            "usage: a manifest may carry at most {MAX_CONFORMANCE_CASES} cases"
+        ));
+    }
     let mut results = Vec::new();
     let mut passed = 0usize;
+    let mut read_bytes = 0u64;
     for case in cases {
         let name = case["name"].as_str().unwrap_or("?");
         let kind = case["kind"].as_str().unwrap_or("");
         let relative = case["path"].as_str().unwrap_or("");
         let relative = Path::new(relative);
-        if relative.is_absolute()
-            || relative
-                .components()
-                .any(|component| matches!(component, Component::ParentDir))
+        if relative
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
         {
             results.push(json!({
                 "name": name,
@@ -641,9 +712,43 @@ fn conformance(args: &[String]) -> Result<(), String> {
             continue;
         }
         let path = base.join(relative);
-        let result = match read(&path) {
-            Ok(bytes) => check_case(kind, &bytes, case),
-            Err(error) => Err(error),
+        let canonical = match fs::canonicalize(&path) {
+            Ok(canonical) => canonical,
+            Err(_) => {
+                results.push(json!({
+                    "name": name,
+                    "kind": kind,
+                    "passed": false,
+                    "detail": "case file is missing",
+                }));
+                continue;
+            }
+        };
+        if !canonical.starts_with(&canonical_base) {
+            results.push(json!({
+                "name": name,
+                "kind": kind,
+                "passed": false,
+                "detail": "case path escapes the manifest directory",
+            }));
+            continue;
+        }
+        let result = match read_capped(&canonical, input_ceiling()) {
+            Ok(bytes) => {
+                read_bytes = read_bytes.saturating_add(bytes.len() as u64);
+                if read_bytes > MAX_CONFORMANCE_BYTES {
+                    return Err(format!(
+                        "usage: the manifest's cases exceed the {MAX_CONFORMANCE_BYTES} byte read budget"
+                    ));
+                }
+                check_case(kind, &bytes, case)
+            }
+            // The reason matters; the runner's absolute path does not belong in
+            // a published scorecard.
+            Err(error) => Err(error
+                .split_once(": ")
+                .map(|(_, reason)| reason.to_string())
+                .unwrap_or(error)),
         };
         let ok = result.is_ok();
         if ok {
@@ -789,6 +894,15 @@ fn input_ceiling() -> u64 {
     Limits::default().max_total_bytes.saturating_add(4096)
 }
 
+/// Largest stream container: the image ceiling plus frame overhead.
+///
+/// A frame is a 32-byte header plus at most `MAX_FRAME_PAYLOAD` bytes, so even
+/// the smallest chunk size adds 32 bytes per 4 KiB of image. 64 MiB covers a
+/// 1 GiB image at 512-byte chunks.
+fn stream_ceiling() -> u64 {
+    input_ceiling().saturating_add(64 << 20)
+}
+
 fn read(path: impl AsRef<Path>) -> Result<Vec<u8>, String> {
     read_capped(path.as_ref(), input_ceiling())
 }
@@ -799,6 +913,12 @@ fn read_text(path: &str, limit: u64) -> Result<String, String> {
 }
 
 fn read_capped(path: &Path, limit: u64) -> Result<Vec<u8>, String> {
+    // Refuse a non-regular path before opening it: `open` on a FIFO blocks
+    // until a writer appears, which turns a bad argument into a hang.
+    let declared = fs::symlink_metadata(path).map_err(|error| error.to_string())?;
+    if !declared.file_type().is_file() {
+        return Err(format!("{}: not a regular file", path.display()));
+    }
     let file = fs::File::open(path).map_err(|error| error.to_string())?;
     let meta = file.metadata().map_err(|error| error.to_string())?;
     if !meta.is_file() {
@@ -905,11 +1025,23 @@ fn signing_seed(flags: &BTreeMap<String, String>) -> Result<Option<[u8; 32]>, St
         return parse_seed(text.trim()).map(Some);
     }
     if let Some(seed) = flags.get("--sign") {
+        if seed.is_empty() {
+            return Err("usage: --sign needs a hex seed".to_string());
+        }
         return parse_seed(seed).map(Some);
     }
     match std::env::var("ACTIVE_INFINITY_SIGN_SEED") {
-        Ok(seed) if !seed.is_empty() => parse_seed(&seed).map(Some),
-        _ => Ok(None),
+        Ok(seed) if seed.is_empty() => Err(
+            "usage: ACTIVE_INFINITY_SIGN_SEED is set but empty; unset it or provide a seed"
+                .to_string(),
+        ),
+        Ok(seed) => {
+            // Signing from the environment is still signing: say so, or an
+            // operator cannot tell a signed object from an unsigned one.
+            eprintln!("note: signed with the seed from ACTIVE_INFINITY_SIGN_SEED");
+            parse_seed(&seed).map(Some)
+        }
+        Err(_) => Ok(None),
     }
 }
 

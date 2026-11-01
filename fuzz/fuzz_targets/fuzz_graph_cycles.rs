@@ -88,13 +88,13 @@ fuzz_target!(|data: &[u8]| {
         }
     }
 
-    // Self-loop: the edge-table contract rejects a `from == to` row as
-    // `infinity/edge` before acyclicity runs; the important property is that
-    // it is refused structurally, not by the depth ceiling.
+    // Self-loop: the validator names the node on a cycle
+    // (`infinity/cycle`); the important property is that it is refused
+    // structurally, not by the depth ceiling.
     let mut self_loop = image.clone();
     if common::repoint_ref(&mut self_loop, first, first) {
         let error = validate(&self_loop).expect_err("a self-loop must be refused");
-        assert_eq!(error.code(), "infinity/edge", "self-loop code");
+        assert_eq!(error.code(), "infinity/cycle", "self-loop code");
         assert!(decode(&self_loop).is_err(), "a cycle must not decode");
     }
 

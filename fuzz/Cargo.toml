@@ -9,7 +9,9 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
-active-infinity = { path = "..", default-features = false, features = ["json", "zstd"] }
+# The fuzz build must be the shipped default set: a panic in the default
+# `active-core` bridge or in the signature envelope is otherwise unfuzzable.
+active-infinity = { path = "..", features = ["json", "zstd", "signatures"] }
 
 [[bin]]
 name = "fuzz_decode_infinity"
@@ -70,6 +72,41 @@ bench = false
 [[bin]]
 name = "fuzz_compressed_frame"
 path = "fuzz_targets/fuzz_compressed_frame.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_signed_image"
+path = "fuzz_targets/fuzz_signed_image.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_proof_sidecar"
+path = "fuzz_targets/fuzz_proof_sidecar.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_schema"
+path = "fuzz_targets/fuzz_schema.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_delta_frames"
+path = "fuzz_targets/fuzz_delta_frames.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_merge"
+path = "fuzz_targets/fuzz_merge.rs"
 test = false
 doc = false
 bench = false

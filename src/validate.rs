@@ -1839,13 +1839,15 @@ impl<'a> Validated<'a> {
         for index in 0..count {
             let from = read_u32(self.buf, base + index as usize * 8)?;
             let to = read_u32(self.buf, base + index as usize * 8 + 4)?;
+            // Range first: `(u32::MAX, u32::MAX)` is a forged row, not a cycle,
+            // and a caller that alerts on `infinity/edge` must see it.
+            if from >= node_count || to >= node_count {
+                return Err(Error::Edge { from, to });
+            }
             if from == to {
                 // A node that depends on itself is a cycle, and the contract for
                 // a cycle names the node.
                 return Err(Error::Cycle { node: from });
-            }
-            if from >= node_count || to >= node_count {
-                return Err(Error::Edge { from, to });
             }
             if let Some(previous) = previous {
                 if previous >= (from, to) {

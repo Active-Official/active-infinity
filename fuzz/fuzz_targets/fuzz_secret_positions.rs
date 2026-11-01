@@ -64,8 +64,11 @@ fuzz_target!(|data: &[u8]| {
     // Debug is an export path.
     assert_absent("Debug", &format!("{module:?}"), &literal);
 
-    // JSON projection.
-    if let Ok(json) = to_redacted_json(&module) {
+    // JSON projection. This module is valid, so a failure here is the bug: an
+    // `if let Ok` would skip the core secrecy oracle whenever the projection
+    // started refusing.
+    let json = to_redacted_json(&module).expect("a valid module projects");
+    {
         assert_absent("redacted JSON", &json, &literal);
         assert!(
             json.contains(active_infinity::interop::SECRET_MARKER),
@@ -76,7 +79,8 @@ fuzz_target!(|data: &[u8]| {
     }
 
     // Protobuf projection.
-    if let Ok(bytes) = active_infinity::to_protobuf(&module) {
+    let bytes = active_infinity::to_protobuf(&module).expect("a valid module projects");
+    {
         let text = String::from_utf8_lossy(&bytes);
         assert_absent("protobuf", &text, &literal);
         assert!(

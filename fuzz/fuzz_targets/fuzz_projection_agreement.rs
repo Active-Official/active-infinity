@@ -81,6 +81,16 @@ fuzz_target!(|data: &[u8]| {
     let a = cyclic.push(Inode::Ref(active_infinity::NodeId(1)));
     let b = cyclic.push(Inode::Ref(a));
     cyclic.set_root(Some(b));
-    let _ = active_infinity::interop::to_redacted_json(&cyclic);
-    let _ = to_protobuf(&cyclic);
+    assert_eq!(
+        active_infinity::interop::to_redacted_json(&cyclic)
+            .expect_err("a cycle must be refused")
+            .code(),
+        "infinity/cycle",
+        "JSON projection of a cycle"
+    );
+    assert_eq!(
+        to_protobuf(&cyclic).expect_err("a cycle must be refused").code(),
+        "infinity/cycle",
+        "protobuf projection of a cycle"
+    );
 });

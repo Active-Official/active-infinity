@@ -41,11 +41,10 @@ fuzz_target!(|data: &[u8]| {
     };
 
     // 2. A validated image decodes, densely and under the strict options.
-    let module = match decode(data) {
-        Ok(module) => module,
-        Err(_) => return,
-    };
-    let _ = decode_with(
+    let module = decode(data).expect("a validated image decodes");
+    // The strict options must agree with the canonical proof: a valid but
+    // non-canonical image is `infinity/not-canonical`, never a silent success.
+    let strict = decode_with(
         data,
         DecodeOpts {
             limits: Limits::default(),
@@ -53,9 +52,19 @@ fuzz_target!(|data: &[u8]| {
             verify_canonical: true,
         },
     );
+    if validate_canonical(data, Limits::default()).is_ok() {
+        assert!(strict.is_ok(), "a canonical image decodes under strict options");
+    } else {
+        assert_eq!(
+            strict.expect_err("a non-canonical image is refused").code(),
+            "infinity/not-canonical",
+            "strict decode code"
+        );
+    }
 
     // 3. Canonical identity.
-    if let Ok(image) = encode(&module) {
+    {
+        let image = encode(&module).expect("a decoded module encodes");
         assert!(
             validate_canonical(&image, Limits::default()).is_ok(),
             "the encoder must emit bytes that pass the canonical proof"
@@ -83,7 +92,8 @@ fuzz_target!(|data: &[u8]| {
     }
 
     // 4. Zero-copy views never panic on validated input.
-    if let Ok(view) = InfinityView::new(data, Limits::default()) {
+    let view = InfinityView::new(data, Limits::default()).expect("a validated image is viewable");
+    {
         assert_eq!(view.node_count(), meta.nodes);
         // The view path is O(nodes); cap the walk so one large valid input
         // cannot spend the whole fuzz budget. Large-graph projection work is
@@ -100,7 +110,8 @@ fuzz_target!(|data: &[u8]| {
     // 5. Projections are total and deterministic. A projection walks the graph,
     // so the work is bounded here; the conformance suite covers large modules.
     if meta.nodes <= 4096 {
-        let _ = active_infinity::interop::to_redacted_json(&module);
+        active_infinity::interop::to_redacted_json(&module)
+            .expect("a validated module projects");
         let _ = active_infinity::interop::provenance_lines(&module);
         let _ = active_infinity::interop::value_paths(&module);
         if let Ok(first) = active_infinity::to_protobuf(&module) {

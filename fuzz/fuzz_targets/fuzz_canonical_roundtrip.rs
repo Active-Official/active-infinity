@@ -88,6 +88,16 @@ fuzz_target!(|data: &[u8]| {
         let old = active_infinity::layout::Header::parse(&one)
             .expect("header")
             .content_hash;
+        // A change without a rehash must never validate: the stored hash
+        // covers the bytes, and a padding byte must stay zero.
+        let mut unhashed = mutated.clone();
+        let middle = unhashed.len() / 2;
+        unhashed[middle] ^= 0x01;
+        assert!(
+            validate(&unhashed).is_err(),
+            "a payload change without a rehash must fail"
+        );
+
         if common::rehash(&mut mutated) {
             match validate(&mutated) {
                 Ok(_) => {

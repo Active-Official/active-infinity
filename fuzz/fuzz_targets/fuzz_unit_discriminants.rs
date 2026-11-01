@@ -83,10 +83,10 @@ fuzz_target!(|data: &[u8]| {
             // built-in entry to it leaves that reference dangling, so the
             // image must be refused with a stable code.
             let error = outcome.expect_err("a named unit without its aux data must be refused");
-            assert!(
-                error.code().starts_with("infinity/"),
-                "unexpected code {}",
-                error.code()
+            assert_eq!(
+                error.code(),
+                "infinity/unit-ref",
+                "a dangling named unit is a reference fault"
             );
         } else {
             let error = outcome.expect_err("an unknown unit discriminant must be refused");

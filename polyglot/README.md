@@ -44,6 +44,14 @@ Build the artifacts once (from the repository root):
 | 18 | AssemblyScript | `polyglot/assemblyscript` (WASM host) | `test.js` | `polyglot-assemblyscript` |
 | 19 | Lua | `polyglot/lua` (LuaJIT FFI) | `test.lua` | `polyglot-scripting` |
 | 20 | Shell / ops | `active-infinity-cli` | `polyglot/shell/test.sh` | `polyglot-shell` |
+| 21 | Julia | `polyglot/julia` (`ccall`) | `conformance.jl` | `polyglot-julia` |
+| 22 | Fortran | `polyglot/fortran` (`iso_c_binding`) | `conformance.f90` | `polyglot-fortran` |
+| 23 | R | `polyglot/r` (base `.C` + shim) | `test_conformance.R` | `polyglot-r` |
+| 24 | COBOL | `polyglot/cobol` (GnuCOBOL `CALL STATIC`) | `conformance.cob` | `polyglot-cobol` |
+
+Rows 21-24 use a tiny C shim where the language's FFI convention cannot express
+the ABI directly (R's `.C` passes pointers; GnuCOBOL has no byte/JSON library).
+The shims are lane scaffolding; the binding calls the frozen C ABI.
 
 Every row validates an AINF image, reproduces the manifest content hash,
 re-encodes to canonical bytes, and asserts that the redaction canary

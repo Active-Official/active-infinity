@@ -279,6 +279,83 @@ jobs:
       - name: AssemblyScript conformance
         run: node polyglot/assemblyscript/test.js
 
+  polyglot-julia:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: "1"
+      - name: Build the shared library
+        working-directory: ffi/active-infinity-ffi
+        run: cargo build --locked --release
+      - name: Julia conformance
+        env:
+          ACTIVE_INFINITY_LIB: ${{ github.workspace }}/ffi/active-infinity-ffi/target/release/libactive_infinity_ffi.so
+        run: julia polyglot/julia/conformance.jl
+
+  polyglot-fortran:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install gfortran
+        run: sudo apt-get update && sudo apt-get install -y gfortran
+      - name: Build the static library
+        working-directory: ffi/active-infinity-ffi
+        run: cargo build --locked --release
+      - name: Fortran conformance
+        run: |
+          gfortran -I polyglot/fortran polyglot/fortran/active_infinity.f90 \
+            polyglot/fortran/conformance.f90 \
+            ffi/active-infinity-ffi/target/release/libactive_infinity_ffi.a \
+            -lpthread -ldl -lm -o conformance-fortran
+          ./conformance-fortran
+
+  polyglot-r:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install R
+        run: sudo apt-get update && sudo apt-get install -y r-base-core
+      - name: Build the shared library
+        working-directory: ffi/active-infinity-ffi
+        run: cargo build --locked --release
+      - name: Build the .C shim
+        run: |
+          gcc -shared -fPIC -O2 -I ffi/active-infinity-ffi/include \
+            polyglot/r/native/active_infinity_r.c \
+            ffi/active-infinity-ffi/target/release/libactive_infinity_ffi.a \
+            -lpthread -ldl -lm -o polyglot/r/active_infinity_r.so
+      - name: R conformance
+        env:
+          ACTIVE_INFINITY_LIB: ${{ github.workspace }}/ffi/active-infinity-ffi/target/release/libactive_infinity_ffi.so
+        run: Rscript polyglot/r/test_conformance.R
+
+  polyglot-cobol:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install GnuCOBOL
+        run: sudo apt-get update && sudo apt-get install -y gnucobol
+      - name: Build the static library
+        working-directory: ffi/active-infinity-ffi
+        run: cargo build --locked --release
+      - name: Build the lane shim
+        run: |
+          gcc -shared -fPIC -O2 -I ffi/active-infinity-ffi/include \
+            polyglot/cobol/native/active_infinity_cobol.c \
+            ffi/active-infinity-ffi/target/release/libactive_infinity_ffi.a \
+            -lpthread -ldl -lm -o polyglot/cobol/active_infinity_cobol.so
+      - name: COBOL conformance
+        run: |
+          cobc -x -free -o conformance-cobol polyglot/cobol/conformance.cob \
+            polyglot/cobol/active_infinity_cobol.so
+          LD_LIBRARY_PATH="$PWD/ffi/active-infinity-ffi/target/release" ./conformance-cobol
+
   polyglot-shell:
     runs-on: ubuntu-latest
     steps:
@@ -378,6 +455,10 @@ jobs:
       - polyglot-kotlin-native
       - polyglot-assemblyscript
       - polyglot-shell
+      - polyglot-julia
+      - polyglot-fortran
+      - polyglot-r
+      - polyglot-cobol
       - polyglot-rpc
     runs-on: ubuntu-latest
     steps:

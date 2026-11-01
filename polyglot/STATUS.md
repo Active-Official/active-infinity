@@ -31,6 +31,10 @@ for the RPC column at `59e58e2` (Rust and TypeScript clients, 20/20 live and
 | 18 | AssemblyScript | PASS | PASS | PASS | PASS | PASS |
 | 19 | Lua | PASS | PASS | PASS | PASS | PASS |
 | 20 | Shell / ops | PASS | PASS | PASS | PASS | PASS |
+| 21 | Julia | PASS | PASS | PASS | not yet (RPC C-8.3) | PASS |
+| 22 | Fortran | PASS | PASS | PASS | not yet (RPC C-8.3) | PASS |
+| 23 | R | PASS | PASS | PASS | not yet (RPC C-8.3) | PASS |
+| 24 | COBOL | PASS | PASS | PASS | not yet (RPC C-8.3) | PASS |
 
 ## What each column means
 

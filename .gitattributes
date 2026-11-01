@@ -4,3 +4,19 @@
 fuzz/corpus/** -text
 tests/vectors/** -text
 conformance/** -text
+
+# Shell and interpreter entry points run under bash, julia, R and friends on
+# Unix. A CRLF checkout makes `bash` fail on the first line of a script, so
+# these files are always stored and checked out with LF.
+*.sh text eol=lf
+*.bash text eol=lf
+polyglot/**/*.jl text eol=lf
+polyglot/**/*.r text eol=lf
+polyglot/**/*.R text eol=lf
+polyglot/**/*.f90 text eol=lf
+polyglot/**/*.cob text eol=lf
+polyglot/**/*.py text eol=lf
+polyglot/**/*.rb text eol=lf
+polyglot/**/*.php text eol=lf
+polyglot/**/*.lua text eol=lf
+polyglot/**/*.pl text eol=lf

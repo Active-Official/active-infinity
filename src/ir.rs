@@ -1094,6 +1094,16 @@ impl fmt::Debug for InfinityModule {
         let redact = |text: &str| crate::canonical::redact_text(text, &secrets);
         let mut redacted = self.clone();
         redact_for_debug(&mut redacted, &redact);
+        let hash_secrets: std::collections::HashSet<[u8; 32]> = crate::interop::secret_bytes(self)
+            .iter()
+            .filter(|secret| secret.len() == 32)
+            .map(|secret| {
+                let mut hash = [0u8; 32];
+                hash.copy_from_slice(secret);
+                hash
+            })
+            .collect();
+        redact_hashes(&mut redacted, &hash_secrets);
         let extensions: Vec<(u64, usize)> = redacted
             .extensions
             .iter()
@@ -1107,6 +1117,38 @@ impl fmt::Debug for InfinityModule {
             .field("provenance", &redacted.provenance)
             .field("extensions", &extensions)
             .finish()
+    }
+}
+
+/// Replace a 32-byte secret used as a hash with zeroes.
+///
+/// The encoder refuses such a module, but `Debug` runs before encode (logging,
+/// panics) and on hand-built or bridged modules, where the hex would be the
+/// secret itself.
+fn redact_hashes(module: &mut InfinityModule, secrets: &std::collections::HashSet<[u8; 32]>) {
+    if secrets.is_empty() {
+        return;
+    }
+    for node in &mut module.nodes {
+        if let Inode::Blob { hash, .. } = node {
+            if secrets.contains(hash) {
+                *hash = [0u8; 32];
+            }
+        }
+    }
+    if let Some(provenance) = &mut module.provenance {
+        if let Some(parent) = &mut provenance.parent {
+            if secrets.contains(parent) {
+                *parent = [0u8; 32];
+            }
+        }
+        for entry in &mut provenance.entries {
+            if let ProvValue::Hash(hash) = &mut entry.value {
+                if secrets.contains(hash) {
+                    *hash = [0u8; 32];
+                }
+            }
+        }
     }
 }
 

@@ -40,47 +40,45 @@ pub use crate::canonical::SECRET_MARKER;
 /// accessor that returns them would be an unlock API. Redaction helpers consume
 /// this; callers outside the crate get only redacted projections.
 pub(crate) fn secret_texts(module: &InfinityModule) -> Vec<String> {
-    let mut out: Vec<String> = module
-        .nodes()
-        .iter()
-        .filter_map(|node| match node {
-            Inode::Secret(secret) => Some(String::from_utf8_lossy(secret.expose()).into_owned()),
-            _ => None,
-        })
-        .collect();
-    // The authoring path lowers `secret("x")` to `SecretRef { locator }`, whose
-    // literal is a `Str` node rather than an `Inode::Secret`. Resolve it, or
-    // every export surface is blind to the secret on that path. The cache keeps
-    // many refs that share one locator chain linear.
-    let mut cache: HashMap<NodeId, Vec<Vec<u8>>> = HashMap::new();
-    for node in module.nodes() {
-        if let Inode::SecretRef { locator } = node {
-            let values = cache
-                .entry(*locator)
-                .or_insert_with(|| locator_literals(module, *locator));
-            for bytes in values.iter() {
-                out.push(String::from_utf8_lossy(bytes).into_owned());
-            }
-        }
-    }
-    out
+    secret_literals(module)
+        .into_iter()
+        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+        .collect()
 }
 
-/// Every literal byte string a secret locator holds, at any depth.
+/// Every secret literal in a module, as raw bytes.
 ///
-/// A locator is a plain `Str`/`Ident`, an `Interpolate` (each literal part is
-/// secret material), or an expression (`Binary`, `Unary`, `Constrained`,
-/// `Patch`, `ContentAddressed`, ...) that contains either. Missing the
-/// expression form published the literal from `secret(pw + "-canary-${name}")`
-/// because only the resolved endpoint was inspected.
+/// Crate-internal on purpose (see [`secret_texts`]): a byte-level surface must
+/// compare against the real bytes, or a secret that is not valid UTF-8 would be
+/// lossily converted and never match its own copy.
+pub(crate) fn secret_bytes(module: &InfinityModule) -> Vec<Vec<u8>> {
+    secret_literals(module)
+}
+
+/// The union of every secret literal, deduplicated, in one pass.
 ///
-/// One visited set bounds the walk by the node count, so a shared or cyclic
-/// in-memory shape stays linear and cannot loop.
-fn locator_literals(module: &InfinityModule, locator: NodeId) -> Vec<Vec<u8>> {
+/// `Inode::Secret` nodes carry their bytes directly; a `SecretRef` contributes
+/// every literal in its locator subtree (`Str`/`Ident`, and each interpolated
+/// part, including inside a `Binary`/`Unary`/... expression). One shared visited
+/// set and one set of outputs keep the walk linear in the graph: the previous
+/// per-ref cache duplicated each literal per reference (measured 131 MB for
+/// 1 000 refs of one 64 KiB literal) and allocated a visited vector per distinct
+/// locator.
+///
+/// Set semantics are what every consumer uses (`contains`/`replace`/marker
+/// checks), so a sorted, deduplicated vector is equivalent.
+fn secret_literals(module: &InfinityModule) -> Vec<Vec<u8>> {
     let count = module.node_count();
     let mut visited = vec![false; count];
-    let mut stack = vec![locator];
-    let mut out = Vec::new();
+    let mut out: Vec<Vec<u8>> = Vec::new();
+    let mut stack: Vec<NodeId> = Vec::new();
+    for node in module.nodes() {
+        match node {
+            Inode::Secret(secret) => out.push(secret.expose().to_vec()),
+            Inode::SecretRef { locator } => stack.push(*locator),
+            _ => {}
+        }
+    }
     while let Some(id) = stack.pop() {
         if id.index() >= count || visited[id.index()] {
             continue;
@@ -102,36 +100,8 @@ fn locator_literals(module: &InfinityModule, locator: NodeId) -> Vec<Vec<u8>> {
         }
         stack.extend(node.children());
     }
-    out
-}
-
-/// Every secret literal in a module, as raw bytes.
-///
-/// Crate-internal on purpose (see [`secret_texts`]): the only consumer is the
-/// byte-level extension check in the Protobuf projection. Text redaction uses
-/// the lossy UTF-8 view because it compares against UTF-8 text; a byte-level
-/// surface must compare against the real bytes, or a secret that is not valid
-/// UTF-8 would be lossily converted and never match its own copy.
-pub(crate) fn secret_bytes(module: &InfinityModule) -> Vec<Vec<u8>> {
-    let mut out: Vec<Vec<u8>> = module
-        .nodes()
-        .iter()
-        .filter_map(|node| match node {
-            Inode::Secret(secret) => Some(secret.expose().to_vec()),
-            _ => None,
-        })
-        .collect();
-    let mut cache: HashMap<NodeId, Vec<Vec<u8>>> = HashMap::new();
-    for node in module.nodes() {
-        if let Inode::SecretRef { locator } = node {
-            let values = cache
-                .entry(*locator)
-                .or_insert_with(|| locator_literals(module, *locator));
-            for bytes in values.iter() {
-                out.push(bytes.clone());
-            }
-        }
-    }
+    out.sort();
+    out.dedup();
     out
 }
 
@@ -1448,13 +1418,18 @@ mod projection {
     ) -> Option<serde_json::Value> {
         // A 32-byte secret can be copied into a hash field verbatim. A hash has
         // no textual form to redact, so a copy is replaced by the marker rather
-        // than published as hex.
-        let hash_value = |hash: &[u8; 32], secrets: &[Vec<u8>]| -> serde_json::Value {
-            if secrets
-                .iter()
-                .any(|secret| !secret.is_empty() && secret.as_slice() == hash)
-            {
-                serde_json::Value::from(hiding_placeholder_text(secrets))
+        // than published as hex. The placeholder and the 32-byte set are
+        // computed once: doing it per entry is O(#hashes x #secrets) and was
+        // measured at 2.4 MB of churn for 2 000 hashes.
+        let raw_placeholder = hiding_placeholder_text(raw_secrets);
+        let hash_secrets: std::collections::HashSet<&[u8]> = raw_secrets
+            .iter()
+            .filter(|secret| !secret.is_empty())
+            .map(|secret| secret.as_slice())
+            .collect();
+        let hash_value = |hash: &[u8; 32], _secrets: &[Vec<u8>]| -> serde_json::Value {
+            if hash_secrets.contains(hash.as_slice()) {
+                serde_json::Value::from(raw_placeholder)
             } else {
                 serde_json::Value::from(crate::ir::hash_hex(hash))
             }
@@ -1541,17 +1516,30 @@ pub fn value_paths(module: &InfinityModule) -> HashMap<NodeId, String> {
     let placeholder = hiding_placeholder(&secrets);
     let mut budget = EXPORT_REDACTION_BUDGET;
     let mut paths: HashMap<NodeId, String> = HashMap::new();
+    let mut expanded = std::collections::HashSet::new();
+    let mut stack: Vec<(NodeId, String, usize)> = Vec::new();
+    // A binding is a root for the path walk: a secret under `cfg = {pw: ...}`
+    // must report `cfg.pw`, not only `cfg`. Binding labels are path text too, so
+    // they are charged against the same byte cap.
+    let mut emitted = 0usize;
     for (name, id) in module.bindings() {
         let key = redacted_key_capped(name, &secrets, &mut budget)
             .unwrap_or_else(|| placeholder.to_string());
-        paths.insert(*id, key);
+        emitted = emitted.saturating_add(key.len());
+        paths.insert(*id, key.clone());
+        stack.push((*id, key, 0));
     }
-    let mut expanded = std::collections::HashSet::new();
-    let mut stack: Vec<(NodeId, String, usize)> = Vec::new();
     // An annotation subject can be a subtree that nothing else reaches. Push
     // those first and the module root last: the stack is LIFO, so the root's
     // real names are discovered before a synthetic annotation label can win.
-    for (index, annotation) in module.annotations().iter().enumerate() {
+    let mut annotations: Vec<&crate::ir::Annotation> = module.annotations().iter().collect();
+    annotations.sort_by(|a, b| {
+        a.node
+            .cmp(&b.node)
+            .then_with(|| annotation_rank(a).cmp(&annotation_rank(b)))
+            .then_with(|| annotation_text(a).cmp(annotation_text(b)))
+    });
+    for (index, annotation) in annotations.into_iter().enumerate() {
         stack.push((annotation.node, format!("@annotation[{index}]"), 0));
         if let AnnotationKind::Constraint { expr, .. } = &annotation.kind {
             stack.push((*expr, format!("@constraint[{index}]"), 0));
@@ -1564,33 +1552,33 @@ pub fn value_paths(module: &InfinityModule) -> HashMap<NodeId, String> {
     // A dotted path is materialized per node and shared with every child, so a
     // deep or wide module otherwise builds quadratic text. Past the cap a node
     // keeps a short identity label instead: still stable, still unique.
-    let mut emitted = 0usize;
     while let Some((id, path, depth)) = stack.pop() {
         // A cyclic hand-built module must not hang the query.
         if !expanded.insert(id) {
             continue;
         }
         match module.get(id) {
-            Some(Inode::Table { fields }) | Some(Inode::SchemaTable { fields, .. })
-                if depth < MAX_EXPORT_PATH_DEPTH =>
-            {
+            Some(Inode::Table { fields }) | Some(Inode::SchemaTable { fields, .. }) => {
                 for (key, child) in fields {
                     // A path is structural: a spent budget still needs one per
                     // node, so the key saturates instead of stopping the walk.
                     let key = redacted_key_capped(key, &secrets, &mut budget)
                         .unwrap_or_else(|| placeholder.to_string());
-                    let child_path = if path.is_empty() {
+                    let child_path = if depth >= MAX_EXPORT_PATH_DEPTH {
+                        format!("@node[{}]", child.0)
+                    } else if path.is_empty() {
                         key
                     } else {
                         format!("{path}.{key}")
                     };
-                    let child_path =
-                        if emitted.saturating_add(child_path.len()) > MAX_EXPORT_PATH_BYTES {
-                            format!("@node[{}]", child.0)
-                        } else {
-                            emitted = emitted.saturating_add(child_path.len());
-                            child_path
-                        };
+                    let child_path = if depth < MAX_EXPORT_PATH_DEPTH
+                        && emitted.saturating_add(child_path.len()) <= MAX_EXPORT_PATH_BYTES
+                    {
+                        emitted = emitted.saturating_add(child_path.len());
+                        child_path
+                    } else {
+                        format!("@node[{}]", child.0)
+                    };
                     stack.push((*child, child_path, depth + 1));
                 }
             }
@@ -1602,6 +1590,22 @@ pub fn value_paths(module: &InfinityModule) -> HashMap<NodeId, String> {
         paths.entry(id).or_insert(path);
     }
     paths
+}
+
+fn annotation_rank(annotation: &crate::ir::Annotation) -> u8 {
+    match &annotation.kind {
+        AnnotationKind::Intent(_) => 0,
+        AnnotationKind::Constraint { .. } => 1,
+        AnnotationKind::AiImmutable(_) => 2,
+    }
+}
+
+fn annotation_text(annotation: &crate::ir::Annotation) -> &str {
+    match &annotation.kind {
+        AnnotationKind::Intent(text) => text.as_str(),
+        AnnotationKind::Constraint { source, .. } => source.as_str(),
+        AnnotationKind::AiImmutable(_) => "",
+    }
 }
 
 /// Stable label for a node: dotted path, binding, or `Kind[id]`.
@@ -1843,12 +1847,15 @@ pub fn provenance_lines(module: &InfinityModule) -> Vec<String> {
     if let Some(tool) = &prov.tool {
         lines.push(format!("tool={}", escape_line(&value(tool, &mut budget))));
     }
+    let raw_placeholder = hiding_placeholder_text(&raw_secrets);
+    let hash_secrets: std::collections::HashSet<&[u8]> = raw_secrets
+        .iter()
+        .filter(|secret| !secret.is_empty())
+        .map(|secret| secret.as_slice())
+        .collect();
     let hash_text = |hash: &[u8; 32]| -> String {
-        if raw_secrets
-            .iter()
-            .any(|secret| !secret.is_empty() && secret.as_slice() == hash)
-        {
-            hiding_placeholder_text(&raw_secrets).to_string()
+        if hash_secrets.contains(hash.as_slice()) {
+            raw_placeholder.to_string()
         } else {
             format!("blake3:{}", crate::ir::hash_hex(hash))
         }

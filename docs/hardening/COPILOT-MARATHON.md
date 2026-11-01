@@ -1229,3 +1229,31 @@ Measured on this host (release test profile, same machine):
 
 Gate: 406 library/integration tests, 42 CLI, 27 FFI, clippy clean on both
 feature sets, `cargo fmt --check` clean.
+
+### Re-audit round 9 (I-12) - 2026-11-01
+
+Reviewer: DeepSeek V4.1. It found that the round-8 metadata split broke the
+canonical fixed point (a critical), plus three highs and five mediums. All are
+fixed; six behavioural tests were proved to fail against `02612d9`.
+
+| # | Sev | Finding | Disposition |
+|---|-----|---------|-------------|
+| C1 | critical | the stored-redaction set was computed before promotion, so a decoded image (where promoted fragments are ordinary `Secret` nodes) took a different path: `encode(decode(image))` differed, and `validate_canonical` refused images the producer had just encoded | **fixed**: fragments are computed by promotion and a metadata string containing one is refused (`infinity/encode`, reason names the surface). Whole secrets are still replaced. A decoded image has no fragment in metadata, so both passes agree; `the_canonical_image_is_a_fixed_point` (fails pre-fix) |
+| H1 | high | `secret_texts`/`secret_bytes` duplicated each locator literal per `SecretRef` and allocated a visited vector per distinct locator (131 MB for 1 000 refs of one 64 KiB literal) | **fixed**: one walk with one visited set, a deduplicated output vector, shared by both accessors |
+| H2 | high | promotion covered `Str` and interpolation parts only; an `Ident` locator stayed in the public heap (and `reject_secret_copies` could not see it) | **fixed**: `Ident` in locator material is promoted like a `Str`; `an_ident_locator_leaves_the_public_heap` (fails pre-fix) |
+| H3 | high | `content_key` is not injective (`"G1a=i1b=i2"` has two spellings) and tied on the arena id, so equal modules could encode differently | **fixed**: each run of equal primary keys is re-sorted by an injective, length-prefixed render (`content_key_framed`); the primary key stays byte-identical, so existing images keep their bytes; `a_colliding_primary_key_is_ordered_by_content` (fails pre-fix) |
+| M1 | medium | hash entries recomputed the placeholder and rescanned the secret table per entry (202 ms / 2.4 MB churn for 2 000 hashes x 20 000 secrets) | **fixed**: raw placeholder and a `HashSet` of 32-byte secrets are computed once per export |
+| M2 | medium | `value_paths` never descended binding subtrees, so a binding-only secret lost its leaf path | **fixed**: bindings are pushed as roots before annotations and the module root; a binding label is charged to the path-byte cap |
+| M3 | medium | materialised blob payloads were never secret-scanned | **fixed**: blob payloads share the extension scan and budget, with a blob-specific diagnostic; `a_blob_payload_copying_a_secret_is_refused` (fails pre-fix) |
+| M4 | medium | `Debug` printed a 32-byte secret used as a blob hash, provenance parent or hash entry as hex | **fixed**: `redact_hashes` zeroes those fields; `debug_never_prints_a_secret_hash` (fails pre-fix) |
+| M5 | medium | `sorted_annotations` cloned the full text per comparison (unbudgeted O(n log n x text)) | **fixed**: comparator over references |
+| L1 | low | `projection.md` claimed a marker-substring secret always refuses the encoder and that redaction is a fixpoint for every set | **fixed**: the spec states the stored-metadata rule, the fragment refusal and the fixed point |
+| L2 | low | `layout.md` pointed consumers at the crate-private `interop::secret_texts` | **fixed**: points at the public projections |
+| L3 | low | nodes past the path depth cap had no `@node[id]` label, and binding labels were not charged | **fixed** |
+| L4 | low | the protobuf `carries_secret` charged secrets longer than the payload | **fixed**: same window arithmetic as the encoder |
+| L5 | low | `Prepared` derived `Debug` over secret bytes and blob payloads | **fixed**: the derive is removed |
+| L6 | low | `@annotation[i]` labels depended on insertion order | **fixed**: labels follow a stable (node, kind, text) order |
+
+Measured: the secret table now holds one copy per unique literal; the round-9
+probes (1 000 refs of one 64 KiB literal) drop from 131 MB to the literal's
+size. Gate: 428 tests, clippy clean on both feature sets, fmt clean.

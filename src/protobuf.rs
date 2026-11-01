@@ -442,9 +442,18 @@ fn check_size(out: &[u8]) -> Result<()> {
 /// `infinity/limit` instead of scanning quadratically.
 fn carries_secret(payload: &[u8], secrets: &[Vec<u8>], work: &mut usize) -> Result<bool> {
     // Each window comparison costs the secret's length, so charge by the bytes
-    // compared rather than by the window count alone.
-    let compared: usize = secrets.iter().map(Vec::len).sum();
-    *work = work.saturating_add(payload.len().saturating_mul(compared));
+    // compared rather than by the window count alone. A secret longer than the
+    // payload can never match and must not be charged (that overcharge refused
+    // modules the encoder accepts).
+    let mut charge = 0usize;
+    for secret in secrets {
+        if secret.is_empty() || secret.len() > payload.len() {
+            continue;
+        }
+        charge =
+            charge.saturating_add((payload.len() - secret.len() + 1).saturating_mul(secret.len()));
+    }
+    *work = work.saturating_add(charge);
     if *work > crate::canonical::MAX_SECRET_SCAN_BYTES {
         return Err(Error::Limit {
             kind: "protobuf secret scan bytes",

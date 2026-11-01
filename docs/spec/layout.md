@@ -192,7 +192,7 @@ of a one-byte fragment in prose would destroy the annotation, and a fragment
 inside `***SECRET***` could not be marked at all. The fragments are still
 removed from the public string heap and still hidden by every export; a consumer
 that wants prose-level redaction of fragments applies the projection rule to the
-decoded module (`interop::secret_texts`).
+decoded module (`interop::to_redacted_json` or `interop::provenance_json_for`).
 
 ### 3.1a Reachability
 

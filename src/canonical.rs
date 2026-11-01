@@ -56,7 +56,10 @@ pub(crate) struct PreparedType {
 }
 
 /// Fully canonical, index-resolved module ready for byte emission.
-#[derive(Debug, Clone, Default)]
+///
+/// Deliberately no `Debug`: the struct holds secret bytes and blob payloads, and
+/// a derived impl would print them.
+#[derive(Clone, Default)]
 pub(crate) struct Prepared {
     pub nodes: Vec<Inode>,
     pub root: Option<NodeId>,
@@ -110,7 +113,15 @@ pub(crate) fn prepare(module: &InfinityModule) -> Result<Prepared> {
     // `secret(pw + "-suffix")` — is re-encoded as a structural secret (or a
     // `Secret` reference from an interpolation): the bytes move to the secret
     // heap, which no projection enumerates.
-    let canonical_nodes = promote_secret_locators(canonical_nodes, module);
+    let (canonical_nodes, fragments) = promote_secret_locators(canonical_nodes, module);
+    // A promoted fragment is not a stored-metadata redaction target: rewriting
+    // every occurrence of a one-byte fragment would destroy the prose. It must
+    // therefore not occur in the metadata at all. If it did, the image would not
+    // be a fixed point: a decoded fragment is an ordinary secret on the next
+    // pass, so `encode(decode(image))` would differ (or refuse). Fail loud.
+    if !fragments.is_empty() {
+        reject_fragments_in_metadata(module, &fragments)?;
+    }
 
     // 2. Pre-order numbering from the roots.
     let order = canonical_order(&canonical_nodes, module)?;
@@ -367,7 +378,7 @@ pub(crate) fn prepare(module: &InfinityModule) -> Result<Prepared> {
     // A secret copied into a binary surface cannot be redacted: there is no
     // marker that fits a 32-byte hash and no way to rewrite an opaque payload
     // without corrupting it. Refuse the encode instead of storing the copy.
-    reject_secret_copies(module, provenance.as_ref(), &extensions, &secrets)?;
+    reject_secret_copies(module, provenance.as_ref(), &extensions, &blobs, &secrets)?;
 
     let prepared = Prepared {
         nodes,
@@ -587,6 +598,7 @@ fn reject_secret_copies(
     module: &InfinityModule,
     provenance: Option<&Provenance>,
     extensions: &[(u64, Vec<u8>)],
+    blobs: &[BlobPayload],
     secrets: &[Vec<u8>],
 ) -> Result<()> {
     if secrets.is_empty() {
@@ -622,27 +634,56 @@ fn reject_secret_copies(
         }
     }
     let mut work = 0usize;
+    // An extension is opaque bytes; a materialised blob payload is the same kind
+    // of surface (a tainted blob stores no payload, so it is skipped). The
+    // diagnostic names the surface the caller can act on.
     for (_, payload) in extensions {
-        for secret in secrets {
-            if secret.is_empty() || secret.len() > payload.len() {
-                continue;
-            }
-            // Each window comparison costs the secret's length, so charge the
-            // bytes compared, not the window count.
-            work = work
-                .saturating_add((payload.len() - secret.len() + 1).saturating_mul(secret.len()));
-            if work > MAX_SECRET_SCAN_BYTES {
-                return Err(Error::Limit {
-                    kind: "secret copy scan bytes",
-                    limit: MAX_SECRET_SCAN_BYTES as u64,
-                });
-            }
-            if payload
-                .windows(secret.len())
-                .any(|window| window == secret.as_slice())
-            {
-                return Err(Error::Encode("extension payload carries a secret literal"));
-            }
+        scan_payload(
+            payload,
+            secrets,
+            &mut work,
+            "extension payload carries a secret literal",
+        )?;
+    }
+    for blob in blobs {
+        if let Some(payload) = &blob.payload {
+            scan_payload(
+                payload,
+                secrets,
+                &mut work,
+                "blob payload carries a secret literal",
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// One opaque payload against every secret, charged by bytes compared.
+fn scan_payload(
+    payload: &[u8],
+    secrets: &[Vec<u8>],
+    work: &mut usize,
+    reason: &'static str,
+) -> Result<()> {
+    for secret in secrets {
+        if secret.is_empty() || secret.len() > payload.len() {
+            continue;
+        }
+        // Each window comparison costs the secret's length, so charge the bytes
+        // compared, not the window count.
+        *work =
+            work.saturating_add((payload.len() - secret.len() + 1).saturating_mul(secret.len()));
+        if *work > MAX_SECRET_SCAN_BYTES {
+            return Err(Error::Limit {
+                kind: "secret copy scan bytes",
+                limit: MAX_SECRET_SCAN_BYTES as u64,
+            });
+        }
+        if payload
+            .windows(secret.len())
+            .any(|window| window == secret.as_slice())
+        {
+            return Err(Error::Encode(reason));
         }
     }
     Ok(())
@@ -689,10 +730,58 @@ fn storage_secret_texts(nodes: &[Inode]) -> Vec<String> {
     out
 }
 
+/// Refuse a metadata string that contains a locator fragment.
+fn reject_fragments_in_metadata(module: &InfinityModule, fragments: &[String]) -> Result<()> {
+    let contains = |text: &str| {
+        fragments
+            .iter()
+            .any(|fragment| !fragment.is_empty() && text.contains(fragment.as_str()))
+    };
+    for annotation in module.annotations() {
+        let hit = match &annotation.kind {
+            AnnotationKind::Intent(text) => contains(text),
+            AnnotationKind::Constraint { source, .. } => contains(source),
+            AnnotationKind::AiImmutable(_) => false,
+        };
+        if hit {
+            return Err(Error::Encode("a secret fragment occurs in an annotation"));
+        }
+    }
+    if let Some(provenance) = module.provenance() {
+        for text in [
+            provenance.producer.as_deref(),
+            provenance.model.as_deref(),
+            provenance.tool.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if contains(text) {
+                return Err(Error::Encode("a secret fragment occurs in provenance"));
+            }
+        }
+        for entry in &provenance.entries {
+            let hit = contains(&entry.key)
+                || matches!(&entry.value, ProvValue::Text(text) if contains(text));
+            if hit {
+                return Err(Error::Encode("a secret fragment occurs in provenance"));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Move secret-only string literals into the secret heap (see step 1b above).
-fn promote_secret_locators(mut nodes: Vec<Inode>, module: &InfinityModule) -> Vec<Inode> {
+///
+/// Returns the rewritten nodes and the interpolation fragments that were
+/// promoted: those are secret material for exports, but they must not appear in
+/// stored metadata (see `reject_fragments_in_metadata`).
+fn promote_secret_locators(
+    mut nodes: Vec<Inode>,
+    module: &InfinityModule,
+) -> (Vec<Inode>, Vec<String>) {
     if nodes.is_empty() {
-        return nodes;
+        return (nodes, Vec::new());
     }
     let count = nodes.len();
     // Public nodes are the ones a root reaches without passing through a secret.
@@ -747,11 +836,17 @@ fn promote_secret_locators(mut nodes: Vec<Inode>, module: &InfinityModule) -> Ve
         if is_public {
             continue;
         }
-        if let Inode::Str(text) = node {
-            // Only promote when the literal is reachable solely through secrets;
-            // promotion moves its bytes from the public string heap into the
-            // secret heap, so a shared or public string is never moved.
-            *node = Inode::Secret(crate::ir::SecretBytes::from(text.clone()));
+        match node {
+            // An `Ident` in a locator is the secret's text, not a symbol: it
+            // lands in the public string heap exactly like a `Str`.
+            Inode::Str(text) | Inode::Ident(text) => {
+                // Only promote when the literal is reachable solely through
+                // secrets; promotion moves its bytes from the public string heap
+                // into the secret heap, so a shared or public string is never
+                // moved.
+                *node = Inode::Secret(crate::ir::SecretBytes::from(text.clone()));
+            }
+            _ => {}
         }
     }
 
@@ -778,16 +873,18 @@ fn promote_secret_locators(mut nodes: Vec<Inode>, module: &InfinityModule) -> Ve
             }
         }
     }
+    let mut fragments = Vec::new();
     for (index, literals) in rewrites {
         for (part, text) in literals {
             let id = NodeId(nodes.len() as u32);
+            fragments.push(text.clone());
             nodes.push(Inode::Secret(crate::ir::SecretBytes::from(text)));
             if let Inode::Interpolate { parts } = &mut nodes[index] {
                 parts[part] = InterpPart::Expr(id);
             }
         }
     }
-    nodes
+    (nodes, fragments)
 }
 
 /// Nodes reachable from `roots` without passing through a secret.
@@ -1095,16 +1192,30 @@ fn key_index(
 /// truncated key would fall back to id order and let arena construction leak
 /// into the hash again. A subtree past the byte or depth budget is refused
 /// (`infinity/limit`); an annotation subject that size is not schema.
-fn content_key(nodes: &[crate::ir::Inode], id: NodeId) -> Result<String> {
+fn content_key_with(nodes: &[crate::ir::Inode], id: NodeId, framed: bool) -> Result<String> {
     const KEY_BYTES: usize = 1 << 20;
     const KEY_DEPTH: u32 = 256;
 
-    fn text(out: &mut String, value: &str) -> Result<()> {
-        if out.len().saturating_add(value.len()) > KEY_BYTES {
+    fn text(out: &mut String, framed: bool, value: &str) -> Result<()> {
+        let mut needed = value.len();
+        let prefix = if framed {
+            // Length-prefix every textual component: a name may contain the
+            // separators the renderer uses, so an unframed key is not injective
+            // (`"G1a=i1b=i2"` has two spellings).
+            let prefix = format!("{}:", value.len());
+            needed = needed.saturating_add(prefix.len());
+            Some(prefix)
+        } else {
+            None
+        };
+        if out.len().saturating_add(needed) > KEY_BYTES {
             return Err(Error::Limit {
                 kind: "annotation key bytes",
                 limit: KEY_BYTES as u64,
             });
+        }
+        if let Some(prefix) = prefix {
+            out.push_str(&prefix);
         }
         out.push_str(value);
         Ok(())
@@ -1121,7 +1232,13 @@ fn content_key(nodes: &[crate::ir::Inode], id: NodeId) -> Result<String> {
         Ok(())
     }
 
-    fn render(nodes: &[crate::ir::Inode], id: NodeId, out: &mut String, depth: u32) -> Result<()> {
+    fn render(
+        nodes: &[crate::ir::Inode],
+        framed: bool,
+        id: NodeId,
+        out: &mut String,
+        depth: u32,
+    ) -> Result<()> {
         if depth > KEY_DEPTH {
             return Err(Error::Limit {
                 kind: "annotation key depth",
@@ -1137,32 +1254,32 @@ fn content_key(nodes: &[crate::ir::Inode], id: NodeId) -> Result<String> {
             I::Bool(value) => ch(out, if *value { 't' } else { 'f' })?,
             I::Int(value) => {
                 ch(out, 'i')?;
-                text(out, &value.to_string())?;
+                text(out, framed, &value.to_string())?;
             }
             I::Float(value) => {
                 ch(out, 'd')?;
-                text(out, &value.to_bits().to_string())?;
+                text(out, framed, &value.to_bits().to_string())?;
             }
             I::Str(value) => {
                 ch(out, 's')?;
-                text(out, &value.len().to_string())?;
+                text(out, framed, &value.len().to_string())?;
                 ch(out, ':')?;
-                text(out, value)?;
+                text(out, framed, value)?;
             }
             I::DurationMs(ms) => {
                 ch(out, 'm')?;
-                text(out, &ms.to_string())?;
+                text(out, framed, &ms.to_string())?;
             }
             I::Quantity { value, unit } => {
                 ch(out, 'q')?;
-                text(out, &unit.discriminant().to_string())?;
+                text(out, framed, &unit.discriminant().to_string())?;
                 ch(out, ':')?;
-                render(nodes, *value, out, depth + 1)?;
+                render(nodes, framed, *value, out, depth + 1)?;
             }
             I::Array { elements } => {
                 ch(out, '[')?;
                 for element in elements {
-                    render(nodes, *element, out, depth + 1)?;
+                    render(nodes, framed, *element, out, depth + 1)?;
                     ch(out, ',')?;
                 }
                 ch(out, ']')?;
@@ -1170,36 +1287,36 @@ fn content_key(nodes: &[crate::ir::Inode], id: NodeId) -> Result<String> {
             I::Table { fields } => {
                 ch(out, '{')?;
                 for (name, value) in fields {
-                    text(out, &name.len().to_string())?;
+                    text(out, framed, &name.len().to_string())?;
                     ch(out, ':')?;
-                    text(out, name)?;
+                    text(out, framed, name)?;
                     ch(out, '=')?;
-                    render(nodes, *value, out, depth + 1)?;
+                    render(nodes, framed, *value, out, depth + 1)?;
                     ch(out, ',')?;
                 }
                 ch(out, '}')?;
             }
             // A secret's content is never part of any key.
-            I::Secret(_) => text(out, "SECRET")?,
+            I::Secret(_) => text(out, framed, "SECRET")?,
             I::SecretRef { locator } => {
                 ch(out, 'S')?;
-                render(nodes, *locator, out, depth + 1)?;
+                render(nodes, framed, *locator, out, depth + 1)?;
             }
             I::Ref(target) => {
                 ch(out, 'R')?;
-                render(nodes, *target, out, depth + 1)?;
+                render(nodes, framed, *target, out, depth + 1)?;
             }
             I::Env { name, default } => {
                 ch(out, 'E')?;
-                text(out, name)?;
+                text(out, framed, name)?;
                 ch(out, ':')?;
                 if let Some(default) = default {
-                    render(nodes, *default, out, depth + 1)?;
+                    render(nodes, framed, *default, out, depth + 1)?;
                 }
             }
             I::Ident(name) => {
                 ch(out, 'I')?;
-                text(out, name)?;
+                text(out, framed, name)?;
             }
             I::Interpolate { parts } => {
                 ch(out, 'T')?;
@@ -1207,13 +1324,13 @@ fn content_key(nodes: &[crate::ir::Inode], id: NodeId) -> Result<String> {
                     match part {
                         crate::ir::InterpPart::Literal(literal) => {
                             ch(out, 'l')?;
-                            text(out, &literal.len().to_string())?;
+                            text(out, framed, &literal.len().to_string())?;
                             ch(out, ':')?;
-                            text(out, literal)?;
+                            text(out, framed, literal)?;
                         }
                         crate::ir::InterpPart::Expr(expr) => {
                             ch(out, 'e')?;
-                            render(nodes, *expr, out, depth + 1)?;
+                            render(nodes, framed, *expr, out, depth + 1)?;
                         }
                     }
                 }
@@ -1221,16 +1338,16 @@ fn content_key(nodes: &[crate::ir::Inode], id: NodeId) -> Result<String> {
             }
             I::Binary { op, lhs, rhs } => {
                 ch(out, 'b')?;
-                text(out, op.as_str())?;
+                text(out, framed, op.as_str())?;
                 ch(out, ':')?;
-                render(nodes, *lhs, out, depth + 1)?;
-                render(nodes, *rhs, out, depth + 1)?;
+                render(nodes, framed, *lhs, out, depth + 1)?;
+                render(nodes, framed, *rhs, out, depth + 1)?;
             }
             I::Unary { op, expr } => {
                 ch(out, 'u')?;
-                text(out, op.as_str())?;
+                text(out, framed, op.as_str())?;
                 ch(out, ':')?;
-                render(nodes, *expr, out, depth + 1)?;
+                render(nodes, framed, *expr, out, depth + 1)?;
             }
             I::Constrained { target, constraint } => {
                 ch(out, 'c')?;
@@ -1244,7 +1361,7 @@ fn content_key(nodes: &[crate::ir::Inode], id: NodeId) -> Result<String> {
                             match bound {
                                 Some(value) => {
                                     ch(out, 'v')?;
-                                    text(out, &value.to_string())?;
+                                    text(out, framed, &value.to_string())?;
                                 }
                                 None => ch(out, '-')?,
                             }
@@ -1256,43 +1373,43 @@ fn content_key(nodes: &[crate::ir::Inode], id: NodeId) -> Result<String> {
                         let mut ordered: Vec<&String> = items.iter().collect();
                         ordered.sort();
                         for item in ordered {
-                            text(out, &item.len().to_string())?;
+                            text(out, framed, &item.len().to_string())?;
                             ch(out, ':')?;
-                            text(out, item)?;
+                            text(out, framed, item)?;
                         }
                     }
                     crate::ir::Constraint::Pattern(pattern) => {
                         ch(out, 'p')?;
-                        text(out, &pattern.len().to_string())?;
+                        text(out, framed, &pattern.len().to_string())?;
                         ch(out, ':')?;
-                        text(out, pattern)?;
+                        text(out, framed, pattern)?;
                     }
                     crate::ir::Constraint::Odd => ch(out, 'o')?,
                     crate::ir::Constraint::Custom(value) => {
                         ch(out, 'x')?;
-                        text(out, &value.len().to_string())?;
+                        text(out, framed, &value.len().to_string())?;
                         ch(out, ':')?;
-                        text(out, value)?;
+                        text(out, framed, value)?;
                     }
                 }
-                render(nodes, *target, out, depth + 1)?;
+                render(nodes, framed, *target, out, depth + 1)?;
             }
             I::Patch(op) => {
                 ch(out, 'p')?;
                 match op {
                     crate::ir::PatchOp::Set { path, value } => {
                         ch(out, 's')?;
-                        text(out, path)?;
-                        render(nodes, *value, out, depth + 1)?;
+                        text(out, framed, path)?;
+                        render(nodes, framed, *value, out, depth + 1)?;
                     }
                     crate::ir::PatchOp::Remove { path } => {
                         ch(out, 'r')?;
-                        text(out, path)?;
+                        text(out, framed, path)?;
                     }
                     crate::ir::PatchOp::Rename { from, to } => {
                         ch(out, 'n')?;
-                        text(out, from)?;
-                        text(out, to)?;
+                        text(out, framed, from)?;
+                        text(out, framed, to)?;
                     }
                 }
             }
@@ -1308,16 +1425,16 @@ fn content_key(nodes: &[crate::ir::Inode], id: NodeId) -> Result<String> {
                         let mut ordered: Vec<&String> = members.iter().collect();
                         ordered.sort();
                         for member in ordered {
-                            text(out, &member.len().to_string())?;
+                            text(out, framed, &member.len().to_string())?;
                             ch(out, ':')?;
-                            text(out, member)?;
+                            text(out, framed, member)?;
                         }
                     }
                     crate::ir::TypeSpec::Table { closed } => {
                         ch(out, 'T')?;
                         ch(out, if *closed { '1' } else { '0' })?;
                     }
-                    other => text(out, &format!("{other:?}"))?,
+                    other => text(out, framed, &format!("{other:?}"))?,
                 }
                 for optional in [
                     spec.min,
@@ -1330,35 +1447,35 @@ fn content_key(nodes: &[crate::ir::Inode], id: NodeId) -> Result<String> {
                 .into_iter()
                 .flatten()
                 {
-                    render(nodes, optional, out, depth + 1)?;
+                    render(nodes, framed, optional, out, depth + 1)?;
                 }
                 if let Some(spec_text) = &spec.deprecated {
                     ch(out, '!')?;
-                    text(out, spec_text)?;
+                    text(out, framed, spec_text)?;
                 }
             }
             I::SchemaTable { fields, closed } => {
                 ch(out, 'G')?;
                 ch(out, if *closed { '1' } else { '0' })?;
                 for (name, value) in fields {
-                    text(out, name)?;
+                    text(out, framed, name)?;
                     ch(out, '=')?;
-                    render(nodes, *value, out, depth + 1)?;
+                    render(nodes, framed, *value, out, depth + 1)?;
                 }
             }
             I::SchemaArray { element } => {
                 ch(out, 'A')?;
-                render(nodes, *element, out, depth + 1)?;
+                render(nodes, framed, *element, out, depth + 1)?;
             }
             I::Semantic { tag, inner } => {
                 ch(out, 'y')?;
-                text(out, tag.as_str())?;
-                render(nodes, *inner, out, depth + 1)?;
+                text(out, framed, tag.as_str())?;
+                render(nodes, framed, *inner, out, depth + 1)?;
             }
             I::ContentAddressed { media_type, data } => {
                 ch(out, 'C')?;
-                render(nodes, *media_type, out, depth + 1)?;
-                render(nodes, *data, out, depth + 1)?;
+                render(nodes, framed, *media_type, out, depth + 1)?;
+                render(nodes, framed, *data, out, depth + 1)?;
             }
             I::Blob {
                 hash,
@@ -1368,12 +1485,12 @@ fn content_key(nodes: &[crate::ir::Inode], id: NodeId) -> Result<String> {
                 payload,
             } => {
                 ch(out, 'B')?;
-                text(out, &crate::ir::hash_hex(hash))?;
-                text(out, &size.to_string())?;
+                text(out, framed, &crate::ir::hash_hex(hash))?;
+                text(out, framed, &size.to_string())?;
                 ch(out, if *tainted { '1' } else { '0' })?;
-                text(out, media_type)?;
+                text(out, framed, media_type)?;
                 if let Some(payload) = payload {
-                    text(out, &payload.len().to_string())?;
+                    text(out, framed, &payload.len().to_string())?;
                 }
             }
         }
@@ -1381,8 +1498,51 @@ fn content_key(nodes: &[crate::ir::Inode], id: NodeId) -> Result<String> {
     }
 
     let mut out = String::new();
-    render(nodes, id, &mut out, 0)?;
+    render(nodes, framed, id, &mut out, 0)?;
     Ok(out)
+}
+
+/// The primary ordering key. Kept byte-identical to the pre-tie-break form so
+/// existing canonical images keep their bytes.
+fn content_key(nodes: &[crate::ir::Inode], id: NodeId) -> Result<String> {
+    content_key_with(nodes, id, false)
+}
+
+/// An injective render, used only to break ties between equal primary keys.
+fn content_key_framed(nodes: &[crate::ir::Inode], id: NodeId) -> Result<String> {
+    content_key_with(nodes, id, true)
+}
+
+/// Break ties between entries whose primary keys are equal.
+///
+/// The primary key is not injective (a field name can contain the separators the
+/// renderer uses), so ordering tied subjects by arena id would let construction
+/// order leak into the canonical bytes. The framed render is injective; the id
+/// then only orders subtrees that render identically, which are interchangeable.
+fn break_key_ties(
+    nodes: &[crate::ir::Inode],
+    keys: &[String],
+    entries: &mut [(usize, NodeId)],
+) -> Result<()> {
+    let mut start = 0;
+    while start < entries.len() {
+        let mut end = start + 1;
+        while end < entries.len() && keys[entries[end].0] == keys[entries[start].0] {
+            end += 1;
+        }
+        if end - start > 1 {
+            let mut detailed: Vec<(String, (usize, NodeId))> = entries[start..end]
+                .iter()
+                .map(|entry| Ok((content_key_framed(nodes, entry.1)?, *entry)))
+                .collect::<Result<Vec<_>>>()?;
+            detailed.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1 .1.cmp(&b.1 .1)));
+            for (offset, (_, entry)) in detailed.into_iter().enumerate() {
+                entries[start + offset] = entry;
+            }
+        }
+        start = end;
+    }
+    Ok(())
 }
 
 /// Deterministic pre-order numbering over the reachable graph.
@@ -1418,6 +1578,7 @@ fn canonical_order(nodes: &[Inode], module: &InfinityModule) -> Result<Vec<NodeI
         .collect::<Result<Vec<_>>>()?;
     // Same order as sorting the `(key, id)` pairs: key bytes, then the id.
     subjects.sort_by(|a, b| keys[a.0].cmp(&keys[b.0]).then_with(|| a.1.cmp(&b.1)));
+    break_key_ties(nodes, &keys, &mut subjects)?;
     roots.extend(subjects.into_iter().map(|(_, id)| id));
     let mut exprs: Vec<(usize, NodeId)> = module
         .annotations()
@@ -1434,6 +1595,7 @@ fn canonical_order(nodes: &[Inode], module: &InfinityModule) -> Result<Vec<NodeI
         })
         .collect::<Result<Vec<_>>>()?;
     exprs.sort_by(|a, b| keys[a.0].cmp(&keys[b.0]).then_with(|| a.1.cmp(&b.1)));
+    break_key_ties(nodes, &keys, &mut exprs)?;
     roots.extend(exprs.into_iter().map(|(_, id)| id));
 
     let mut order = Vec::with_capacity(nodes.len());
@@ -1540,19 +1702,36 @@ fn sorted_annotations(
     mut annotations: Vec<Annotation>,
     strings: &HashMap<String, u32>,
 ) -> Vec<Annotation> {
+    // Compare by reference: cloning the intent/source text per comparison made
+    // the sort O(n log n x text) and was not bounded by any budget.
+    fn rank(annotation: &Annotation) -> u8 {
+        match &annotation.kind {
+            AnnotationKind::Intent(_) => 0,
+            AnnotationKind::Constraint { .. } => 1,
+            AnnotationKind::AiImmutable(_) => 2,
+        }
+    }
+    fn text_of(annotation: &Annotation) -> &str {
+        match &annotation.kind {
+            AnnotationKind::Intent(text) => text.as_str(),
+            AnnotationKind::Constraint { source, .. } => source.as_str(),
+            AnnotationKind::AiImmutable(_) => "",
+        }
+    }
+    fn expr_of(annotation: &Annotation) -> u32 {
+        match &annotation.kind {
+            AnnotationKind::Constraint { expr, .. } => expr.0,
+            AnnotationKind::AiImmutable(flag) => u32::from(*flag),
+            AnnotationKind::Intent(_) => 0,
+        }
+    }
     annotations.sort_by(|a, b| {
-        let key = |annotation: &Annotation| -> (u32, u32, String, u32) {
-            match &annotation.kind {
-                AnnotationKind::Intent(text) => (annotation.node.0, 0, text.clone(), 0),
-                AnnotationKind::Constraint { source, expr } => {
-                    (annotation.node.0, 1, source.clone(), expr.0)
-                }
-                AnnotationKind::AiImmutable(flag) => {
-                    (annotation.node.0, 2, String::new(), u32::from(*flag))
-                }
-            }
-        };
-        key(a).cmp(&key(b))
+        a.node
+            .0
+            .cmp(&b.node.0)
+            .then_with(|| rank(a).cmp(&rank(b)))
+            .then_with(|| text_of(a).cmp(text_of(b)))
+            .then_with(|| expr_of(a).cmp(&expr_of(b)))
     });
     annotations.dedup_by(|a, b| {
         a.node == b.node

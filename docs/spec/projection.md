@@ -78,9 +78,16 @@ Redaction is structural, not textual:
   only by the projections;
 - a replacement can create a new secret by joining the text around it, so the
   canonicalizer repeats the pass until the text is clean. When the marker itself
-  contains a secret, no marker can hide it: the encoder refuses the module
-  (`infinity/encode`), and the paths that cannot refuse substitute the empty
-  string. Redaction is a fixpoint for every secret set either way;
+  contains a secret, no marker can hide it: the encoder refuses a *stored*
+  metadata string that contains it (`infinity/encode`), and the paths that
+  cannot refuse substitute the empty string (`redact_text` and the JSON
+  projection);
+- **fragments of an interpolated locator** (`secret("hunter-${name}")`) move to
+  the secret heap but are not stored-metadata redaction targets: rewriting a
+  one-byte fragment would destroy the prose. A metadata string that contains one
+  is therefore refused (`infinity/encode`, reason "a secret fragment occurs in
+  ..."), which keeps the canonical image a fixed point. The fragments are still
+  hidden by every export;
 - **binary surfaces are not text.** A provenance `parent` or hash entry whose
   bytes equal a 32-byte secret, and an opaque extension payload that contains a
   secret literal, cannot use the marker: there is no textual form to replace.

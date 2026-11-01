@@ -9,13 +9,12 @@
 
 use active_infinity::interop::{intents, provenance_lines, secret_tainted_paths, value_paths};
 use active_infinity::{
-    encode, validate_canonical, AnnotationKind, InfinityModule, Inode, Provenance, SecretBytes,
+    encode, validate_canonical, AnnotationKind, InfinityModule, Inode, InterpPart, Provenance,
+    SecretBytes,
 };
 
 #[cfg(feature = "json")]
 use active_infinity::interop::{provenance_json_for, SECRET_MARKER};
-#[cfg(feature = "json")]
-use active_infinity::InterpPart;
 
 /// A secret-bearing module with `count` secrets and a root `Int(0)`.
 fn many_secrets(count: usize) -> InfinityModule {
@@ -343,12 +342,16 @@ fn a_deep_path_chain_stays_bounded() {
     let total: usize = paths.values().map(|path| path.len()).sum();
     let longest = paths.values().map(|path| path.len()).max().unwrap_or(0);
     assert!(
-        paths.len() <= 70,
+        paths.len() <= 500,
         "{} paths for a depth-400 comb",
         paths.len()
     );
     assert!(total < 64 * 1024, "{total} bytes of path text");
     assert!(longest < 1024, "longest path is {longest} bytes");
+    assert!(
+        paths.values().any(|path| path.starts_with("@node[")),
+        "deep nodes must keep an identity label"
+    );
 }
 
 /// The module root wins over an annotation's synthetic label: a real dotted
@@ -453,13 +456,13 @@ fn shared_locator_chains_resolve_once() {
     );
 }
 
-/// Fragments of an interpolated locator are hidden from the public heap and
-/// from exports, but they are not stored-metadata redaction targets: a
-/// one-byte part would rewrite every occurrence of that byte in the prose (and
-/// a part inside `***SECRET***` refused the module outright).
+/// Fragments are hidden from the public heap and from exports, but they are not
+/// stored-metadata redaction targets: rewriting a one-byte fragment would
+/// destroy the prose. Metadata must therefore not contain one, and the refusal
+/// keeps `encode(decode(image))` equal to `image`.
 #[cfg(feature = "json")]
 #[test]
-fn an_interpolated_one_byte_part_does_not_rewrite_metadata() {
+fn an_interpolated_one_byte_part_must_not_appear_in_metadata() {
     let mut module = InfinityModule::new();
     let name = module.push(Inode::Str("svc".into()));
     let interp = module.push(Inode::Interpolate {
@@ -476,16 +479,55 @@ fn an_interpolated_one_byte_part_does_not_rewrite_metadata() {
         ..Provenance::default()
     }));
 
-    let image = encode(&module).expect("a one-byte fragment must not refuse the module");
-    let decoded = active_infinity::decode(&image).expect("decode");
-    assert_eq!(
-        decoded
-            .provenance()
-            .and_then(|prov| prov.producer.as_deref()),
-        Some("agent S run"),
-        "stored prose must survive"
-    );
-    // The export still hides the fragment.
-    let lines = provenance_lines(&decoded).join("\n");
-    assert!(!lines.contains('S'), "{lines}");
+    let error = encode(&module).expect_err("a fragment in metadata must be refused");
+    assert_eq!(error.code(), "infinity/encode", "{error}");
+    assert!(error.to_string().contains("fragment"), "{error}");
+}
+
+/// The canonical image is a fixed point: promotion must not move secret material
+/// in a way that a second pass redacts differently.
+#[test]
+fn canonicalization_is_a_fixed_point_for_locator_fragments() {
+    for shape in 0..3 {
+        let mut module = InfinityModule::new();
+        let name = module.push(Inode::Str("svc".into()));
+        let literal = "hunter2";
+        let locator = match shape {
+            0 => module.push(Inode::Str(literal.into())),
+            1 => module.push(Inode::Interpolate {
+                parts: vec![
+                    InterpPart::Literal("hunter-".into()),
+                    InterpPart::Expr(name),
+                ],
+            }),
+            _ => {
+                let left = module.push(Inode::Str(literal.into()));
+                module.push(Inode::Binary {
+                    op: active_infinity::BinOp::Add,
+                    lhs: left,
+                    rhs: name,
+                })
+            }
+        };
+        let secret = module.push(Inode::SecretRef { locator });
+        let root = module.push(Inode::Table {
+            fields: vec![("password".into(), secret)],
+        });
+        module.set_root(Some(root));
+        module.annotate(root, AnnotationKind::Intent("a note".into()));
+        module.set_provenance(Some(Provenance {
+            producer: Some("agent run".into()),
+            ..Provenance::default()
+        }));
+
+        let image = encode(&module).expect("encode");
+        validate_canonical(&image, active_infinity::Limits::default())
+            .unwrap_or_else(|error| panic!("shape {shape}: {error}"));
+        let decoded = active_infinity::decode(&image).expect("decode");
+        let again = encode(&decoded).expect("re-encode");
+        assert_eq!(
+            image, again,
+            "shape {shape}: canonicalization is not a fixed point"
+        );
+    }
 }

@@ -63,10 +63,18 @@ class ActiveInfinity {
 		throw new ActiveInfinityError(this._lastError(), status);
 	}
 
+	_alloc(length) {
+		const pointer = this.exports.active_infinity_alloc(length);
+		// A null pointer is the FFI's refusal (1 GiB cap), not address zero.
+		if (pointer === 0 && length > 0) {
+			throw new ActiveInfinityError("infinity/limit", -1);
+		}
+		return pointer;
+	}
+
 	_withInput(bytes, op) {
 		const input = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
-		const pointer =
-			input.length === 0 ? 0 : this.exports.active_infinity_alloc(input.length);
+		const pointer = input.length === 0 ? 0 : this._alloc(input.length);
 		try {
 			if (input.length > 0) {
 				new Uint8Array(this.memory.buffer, pointer, input.length).set(input);
@@ -94,7 +102,7 @@ class ActiveInfinity {
 
 	/** 32-byte Blake3 content hash of a valid image. */
 	contentHash(bytes) {
-		const hashPointer = this.exports.active_infinity_alloc(32);
+		const hashPointer = this._alloc(32);
 		try {
 			const status = this._withInput(bytes, (pointer, length) =>
 				this.exports.active_infinity_content_hash(pointer, length, hashPointer),
@@ -120,7 +128,7 @@ class ActiveInfinity {
 		const text =
 			typeof source === "string" ? new TextEncoder().encode(source) : source;
 		const nameBytes = new TextEncoder().encode(`${name}\0`);
-		const namePointer = this.exports.active_infinity_alloc(nameBytes.length);
+		const namePointer = this._alloc(nameBytes.length);
 		new Uint8Array(this.memory.buffer, namePointer, nameBytes.length).set(
 			nameBytes,
 		);
@@ -158,7 +166,7 @@ class ActiveInfinity {
 
 	_callOutput(invoke) {
 		// Size query: a null output reports the required length.
-		const lengthPointer = this.exports.active_infinity_alloc(8);
+		const lengthPointer = this._alloc(8);
 		try {
 			new DataView(this.memory.buffer, lengthPointer, 8).setUint32(0, 0, true);
 			let status = invoke(0, lengthPointer);
@@ -171,7 +179,7 @@ class ActiveInfinity {
 				if (status !== 0) this._fail(status);
 				return new Uint8Array(0);
 			}
-			const outputPointer = this.exports.active_infinity_alloc(required);
+			const outputPointer = this._alloc(required);
 			try {
 				new DataView(this.memory.buffer, lengthPointer, 8).setUint32(
 					0,

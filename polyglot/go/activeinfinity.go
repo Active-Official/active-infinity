@@ -16,12 +16,13 @@ import (
 	"github.com/tetratelabs/wazero/api"
 )
 
-func fillRandom(buffer []byte) {
+// fillRandom fills the buffer or reports failure. A zero-filled buffer would
+// be predictable key material, so the host function must fail closed instead.
+func fillRandom(buffer []byte) error {
 	if _, err := rand.Read(buffer); err != nil {
-		for index := range buffer {
-			buffer[index] = 0
-		}
+		return err
 	}
+	return nil
 }
 
 // ABI version this binding targets.
@@ -61,7 +62,9 @@ func New(ctx context.Context, wasmPath string) (*Instance, error) {
 			if !ok {
 				return 1
 			}
-			fillRandom(buffer)
+			if err := fillRandom(buffer); err != nil {
+				return 1
+			}
 			if !memory.Write(ptr, buffer) {
 				return 1
 			}
@@ -135,18 +138,30 @@ func (i *Instance) check(ctx context.Context, status int32) error {
 	return &Error{Code: i.lastError(ctx), Status: status}
 }
 
+// alloc allocates in the module and refuses a null pointer. The FFI caps one
+// allocation at 1 GiB, so a larger input must fail closed before any write.
+func (i *Instance) alloc(ctx context.Context, length uint64) (uint32, error) {
+	values, err := i.module.ExportedFunction("active_infinity_alloc").Call(ctx, length)
+	if err != nil {
+		return 0, err
+	}
+	pointer := uint32(values[0])
+	if pointer == 0 && length > 0 {
+		return 0, &Error{Code: "infinity/limit", Status: -1}
+	}
+	return pointer, nil
+}
+
 // writeInput copies data into the module and returns the pointer and a release.
 func (i *Instance) writeInput(ctx context.Context, data []byte) (uint32, func(), error) {
-	alloc := i.module.ExportedFunction("active_infinity_alloc")
 	free := i.module.ExportedFunction("active_infinity_free")
 	if len(data) == 0 {
 		return 0, func() {}, nil
 	}
-	values, err := alloc.Call(ctx, uint64(len(data)))
+	pointer, err := i.alloc(ctx, uint64(len(data)))
 	if err != nil {
 		return 0, nil, err
 	}
-	pointer := uint32(values[0])
 	if !i.module.Memory().Write(pointer, data) {
 		return 0, nil, fmt.Errorf("wasm memory write failed")
 	}
@@ -190,15 +205,14 @@ func (i *Instance) ContentHash(ctx context.Context, image []byte) ([]byte, error
 		return nil, err
 	}
 	defer release()
-	values, err := i.module.ExportedFunction("active_infinity_alloc").Call(ctx, 32)
+	hashPointer, err := i.alloc(ctx, 32)
 	if err != nil {
 		return nil, err
 	}
-	hashPointer := uint32(values[0])
 	defer func() {
 		_, _ = i.module.ExportedFunction("active_infinity_free").Call(ctx, uint64(hashPointer), 32)
 	}()
-	values, err = i.module.ExportedFunction("active_infinity_content_hash").Call(
+	values, err := i.module.ExportedFunction("active_infinity_content_hash").Call(
 		ctx, uint64(pointer), uint64(len(image)), uint64(hashPointer))
 	if err != nil {
 		return nil, err
@@ -224,11 +238,10 @@ func (i *Instance) output(ctx context.Context, name string, prefix []uint64, pay
 		return nil, err
 	}
 	defer release()
-	values, err := i.module.ExportedFunction("active_infinity_alloc").Call(ctx, 4)
+	lengthPointer, err := i.alloc(ctx, 4)
 	if err != nil {
 		return nil, err
 	}
-	lengthPointer := uint32(values[0])
 	defer func() {
 		_, _ = i.module.ExportedFunction("active_infinity_free").Call(ctx, uint64(lengthPointer), 4)
 	}()
@@ -238,7 +251,7 @@ func (i *Instance) output(ctx context.Context, name string, prefix []uint64, pay
 	call := i.module.ExportedFunction(name)
 	args := append([]uint64{uint64(pointer), uint64(len(payload))}, prefix...)
 	args = append(args, 0, uint64(lengthPointer))
-	values, err = call.Call(ctx, args...)
+	values, err := call.Call(ctx, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -253,11 +266,10 @@ func (i *Instance) output(ctx context.Context, name string, prefix []uint64, pay
 		}
 		return []byte{}, nil
 	}
-	values, err = i.module.ExportedFunction("active_infinity_alloc").Call(ctx, uint64(required))
+	outputPointer, err := i.alloc(ctx, uint64(required))
 	if err != nil {
 		return nil, err
 	}
-	outputPointer := uint32(values[0])
 	defer func() {
 		_, _ = i.module.ExportedFunction("active_infinity_free").Call(ctx, uint64(outputPointer), uint64(required))
 	}()

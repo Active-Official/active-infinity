@@ -130,3 +130,19 @@ func TestConformance(t *testing.T) {
 		t.Fatalf("unstable code %q", err.(*Error).Code)
 	}
 }
+
+// A refused allocation is infinity/limit, not a write at address zero. The FFI
+// caps one allocation at 1 GiB, so the module returns a null pointer there.
+func TestAllocationRefusalIsInfinityLimit(t *testing.T) {
+	ctx := context.Background()
+	instance, err := New(ctx, wasmPath(t))
+	if err != nil {
+		t.Fatalf("instantiate: %v", err)
+	}
+	defer func() { _ = instance.Close(ctx) }()
+	if _, err := instance.alloc(ctx, (1<<30)+1); err == nil {
+		t.Fatal("an allocation over the FFI cap must fail")
+	} else if failure, ok := err.(*Error); !ok || failure.Code != "infinity/limit" {
+		t.Fatalf("code: %v", err)
+	}
+}

@@ -85,6 +85,22 @@ async function main() {
 		"malformed input reports a stable code",
 	);
 
+	// A refused allocation must raise infinity/limit instead of writing at
+	// address zero (the FFI caps one allocation at 1 GiB).
+	const refused = new ActiveInfinity({
+		exports: {
+			memory: new WebAssembly.Memory({ initial: 1 }),
+			active_infinity_abi_version: () => 1,
+			active_infinity_alloc: () => 0,
+			active_infinity_free: () => {},
+		},
+	});
+	assert.throws(
+		() => refused.validate(new Uint8Array([1, 2, 3, 4])),
+		(error) => error.code === "infinity/limit",
+		"a refused allocation raises infinity/limit",
+	);
+
 	console.log(`JS conformance PASS (${checked} vectors)`);
 }
 

@@ -45,6 +45,7 @@ class Reference {
 	copyIn(bytes) {
 		if (bytes.length === 0) return 0;
 		const pointer = this.alloc(bytes.length);
+		if (!pointer) throw new Error("infinity/limit: allocation failed");
 		this.memory().set(bytes, pointer);
 		return pointer;
 	}
@@ -68,9 +69,22 @@ class Reference {
 
 function bind(reference, getAssemblyMemory) {
 	const asMemory = () => new Uint8Array(getAssemblyMemory().buffer);
+	// Copy an AssemblyScript range into the reference. The range is clipped to
+	// the AssemblyScript heap and the *clipped* length is returned: passing the
+	// caller's length would make the reference read past its own allocation.
 	const copyFromAs = (pointer, length) => {
-		if (length === 0) return 0;
-		return reference.copyIn(asMemory().subarray(pointer, pointer + length));
+		if (length === 0) return { pointer: 0, length: 0 };
+		const view = asMemory();
+		const end = Math.min(pointer + length, view.length);
+		const slice = view.subarray(pointer, Math.max(pointer, end));
+		return { pointer: reference.copyIn(slice), length: slice.length };
+	};
+	const allocOrThrow = (length) => {
+		const pointer = reference.alloc(length);
+		if (!pointer && length > 0) {
+			throw new Error("infinity/limit: allocation failed");
+		}
+		return pointer;
 	};
 	const writeToAs = (pointer, bytes) => {
 		asMemory().set(bytes, pointer);
@@ -78,21 +92,31 @@ function bind(reference, getAssemblyMemory) {
 	const writeU32 = (pointer, value) => {
 		new DataView(getAssemblyMemory().buffer).setUint32(pointer, value, true);
 	};
+	const readU32 = (pointer) => {
+		return new DataView(getAssemblyMemory().buffer).getUint32(pointer, true);
+	};
 
 	const runOutput = (input, inputLength, output, outputLength, invoke) => {
-		const sizePointer = reference.alloc(8);
+		// The caller declares the capacity at *outputLength; a result larger than
+		// that must be reported as -2 with the required size, never copied.
+		const capacity = readU32(outputLength);
+		const sizePointer = allocOrThrow(8);
 		try {
 			reference.setU32(sizePointer, 0);
 			let status = invoke(0, sizePointer);
 			const required = reference.u32(sizePointer);
 			writeU32(outputLength, required);
 			if (status !== -2) return status;
-			const buffer = reference.alloc(required);
+			if (required > capacity) {
+				// The caller retries with a bigger buffer.
+				return -2;
+			}
+			const buffer = allocOrThrow(required);
 			try {
 				reference.setU32(sizePointer, required);
 				status = invoke(buffer, sizePointer);
 				if (status !== 0) return status;
-				const written = reference.u32(sizePointer);
+				const written = Math.min(reference.u32(sizePointer), capacity);
 				writeU32(outputLength, written);
 				writeToAs(
 					output,
@@ -112,18 +136,21 @@ function bind(reference, getAssemblyMemory) {
 			validate: (pointer, length) => {
 				const input = copyFromAs(pointer, length);
 				try {
-					return reference.exports.active_infinity_validate(input, length);
+					return reference.exports.active_infinity_validate(
+						input.pointer,
+						input.length,
+					);
 				} finally {
-					reference.free(input, length);
+					reference.free(input.pointer, input.length);
 				}
 			},
 			content_hash: (pointer, length, output) => {
 				const input = copyFromAs(pointer, length);
-				const hash = reference.alloc(32);
+				const hash = allocOrThrow(32);
 				try {
 					const status = reference.exports.active_infinity_content_hash(
-						input,
-						length,
+						input.pointer,
+						input.length,
 						hash,
 					);
 					if (status === 0)
@@ -134,47 +161,47 @@ function bind(reference, getAssemblyMemory) {
 					return status;
 				} finally {
 					reference.free(hash, 32);
-					reference.free(input, length);
+					reference.free(input.pointer, input.length);
 				}
 			},
 			reencode: (pointer, length, output, outputLength) => {
 				const input = copyFromAs(pointer, length);
 				try {
 					return runOutput(
-						input,
-						length,
+						input.pointer,
+						input.length,
 						output,
 						outputLength,
 						(buffer, size) =>
 							reference.exports.active_infinity_reencode(
-								input,
-								length,
+								input.pointer,
+								input.length,
 								buffer,
 								size,
 							),
 					);
 				} finally {
-					reference.free(input, length);
+					reference.free(input.pointer, input.length);
 				}
 			},
 			redacted_json: (pointer, length, output, outputLength) => {
 				const input = copyFromAs(pointer, length);
 				try {
 					return runOutput(
-						input,
-						length,
+						input.pointer,
+						input.length,
 						output,
 						outputLength,
 						(buffer, size) =>
 							reference.exports.active_infinity_redacted_json(
-								input,
-								length,
+								input.pointer,
+								input.length,
 								buffer,
 								size,
 							),
 					);
 				} finally {
-					reference.free(input, length);
+					reference.free(input.pointer, input.length);
 				}
 			},
 			from_active: (
@@ -192,14 +219,14 @@ function bind(reference, getAssemblyMemory) {
 				const namePointer = reference.copyIn(nameWithNul);
 				try {
 					return runOutput(
-						input,
-						sourceLength,
+						input.pointer,
+						input.length,
 						output,
 						outputLength,
 						(buffer, size) =>
 							reference.exports.active_infinity_from_active(
-								input,
-								sourceLength,
+								input.pointer,
+								input.length,
 								namePointer,
 								buffer,
 								size,
@@ -207,7 +234,7 @@ function bind(reference, getAssemblyMemory) {
 					);
 				} finally {
 					reference.free(namePointer, nameWithNul.length);
-					reference.free(input, sourceLength);
+					reference.free(input.pointer, input.length);
 				}
 			},
 		},

@@ -55,6 +55,10 @@ module ActiveInfinity
     return yield(nil, 0) if bytes.empty?
 
     pointer = active_infinity_alloc(bytes.bytesize)
+    # The FFI caps one allocation at 1 GiB; a null pointer is a refusal, not an
+    # address to write to.
+    raise Error.new("infinity/limit", -1) if pointer.null?
+
     pointer.put_bytes(0, bytes)
     begin
       yield(pointer, bytes.bytesize)

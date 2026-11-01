@@ -132,6 +132,9 @@ class Image {
   Uint8List contentHash() {
     final native = _open();
     final out = native.alloc(32);
+    if (out == nullptr) {
+      throw ActiveInfinityException('infinity/limit', -1);
+    }
     try {
       _withInput(bytes, (pointer, length) {
         final status = native.hash(pointer, length, out);
@@ -161,6 +164,9 @@ class Image {
     final payload = Uint8List.fromList(utf8.encode(source));
     final nameBytes = Uint8List.fromList(utf8.encode('$name\u0000'));
     final namePointer = native.alloc(nameBytes.length);
+    if (namePointer == nullptr) {
+      throw ActiveInfinityException('infinity/limit', -1);
+    }
     namePointer.asTypedList(nameBytes.length).setAll(0, nameBytes);
     try {
       return _output(payload, (native, input, length, out, size) =>
@@ -178,6 +184,9 @@ void _withInput(Uint8List payload, void Function(Pointer<Uint8>, int) action) {
     return;
   }
   final pointer = native.alloc(payload.length);
+  if (pointer == nullptr) {
+    throw ActiveInfinityException('infinity/limit', -1);
+  }
   pointer.asTypedList(payload.length).setAll(0, payload);
   try {
     action(pointer, payload.length);

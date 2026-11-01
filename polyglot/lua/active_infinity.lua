@@ -56,6 +56,9 @@ local function with_input(bytes, callback)
     return callback(nil, 0)
   end
   local pointer = lib.active_infinity_alloc(#bytes)
+  if pointer == nil then
+    error("infinity/limit", 0)
+  end
   ffi.copy(pointer, bytes, #bytes)
   local ok, result = pcall(callback, pointer, #bytes)
   lib.active_infinity_free(pointer, #bytes)

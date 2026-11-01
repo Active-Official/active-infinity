@@ -56,9 +56,12 @@ async function main() {
 		const hex = Buffer.from(memory().slice(hash, hash + 32)).toString("hex");
 		assert.strictEqual(hex, entry.content_hash, entry.name);
 
-		const outLength = exports.allocate(4);
 		const capacity = image.length * 2 + 1024;
+		const outLength = exports.allocate(4);
 		const output = exports.allocate(capacity);
+		// The host honours the caller's declared capacity; a fresh allocation
+		// is zeroed, so it must be written before the call.
+		new DataView(exports.memory.buffer).setUint32(outLength, capacity, true);
 		assert.strictEqual(
 			exports.reencode(pointer, image.length, output, outLength),
 			0,
@@ -83,6 +86,7 @@ async function main() {
 	const namePointer = alloc(name);
 	const jsonLength = exports.allocate(4);
 	const jsonBuffer = exports.allocate(1 << 18);
+	new DataView(exports.memory.buffer).setUint32(jsonLength, 1 << 18, true);
 	assert.strictEqual(
 		exports.fromActive(
 			sourcePointer,
@@ -111,6 +115,11 @@ async function main() {
 	const fullPointer = alloc(full);
 	const redactedLength = exports.allocate(4);
 	const redactedBuffer = exports.allocate(1 << 18);
+	new DataView(exports.memory.buffer).setUint32(
+		redactedLength,
+		1 << 18,
+		true,
+	);
 	assert.strictEqual(
 		exports.redactedJson(
 			fullPointer,

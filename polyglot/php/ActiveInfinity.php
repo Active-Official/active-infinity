@@ -149,6 +149,10 @@ C;
             return null;
         }
         $pointer = $this->ffi->active_infinity_alloc(strlen($bytes));
+        // A null pointer means the FFI refused the allocation (1 GiB cap).
+        if ($pointer === null) {
+            throw new ActiveInfinityError('infinity/limit', -1);
+        }
         FFI::memcpy($pointer, $bytes, strlen($bytes));
         return $pointer;
     }

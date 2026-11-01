@@ -144,6 +144,11 @@ public sealed class Image
     private static byte[] WithBuffer(byte[] payload, OutputCall call)
     {
         IntPtr input = Native.active_infinity_alloc((nuint)payload.Length);
+        // The FFI caps one allocation at 1 GiB: a null pointer is a refusal.
+        if (input == IntPtr.Zero && payload.Length > 0)
+        {
+            throw new ActiveInfinityException("infinity/limit", -1);
+        }
         try
         {
             Marshal.Copy(payload, 0, input, payload.Length);
@@ -178,6 +183,10 @@ public sealed class Image
     private void WithInput(Func<IntPtr, int> action)
     {
         IntPtr input = Native.active_infinity_alloc((nuint)Bytes.Length);
+        if (input == IntPtr.Zero && Bytes.Length > 0)
+        {
+            throw new ActiveInfinityException("infinity/limit", -1);
+        }
         try
         {
             Marshal.Copy(Bytes, 0, input, Bytes.Length);

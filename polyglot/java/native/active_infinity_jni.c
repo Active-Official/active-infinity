@@ -88,6 +88,15 @@ output_call(JNIEnv *env, jbyteArray image, jbyteArray output, jintArray out_len,
   }
   jint capacity = 0;
   (*env)->GetIntArrayRegion(env, out_len, 0, 1, &capacity);
+  /* The caller's claimed capacity is not trusted: clamp it to the real array
+     length, or a Java caller can hand a small array with a huge capacity and
+     the shim writes past the JVM heap buffer. */
+  if (output != NULL) {
+    jsize array_length = (*env)->GetArrayLength(env, output);
+    if (capacity > array_length) {
+      capacity = (jint)array_length;
+    }
+  }
   size_t out_capacity = capacity > 0 ? (size_t)capacity : 0;
   uint8_t *out = NULL;
   jbyte *out_bytes = NULL;
@@ -145,6 +154,12 @@ JNIEXPORT jint JNICALL Java_ai_activeinfinity_Native_fromActive(
   }
   jint capacity = 0;
   (*env)->GetIntArrayRegion(env, out_len, 0, 1, &capacity);
+  if (output != NULL) {
+    jsize array_length = (*env)->GetArrayLength(env, output);
+    if (capacity > array_length) {
+      capacity = (jint)array_length;
+    }
+  }
   size_t out_capacity = capacity > 0 ? (size_t)capacity : 0;
   jbyte *out_bytes = NULL;
   uint8_t *out = NULL;

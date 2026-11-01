@@ -131,9 +131,8 @@ impl<'a> Validated<'a> {
         validated.check_blobs(limits)?;
         validated.check_nodes(limits, &mut aux_used)?;
         if let Some(index) = aux_used.iter().position(|used| !used) {
-            return Err(Error::Count {
-                field: "aux",
-                value: index as u64,
+            return Err(Error::AuxUnreferenced {
+                index: index as u32,
             });
         }
         validated.check_fields()?;
@@ -1827,8 +1826,8 @@ impl<'a> Validated<'a> {
         for index in 0..count {
             let tag = read_u32(self.buf, base + index as usize * 8)?;
             if tag > crate::layout::PART_EXPR {
-                return Err(Error::Node {
-                    id: index,
+                return Err(Error::Part {
+                    index,
                     reason: "unknown part tag",
                 });
             }
@@ -1877,7 +1876,7 @@ impl<'a> Validated<'a> {
         derived.sort_unstable();
         derived.dedup();
         if derived != edges {
-            return Err(Error::Edge { from: 0, to: 0 });
+            return Err(Error::EdgeSet);
         }
         Ok(())
     }

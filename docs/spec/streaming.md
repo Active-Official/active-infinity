@@ -21,9 +21,14 @@ land on the identical whole-module encoding of the updated module.
 | 24 | 8 | first 8 bytes of Blake3(payload) |
 
 A frame payload larger than 64 MiB is refused with `infinity/stream-frame-len`.
-A wrong checksum is `infinity/stream-hash`; a wrong magic is
-`infinity/stream-magic`; a skipped sequence number is
-`infinity/stream-sequence`.
+The fault is permanent: no amount of input makes an oversized frame legal, so
+the error is fatal and not `is_incomplete()`. A buffer that merely stops short
+of a legal frame is `infinity/truncated` and waits for more bytes, including a
+read shorter than the four-byte magic. A wrong checksum is
+`infinity/stream-hash`; a wrong magic is `infinity/stream-magic`; a skipped
+sequence number is `infinity/stream-sequence`. A non-zero `flags` or `reserved`
+field is `infinity/stream-flags` or `infinity/reserved`; the latter is the
+image-family code, listed in `layout.md` §9.
 
 Frames may be split across reads and several may arrive in one read: a decoder
 buffers partial frames and never requires frame boundaries at call boundaries.
@@ -106,7 +111,18 @@ node), `2` ai-immutable (`0`/`1`).
   by `Limits::max_aux`; both are `infinity/limit`. Without those bounds a producer
   could stream batches forever and exhaust memory before `End`.
 - A stream that ends before `End`, or with a partially received frame, is
-  `infinity/stream-unterminated` or `infinity/truncated`.
+  `infinity/stream-unterminated` or `infinity/truncated`. A generation that was
+  opened (a `Delta` frame was accepted) and never closed is
+  `infinity/stream-unterminated`; a repeated `End` with no pending delta is
+  `infinity/stream-state`, and a `Delta` with `op_count == 0` is
+  `infinity/stream-delta`, because either one would re-encode and re-validate
+  the whole module for no new content.
+- The decoder's work is bounded across generations, not only within one: every
+  completed generation adds its image size to a counter that may not exceed 64x
+  `Limits::max_total_bytes` (`infinity/limit`, kind `stream generation work`).
+  A delta merge also runs under the decoder's own `max_nodes`, not the
+  defaults, so a strict caller is never made to allocate a larger arena than it
+  declared.
 
 ## 5. Why sections, not hand-written node deltas
 

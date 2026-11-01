@@ -171,7 +171,15 @@ impl Frame {
     /// the magic but not the whole header is `infinity/truncated`, which is what
     /// [`StreamDecoder::push_bytes`] uses to decide to wait for more input.
     pub fn parse(buf: &[u8]) -> Result<(Frame, usize)> {
-        if buf.len() < 4 || buf[0..4] != STREAM_MAGIC {
+        if buf.len() < 4 {
+            // Not enough bytes to identify the format: a network reader must
+            // wait for more instead of reporting corruption on a one-byte read.
+            return Err(Error::Truncated {
+                needed: FRAME_HEADER_SIZE as u64,
+                found: buf.len() as u64,
+            });
+        }
+        if buf[0..4] != STREAM_MAGIC {
             return Err(Error::StreamMagic);
         }
         if buf.len() < FRAME_HEADER_SIZE {
@@ -672,8 +680,20 @@ impl DeltaOp {
 
 /// Apply delta operations to a module, returning the updated module.
 pub fn apply_delta(module: &InfinityModule, ops: &[DeltaOp]) -> Result<InfinityModule> {
+    apply_delta_with_limits(module, ops, crate::layout::Limits::default())
+}
+
+/// [`apply_delta`] under an explicit node ceiling.
+///
+/// A decoder built with strict limits must merge under the same ceiling it
+/// validated the fragment with, not the defaults.
+pub fn apply_delta_with_limits(
+    module: &InfinityModule,
+    ops: &[DeltaOp],
+    limits: crate::layout::Limits,
+) -> Result<InfinityModule> {
     let mut out = module.clone();
-    apply_delta_in_place(&mut out, ops)?;
+    apply_delta_in_place_with_limits(&mut out, ops, limits)?;
     Ok(out)
 }
 
@@ -684,6 +704,15 @@ pub fn apply_delta(module: &InfinityModule, ops: &[DeltaOp]) -> Result<InfinityM
 /// referenced by `PutNode`. Canonical encoding still runs once at the end,
 /// because the canonical image is the identity boundary.
 pub fn apply_delta_in_place(module: &mut InfinityModule, ops: &[DeltaOp]) -> Result<()> {
+    apply_delta_in_place_with_limits(module, ops, crate::layout::Limits::default())
+}
+
+/// [`apply_delta_in_place`] under an explicit node ceiling.
+pub fn apply_delta_in_place_with_limits(
+    module: &mut InfinityModule,
+    ops: &[DeltaOp],
+    limits: crate::layout::Limits,
+) -> Result<()> {
     for op in ops {
         match op {
             DeltaOp::SetRoot(root) => {
@@ -701,7 +730,7 @@ pub fn apply_delta_in_place(module: &mut InfinityModule, ops: &[DeltaOp]) -> Res
                 if fragment.node_count() == 0 {
                     return Err(Error::StreamDelta("fragment is empty"));
                 }
-                let replacement = merge_fragment(module, fragment)?;
+                let replacement = merge_fragment_with_limits(module, fragment, limits)?;
                 let content = module
                     .get(replacement)
                     .cloned()
@@ -739,12 +768,20 @@ pub(crate) fn merge_fragment(
     base: &mut InfinityModule,
     fragment: &InfinityModule,
 ) -> Result<NodeId> {
+    merge_fragment_with_limits(base, fragment, crate::layout::Limits::default())
+}
+
+pub(crate) fn merge_fragment_with_limits(
+    base: &mut InfinityModule,
+    fragment: &InfinityModule,
+    limits: crate::layout::Limits,
+) -> Result<NodeId> {
     let base_count = base.node_count();
     // A fragment can be as large as a frame allows. The merged arena is bounded
     // by the default node ceiling (well below the u32 id space) so a stream of
     // tiny fragments cannot turn a small wire budget into a huge arena and an
     // expensive canonical encode.
-    let arena_limit = crate::layout::Limits::default().max_nodes as usize;
+    let arena_limit = limits.max_nodes as usize;
     let merged = base_count
         .checked_add(fragment.node_count())
         .filter(|total| *total <= arena_limit)
@@ -804,6 +841,8 @@ pub struct StreamDecoder {
     pending_deltas: Vec<DeltaOp>,
     /// Bytes held by the pending delta frames.
     pending_delta_bytes: u64,
+    /// Image bytes of every completed generation in this decoder.
+    generation_work: u64,
     frames: u64,
     partial: Vec<u8>,
     cursor: usize,
@@ -841,6 +880,7 @@ impl StreamDecoder {
             image: None,
             pending_deltas: Vec::new(),
             pending_delta_bytes: 0,
+            generation_work: 0,
             frames: 0,
             partial: Vec::new(),
             cursor: 0,
@@ -929,6 +969,15 @@ impl StreamDecoder {
     }
 
     fn push_inner(&mut self, frame: &Frame) -> Result<()> {
+        // `Frame` fields are public, so `push` must enforce the wire ceiling
+        // that `Frame::parse` enforces; otherwise a caller-built frame can carry
+        // bytes no peer could ever send to this decoder.
+        if frame.payload.len() > MAX_FRAME_PAYLOAD as usize {
+            return Err(Error::StreamFrameLen {
+                declared: u32::try_from(frame.payload.len()).unwrap_or(u32::MAX),
+                available: frame.payload.len() as u64,
+            });
+        }
         match frame.kind {
             FrameKind::Begin => {
                 if self.begun {
@@ -999,10 +1048,16 @@ impl StreamDecoder {
                 }
                 let count = read_u32(&frame.payload, 1)?;
                 let len = read_u32(&frame.payload, 5)? as usize;
-                if frame.payload.len() != 9 + len {
+                // `9 + len` overflows on a 32-bit target when `len` is near
+                // `u32::MAX`; checked arithmetic keeps that a refusal, not a
+                // panic on wasm32/i686.
+                let expected = 9usize
+                    .checked_add(len)
+                    .ok_or(Error::StreamDelta("batch length overflow"))?;
+                if frame.payload.len() != expected {
                     return Err(Error::StreamPayloadLen {
                         kind: frame.kind.code(),
-                        expected: (9 + len) as u32,
+                        expected: u32::try_from(expected).unwrap_or(u32::MAX),
                         found: frame.payload.len() as u64,
                     });
                 }
@@ -1015,9 +1070,6 @@ impl StreamDecoder {
                     }
                 } else if section != self.cursor && section != self.cursor + 1 {
                     return Err(Error::StreamState("sections out of order"));
-                }
-                if section == self.cursor + 1 {
-                    self.cursor = section;
                 }
                 if self.seen[section] && self.counts[section] != count {
                     return Err(Error::StreamState("section count changed mid-stream"));
@@ -1047,6 +1099,12 @@ impl StreamDecoder {
                         limit: self.limits.max_total_bytes,
                     });
                 }
+                // Advance only now: a refused batch must leave the decoder
+                // believing the previous section is current, or the next frame
+                // jumps a section and leaves a hole.
+                if section == self.cursor + 1 {
+                    self.cursor = section;
+                }
                 self.seen[section] = true;
                 self.counts[section] = count;
                 self.sections[section].extend_from_slice(&frame.payload[9..]);
@@ -1057,6 +1115,11 @@ impl StreamDecoder {
                 }
                 let mut cursor = 0usize;
                 let count = take_u32(&frame.payload, &mut cursor)?;
+                if count == 0 {
+                    // A zero-op delta still opens a generation that a closing
+                    // `End` re-encodes and re-validates: refuse it instead.
+                    return Err(Error::StreamDelta("empty delta"));
+                }
                 // Only the caller's limits decide. A default-limits pre-check
                 // here would refuse a delta that a caller explicitly widened.
                 if self.pending_deltas.len().saturating_add(count as usize)
@@ -1103,14 +1166,21 @@ impl StreamDecoder {
                 let mut hash = [0u8; 32];
                 hash.copy_from_slice(&frame.payload[..32]);
                 let size = read_u64(&frame.payload, 32)?;
+                if self.ended && self.pending_deltas.is_empty() {
+                    // A repeat `End` with no delta would re-encode and
+                    // re-validate the same module forever (measured 22 s from
+                    // 800 wire bytes).
+                    return Err(Error::StreamState("end without delta"));
+                }
                 if self.ended {
                     // Incremental generation: apply pending deltas first.
                     let base = self
                         .module
                         .as_ref()
                         .ok_or(Error::StreamState("no module to patch"))?;
-                    let updated = apply_delta(base, &self.pending_deltas)?;
+                    let updated = apply_delta_with_limits(base, &self.pending_deltas, self.limits)?;
                     let image = encode_with(&updated, EncodeOpts::default())?;
+                    self.charge_generation(image.len())?;
                     if image.len() as u64 != size {
                         return Err(Error::StreamDelta("delta changed the declared size"));
                     }
@@ -1137,6 +1207,7 @@ impl StreamDecoder {
                     return Ok(());
                 }
                 let image = self.assemble(size)?;
+                self.charge_generation(image.len())?;
                 if hash_image(&image)? != hash {
                     return Err(Error::StreamHashMismatch);
                 }
@@ -1153,6 +1224,24 @@ impl StreamDecoder {
                 self.image = Some(image);
                 self.ended = true;
             }
+        }
+        Ok(())
+    }
+
+    /// Charge one completed generation against the stream's work ceiling.
+    ///
+    /// Every generation applies the pending deltas, re-encodes and fully
+    /// re-validates the module. A stream of tiny incremental frames is legal,
+    /// but an endless one is unbounded CPU from a few bytes each; the ceiling
+    /// is 64x the declared total bytes.
+    fn charge_generation(&mut self, bytes: usize) -> Result<()> {
+        self.generation_work = self.generation_work.saturating_add(bytes as u64);
+        let limit = self.limits.max_total_bytes.saturating_mul(64);
+        if self.generation_work > limit {
+            return Err(Error::Limit {
+                kind: "stream generation work",
+                limit,
+            });
         }
         Ok(())
     }
@@ -1288,7 +1377,7 @@ impl StreamEncoder {
         let mut payload = Vec::new();
         payload.extend_from_slice(
             &u32::try_from(ops.len())
-                .map_err(|_| Error::TooLarge)?
+                .map_err(|_| Error::StreamDelta("too many delta operations"))?
                 .to_le_bytes(),
         );
         for op in ops {
@@ -1297,8 +1386,9 @@ impl StreamEncoder {
         if payload.len() > MAX_FRAME_PAYLOAD as usize {
             // The decoder refuses a frame over the ceiling, so emitting one would
             // produce a stream that cannot be read. Delta frames carry one op set;
-            // a caller with more work sends another generation.
-            return Err(Error::TooLarge);
+            // a caller with more work sends another generation. This is a stream
+            // fault, not an image-address-space one.
+            return Err(Error::StreamDelta("delta frame exceeds the frame ceiling"));
         }
         self.frames
             .push_back(Frame::new(FrameKind::Delta, self.sequence, payload));
@@ -1434,11 +1524,14 @@ fn decode_fragment(
     limits: crate::layout::Limits,
 ) -> Result<InfinityModule> {
     let len = take_u32(buf, cursor)? as usize;
-    if *cursor + len > buf.len() {
-        return Err(Error::StreamDelta("truncated fragment"));
-    }
-    let bytes = &buf[*cursor..*cursor + len];
-    *cursor += len;
+    // On a 32-bit target `*cursor + len` wraps for a `u32`-sized length, which
+    // would build a slice with `start > end` and panic in release.
+    let end = cursor
+        .checked_add(len)
+        .filter(|end| *end <= buf.len())
+        .ok_or(Error::StreamDelta("truncated fragment"))?;
+    let bytes = &buf[*cursor..end];
+    *cursor = end;
     // A fragment is a complete image: validate it under the *stream's* limits,
     // not the defaults, so a delta cannot smuggle a larger module past a strict
     // caller.

@@ -604,7 +604,7 @@ messages. Every code below is part of the contract.
 | `infinity/too-large` | image exceeds the 4 GiB address space |
 | `infinity/stream-magic` | frame does not start with `AINS` |
 | `infinity/stream-version` | unsupported frame version |
-| `infinity/stream-frame-len` | frame length exceeds its ceiling or the buffer |
+| `infinity/stream-frame-len` | a stream frame declares more than `MAX_FRAME_PAYLOAD` (permanent; a short read is `infinity/truncated`) |
 | `infinity/stream-frame-kind` | unknown frame kind |
 | `infinity/stream-flags` | unknown stream frame flag bits |
 | `infinity/stream-payload` | a complete stream frame's payload contradicts its kind |

@@ -71,6 +71,19 @@ pub enum Error {
     Type { id: u32, reason: &'static str },
     /// An edge endpoint is out of range or an edge is self-referential.
     Edge { from: u32, to: u32 },
+    /// The stored edge table does not match the references in the node table.
+    ///
+    /// Distinct from [`Error::Edge`], which names one bad pair: a set mismatch
+    /// has no pair to name, and reporting `0 -> 0` collided with a genuine
+    /// self-loop report. Shares the `infinity/edge` code.
+    EdgeSet,
+    /// A part-table entry carries an unknown tag.
+    ///
+    /// Node validation reports the referencing node first; this variant is the
+    /// fallback for a part record no node names.
+    Part { index: u32, reason: &'static str },
+    /// An aux entry is not referenced by any type or node.
+    AuxUnreferenced { index: u32 },
     /// An annotation record is malformed.
     Annotation { id: u32, reason: &'static str },
     /// The provenance block is malformed.
@@ -122,7 +135,11 @@ pub enum Error {
     StreamMagic,
     /// Unsupported stream frame version.
     StreamVersion(u8),
-    /// A stream frame length exceeds the limit or the available bytes.
+    /// A stream frame declares a payload past the frame ceiling.
+    ///
+    /// This is a permanent fault: no amount of additional input makes a frame
+    /// larger than `MAX_FRAME_PAYLOAD` acceptable. A buffer that merely stops
+    /// short of a legal frame is [`Error::Truncated`] instead.
     StreamFrameLen { declared: u32, available: u64 },
     /// A complete stream frame's payload contradicts its kind.
     ///
@@ -175,7 +192,9 @@ impl Error {
             Error::UnknownUnit(_) => "infinity/unknown-unit",
             Error::UnitRef(_) => "infinity/unit-ref",
             Error::Type { .. } => "infinity/type",
-            Error::Edge { .. } => "infinity/edge",
+            Error::Edge { .. } | Error::EdgeSet => "infinity/edge",
+            Error::Part { .. } => "infinity/node",
+            Error::AuxUnreferenced { .. } => "infinity/count",
             Error::Annotation { .. } => "infinity/annotation",
             Error::Provenance(_) => "infinity/provenance",
             Error::Extension { .. } => "infinity/extension",
@@ -233,10 +252,7 @@ impl Error {
     /// one-shot reader has no more bytes to supply and treats every error as
     /// terminal.
     pub const fn is_incomplete(&self) -> bool {
-        matches!(
-            self,
-            Error::HeaderTruncated | Error::Truncated { .. } | Error::StreamFrameLen { .. }
-        )
+        matches!(self, Error::HeaderTruncated | Error::Truncated { .. })
     }
 
     /// True when the failure means the input is untrusted or corrupt.
@@ -277,6 +293,9 @@ impl Error {
                 | Error::UnitRef(_)
                 | Error::Type { .. }
                 | Error::Edge { .. }
+                | Error::EdgeSet
+                | Error::Part { .. }
+                | Error::AuxUnreferenced { .. }
                 | Error::Annotation { .. }
                 | Error::Provenance(_)
                 | Error::Extension { .. }
@@ -288,6 +307,7 @@ impl Error {
                 | Error::Depth { .. }
                 | Error::StreamMagic
                 | Error::StreamVersion(_)
+                | Error::StreamFrameLen { .. }
                 | Error::StreamFrameKind(_)
                 | Error::StreamFlags(_)
                 | Error::StreamPayloadLen { .. }
@@ -332,6 +352,11 @@ impl fmt::Display for Error {
             Error::UnitRef(id) => write!(f, "dangling unit reference {id}"),
             Error::Type { id, reason } => write!(f, "type {id} is invalid: {reason}"),
             Error::Edge { from, to } => write!(f, "invalid edge {from} -> {to}"),
+            Error::EdgeSet => write!(f, "edge table does not match the node references"),
+            Error::Part { index, reason } => write!(f, "part {index} is invalid: {reason}"),
+            Error::AuxUnreferenced { index } => {
+                write!(f, "aux entry {index} is not referenced")
+            }
             Error::Annotation { id, reason } => write!(f, "annotation {id} is invalid: {reason}"),
             Error::Provenance(reason) => write!(f, "provenance block is invalid: {reason}"),
             Error::Extension { tag, reason } => {
@@ -536,6 +561,12 @@ mod code_tests {
             Error::NodeRef(0),
             Error::HashMismatch,
             Error::StreamHashMismatch,
+            // A frame past the wire ceiling is permanent: more bytes cannot make
+            // it valid.
+            Error::StreamFrameLen {
+                declared: u32::MAX,
+                available: 40,
+            },
         ] {
             assert!(fatal.is_fatal(), "{fatal:?} is a corrupt-input fault");
         }
@@ -546,10 +577,6 @@ mod code_tests {
             Error::Truncated {
                 needed: 4,
                 found: 0,
-            },
-            Error::StreamFrameLen {
-                declared: 8,
-                available: 0,
             },
         ] {
             assert!(!incomplete.is_fatal(), "{incomplete:?} is incomplete");

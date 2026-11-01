@@ -33,27 +33,37 @@ fn replay(frames: &[Frame]) -> StreamDecoder {
 fn a_no_op_delta_is_refused() {
     let base = base_module();
     let root = base.root().expect("root");
-    let cases: Vec<DeltaOp> = vec![
-        DeltaOp::SetRoot(Some(root)),
-        DeltaOp::RemoveBinding {
-            name: "absent".to_string(),
-        },
-        DeltaOp::SetProvenance(None),
-    ];
-    for (index, op) in cases.into_iter().enumerate() {
+    // The encoder refuses these too, so the frames are built by hand: this test
+    // is about the decoder's own guard. Payloads are the wire form of one op.
+    let mut set_root = Vec::new();
+    set_root.extend_from_slice(&1u32.to_le_bytes());
+    set_root.push(0); // SetRoot
+    set_root.extend_from_slice(&root.0.to_le_bytes());
+
+    let mut set_provenance = Vec::new();
+    set_provenance.extend_from_slice(&1u32.to_le_bytes());
+    set_provenance.push(7); // SetProvenance
+    set_provenance.push(0); // None
+
+    for (index, payload) in [set_root, set_provenance].into_iter().enumerate() {
         let frames = encode_stream(&base, 4096).expect("frames");
         let mut decoder = replay(&frames);
-        let mut encoder = StreamEncoder::new(&base, 4096).expect("encoder");
-        encoder.push_delta(&base, &[op]).expect("delta frames");
-        let all = encoder.frames();
-        let mut error = None;
-        for frame in &all[all.len() - 2..] {
-            if let Err(found) = decoder.push(frame) {
-                error = Some(found);
-                break;
-            }
-        }
-        let error = error.expect("a no-op delta must be refused");
+        let delta = Frame {
+            kind: FrameKind::Delta,
+            sequence: decoder.frames(),
+            payload,
+        };
+        decoder
+            .push(&delta)
+            .expect("the delta frame itself is valid");
+        let end = Frame {
+            kind: FrameKind::End,
+            sequence: decoder.frames(),
+            payload: vec![0u8; 40],
+        };
+        let error = decoder
+            .push(&end)
+            .expect_err("a no-op delta must be refused");
         assert_eq!(
             error.code(),
             "infinity/stream-delta",
@@ -184,7 +194,13 @@ fn a_non_boolean_tag_is_refused() {
     let base = base_module();
     let mut encoder = StreamEncoder::new(&base, 4096).expect("encoder");
     encoder
-        .push_delta(&base, &[DeltaOp::SetProvenance(None)])
+        .push_delta(
+            &base,
+            &[DeltaOp::SetProvenance(Some(Provenance {
+                timestamp_ms: 1,
+                ..Provenance::default()
+            }))],
+        )
         .expect("delta");
     let frames = encoder.frames();
     let mut decoder = StreamDecoder::new();

@@ -1257,3 +1257,44 @@ fixed; six behavioural tests were proved to fail against `02612d9`.
 Measured: the secret table now holds one copy per unique literal; the round-9
 probes (1 000 refs of one 64 KiB literal) drop from 131 MB to the literal's
 size. Gate: 428 tests, clippy clean on both feature sets, fmt clean.
+
+### Re-audit round 10 (I-12) and round 6 (I-13) - 2026-11-01
+
+**I-12 round 10** found two criticals and two highs left in the round-9 work:
+the stored-redaction set still missed locator literals inside expressions (C1),
+its builder was per-reference and quadratic (C2), the framed tie-break was not
+injective for named units and untagged schema slots (C3), and the fragment check
+ran before redaction, so the marker could reintroduce a fragment (H1). All are
+fixed; seven tests were proved to fail against `f96f77a`.
+
+| # | Sev | Finding | Disposition |
+|---|-----|---------|-------------|
+| C1 | critical | an expression locator (`secret("hun" + "ter2")`) left its literal out of the stored-redaction set, so the image published it in prose | **fixed**: one walk (the same traversal as promotion) collects every `Str`/`Ident` in locator material; `an_expression_locator_literal_is_redacted_from_metadata` (fails pre-fix) |
+| C2 | critical | that set was built with a per-`SecretRef` `resolve_locator`, 5.7 s for a 3.9 MB image at 20k refs x 4k chain inside `validate_canonical` | **fixed**: one visited set, linear; `resolve_locator` deleted |
+| C3 | critical | the framed render omitted a named unit's name and the schema-field slot tag, so two equal modules could encode differently | **fixed**: both are emitted only when `framed`, keeping the primary key byte-identical; `a_named_unit_breaks_a_key_tie_by_name`, `a_schema_field_slot_tag_breaks_a_key_tie` (fail pre-fix) |
+| H1 | high | the fragment check inspected raw text, so marker insertion could create a fragment and a fragment inside the marker slipped through | **fixed**: the check runs on the redacted text; `a_fragment_created_by_redaction_is_refused` (fails pre-fix) |
+| M1 | medium | `Debug` for `Blob`, `ProvValue::Hash` and `Provenance` still printed a 32-byte secret as hex/decimal | **fixed**: fixed placeholders; `debug_of_public_types_never_prints_a_hash` (fails pre-fix) |
+| M2 | medium | the blob scan charged `(len-m+1)*m`, refusing ordinary 1 MiB blobs with a short secret | **fixed**: charge one pass; `a_large_blob_with_a_short_secret_encodes` (fails pre-fix) |
+| M3 | medium | fragments in structural labels (field/binding/env/unit/media type) stayed in the string heap | **fixed**: labels are refused; `a_fragment_in_a_label_is_refused` (fails pre-fix) |
+| M4 | low | framed tie-break keys were not charged to the annotation-key budget | **fixed**: charged, once per distinct subject |
+| L1 | low | a re-encode failure during `validate_canonical` surfaced as `infinity/encode` | **fixed**: `infinity/not-canonical` |
+
+**I-13 round 6** found that the round-5 ceiling mechanisms were present but the
+*amount* charged was peer-controlled: two criticals and one high.
+
+| # | Sev | Finding | Disposition |
+|---|-----|---------|-------------|
+| R6-1 | critical | generation work charged `End.size` (peer-controlled) while the work is the accumulated bytes: 1.7 M free assemblies measured | **fixed**: `assembled_len` computes the real length from the section buffers before allocating, the charge uses it, and a disagreement is `infinity/stream-hash`; `a_first_generation_end_size_lie_cannot_buy_free_assembly` (fails pre-fix) |
+| R6-2 | critical | `pending_deltas` cost 144 bytes per 5 wire bytes with no decoded-state bound (54x amplifier, 2.4 GiB at the op cap) | **fixed**: `decoded_op_bytes + pending_delta_bytes <= max_total_bytes`; `a_delta_frame_cannot_buy_more_than_its_wire_bytes` (fails pre-fix) |
+| R6-3 | high | the incremental charge used the image size although applying the ops dominates | **fixed**: charge `max(image, decoded op bytes)` |
+| R6-4 | medium | a refused `Delta` frame was free work and replayable | **fixed**: every delta frame is charged when decoded; `a_replayed_delta_frame_is_charged` (fails pre-fix) |
+| R6-5 | medium | `push_bytes` promised per-frame recovery but kept a tail parsed against the failed frame | **fixed**: a semantic fault drops the buffer and the docs say so; `a_refused_frame_ends_the_buffered_stream` (fails pre-fix) |
+| R6-6 | low | generation-1 size mismatch had its own non-fatal code | **fixed**: `infinity/stream-hash`; `a_first_generation_size_mismatch_is_a_hash_fault` (fails pre-fix) |
+| R6-7 | low | `size as usize` truncated on 32-bit targets | **fixed**: `usize::try_from` |
+| R6-8 | low | `StreamSequence` was fatal while `push` documented a retry; the missing-section state was undocumented; the part/aux aliases did not name their codes | **fixed**: docs and variant docs |
+
+The encoder now also refuses to emit a no-op delta its own decoder rejects
+(`the_encoder_refuses_a_no_op_delta`, fails pre-fix).
+
+Gate: 441 library/integration, 42 CLI, 27 FFI, clippy clean both feature sets,
+fmt clean.

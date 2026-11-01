@@ -568,15 +568,14 @@ impl fmt::Debug for Inode {
                 write!(f, "ContentAddressed(<media>, {data})")
             }
             Inode::Blob {
-                hash,
+                hash: _,
                 size,
                 tainted,
                 media_type,
                 payload,
             } => write!(
                 f,
-                "Blob(blake3:{}, size={size}, media=<{} bytes>, tainted={tainted}, payload={})",
-                hash_hex(hash),
+                "Blob(blake3:<32 bytes>, size={size}, media=<{} bytes>, tainted={tainted}, payload={})",
                 media_type.len(),
                 match payload {
                     Some(bytes) => format!("{} bytes", bytes.len()),
@@ -992,7 +991,9 @@ impl fmt::Debug for ProvValue {
             ProvValue::Text(text) => write!(f, "Text(<{} bytes>)", text.len()),
             ProvValue::Int(value) => write!(f, "Int({value})"),
             ProvValue::Flag(flag) => write!(f, "Flag({flag})"),
-            ProvValue::Hash(hash) => write!(f, "Hash(blake3:{})", hash_hex(hash)),
+            // A 32-byte secret can be used as a hash on a hand-built module, and
+            // `Debug` runs before the encoder refuses it.
+            ProvValue::Hash(_) => write!(f, "Hash(<32 bytes>)"),
         }
     }
 }
@@ -1050,7 +1051,7 @@ impl fmt::Debug for Provenance {
             .field("timestamp_ms", &self.timestamp_ms)
             .field("model", &self.model.as_ref().map(|text| text.len()))
             .field("tool", &self.tool.as_ref().map(|text| text.len()))
-            .field("parent", &self.parent)
+            .field("parent", &self.parent.as_ref().map(|_| "<32 bytes>"))
             .field("entries", &self.entries)
             .finish()
     }

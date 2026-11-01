@@ -119,9 +119,9 @@ pub(crate) fn prepare(module: &InfinityModule) -> Result<Prepared> {
     // therefore not occur in the metadata at all. If it did, the image would not
     // be a fixed point: a decoded fragment is an ordinary secret on the next
     // pass, so `encode(decode(image))` would differ (or refuse). Fail loud.
-    if !fragments.is_empty() {
-        reject_fragments_in_metadata(module, &fragments)?;
-    }
+    // The fragment check runs after the metadata redaction below, on the text
+    // that is actually stored: inserting the marker can create a fragment at a
+    // boundary, and a fragment inside the marker would otherwise slip through.
 
     // 2. Pre-order numbering from the roots.
     let order = canonical_order(&canonical_nodes, module)?;
@@ -208,6 +208,11 @@ pub(crate) fn prepare(module: &InfinityModule) -> Result<Prepared> {
         .cloned()
         .map(|prov| redact_provenance(prov, &secret_literals, &redaction))
         .transpose()?;
+    if !fragments.is_empty() {
+        reject_fragments_in_annotations(&annotations, &fragments)?;
+        reject_fragments_in_provenance(provenance.as_ref(), &fragments)?;
+        reject_fragments_in_labels(module, &fragments)?;
+    }
     if let Some(prov) = &provenance {
         if let Some(producer) = &prov.producer {
             strings.push(producer.clone());
@@ -669,10 +674,10 @@ fn scan_payload(
         if secret.is_empty() || secret.len() > payload.len() {
             continue;
         }
-        // Each window comparison costs the secret's length, so charge the bytes
-        // compared, not the window count.
-        *work =
-            work.saturating_add((payload.len() - secret.len() + 1).saturating_mul(secret.len()));
+        // The scan is a first-byte filter plus a compare on candidates, so one
+        // pass costs about the payload length. Charging the worst-case product
+        // refused ordinary blobs (1 MiB payload + a 100-byte secret).
+        *work = work.saturating_add(payload.len());
         if *work > MAX_SECRET_SCAN_BYTES {
             return Err(Error::Limit {
                 kind: "secret copy scan bytes",
@@ -711,62 +716,125 @@ fn normalize_type(typ: &TypeSpec) -> TypeSpec {
 /// targets: a one-byte fragment would rewrite any prose that contains that
 /// byte, and a fragment inside `***SECRET***` would refuse the module.
 fn storage_secret_texts(nodes: &[Inode]) -> Vec<String> {
-    let mut out = Vec::new();
-    for node in nodes {
-        match node {
-            Inode::Secret(secret) => {
-                out.push(String::from_utf8_lossy(secret.expose()).into_owned());
-            }
-            Inode::SecretRef { locator } => {
-                if let Some(index) = resolve_locator(nodes, *locator) {
-                    if let Inode::Str(text) | Inode::Ident(text) = &nodes[index] {
-                        out.push(text.clone());
-                    }
-                }
-            }
+    let count = nodes.len();
+    let mut out: Vec<String> = nodes
+        .iter()
+        .filter_map(|node| match node {
+            Inode::Secret(secret) => Some(String::from_utf8_lossy(secret.expose()).into_owned()),
+            _ => None,
+        })
+        .collect();
+    // Mirror promotion exactly: every `Str`/`Ident` in locator material is
+    // secret material, including one inside an expression. `InterpPart::Literal`
+    // is excluded here (it is handled by the fragment refusal), because a
+    // fragment must not rewrite prose. One visited set keeps this linear; the
+    // previous per-ref `resolve_locator` missed expression literals and was
+    // quadratic in a long chain.
+    let mut visited = vec![false; count];
+    let mut stack: Vec<NodeId> = nodes
+        .iter()
+        .filter_map(|node| match node {
+            Inode::SecretRef { locator } => Some(*locator),
+            _ => None,
+        })
+        .collect();
+    while let Some(id) = stack.pop() {
+        if id.index() >= count || visited[id.index()] {
+            continue;
+        }
+        visited[id.index()] = true;
+        match &nodes[id.index()] {
+            Inode::Str(text) | Inode::Ident(text) => out.push(text.clone()),
             _ => {}
         }
+        stack.extend(nodes[id.index()].children());
     }
+    out.sort();
+    out.dedup();
     out
 }
 
-/// Refuse a metadata string that contains a locator fragment.
-fn reject_fragments_in_metadata(module: &InfinityModule, fragments: &[String]) -> Result<()> {
-    let contains = |text: &str| {
-        fragments
-            .iter()
-            .any(|fragment| !fragment.is_empty() && text.contains(fragment.as_str()))
-    };
-    for annotation in module.annotations() {
+/// Whether `text` contains any promoted locator fragment.
+fn contains_fragment(text: &str, fragments: &[String]) -> bool {
+    fragments
+        .iter()
+        .any(|fragment| !fragment.is_empty() && text.contains(fragment.as_str()))
+}
+
+/// Refuse a *redacted* annotation that still contains a locator fragment.
+///
+/// Fragments are not stored-metadata redaction targets: rewriting a one-byte
+/// fragment would destroy the prose, and a decoded fragment is an ordinary
+/// secret on the next pass, so a stored copy breaks the canonical fixed point.
+fn reject_fragments_in_annotations(annotations: &[Annotation], fragments: &[String]) -> Result<()> {
+    for annotation in annotations {
         let hit = match &annotation.kind {
-            AnnotationKind::Intent(text) => contains(text),
-            AnnotationKind::Constraint { source, .. } => contains(source),
+            AnnotationKind::Intent(text) => contains_fragment(text, fragments),
+            AnnotationKind::Constraint { source, .. } => contains_fragment(source, fragments),
             AnnotationKind::AiImmutable(_) => false,
         };
         if hit {
             return Err(Error::Encode("a secret fragment occurs in an annotation"));
         }
     }
-    if let Some(provenance) = module.provenance() {
-        for text in [
-            provenance.producer.as_deref(),
-            provenance.model.as_deref(),
-            provenance.tool.as_deref(),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            if contains(text) {
-                return Err(Error::Encode("a secret fragment occurs in provenance"));
-            }
+    Ok(())
+}
+
+fn reject_fragments_in_provenance(
+    provenance: Option<&Provenance>,
+    fragments: &[String],
+) -> Result<()> {
+    let Some(provenance) = provenance else {
+        return Ok(());
+    };
+    for text in [
+        provenance.producer.as_deref(),
+        provenance.model.as_deref(),
+        provenance.tool.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if contains_fragment(text, fragments) {
+            return Err(Error::Encode("a secret fragment occurs in provenance"));
         }
-        for entry in &provenance.entries {
-            let hit = contains(&entry.key)
-                || matches!(&entry.value, ProvValue::Text(text) if contains(text));
-            if hit {
-                return Err(Error::Encode("a secret fragment occurs in provenance"));
-            }
+    }
+    for entry in &provenance.entries {
+        let hit = contains_fragment(&entry.key, fragments)
+            || matches!(&entry.value, ProvValue::Text(text) if contains_fragment(text, fragments));
+        if hit {
+            return Err(Error::Encode("a secret fragment occurs in provenance"));
         }
+    }
+    Ok(())
+}
+
+/// Structural labels are stored verbatim, so a fragment in one would sit in the
+/// public string heap; refuse it instead of publishing it.
+fn reject_fragments_in_labels(module: &InfinityModule, fragments: &[String]) -> Result<()> {
+    let mut hit = module
+        .bindings()
+        .iter()
+        .any(|(name, _)| contains_fragment(name, fragments));
+    for node in module.nodes() {
+        if hit {
+            break;
+        }
+        hit = match node {
+            Inode::Table { fields } | Inode::SchemaTable { fields, .. } => fields
+                .iter()
+                .any(|(name, _)| contains_fragment(name, fragments)),
+            Inode::Env { name, .. } => contains_fragment(name, fragments),
+            Inode::Quantity {
+                unit: UnitTag::Named(name),
+                ..
+            } => contains_fragment(name, fragments),
+            Inode::Blob { media_type, .. } => contains_fragment(media_type, fragments),
+            _ => false,
+        };
+    }
+    if hit {
+        return Err(Error::Encode("a secret fragment occurs in a stored label"));
     }
     Ok(())
 }
@@ -909,30 +977,6 @@ fn reachable(nodes: &[Inode], roots: impl IntoIterator<Item = NodeId>, count: us
         }
     }
     public
-}
-
-/// Index of the node a secret locator resolves to, through transparent
-/// wrappers: a `Str`/`Ident` literal or an `Interpolate` of literal parts.
-///
-/// The walk is bounded by the node count (a visited set would be larger than
-/// the chain it guards), so a malformed in-memory module cannot loop.
-fn resolve_locator(nodes: &[Inode], locator: NodeId) -> Option<usize> {
-    let mut current = locator;
-    for _ in 0..nodes.len() {
-        match nodes.get(current.index())? {
-            Inode::Str(_) | Inode::Ident(_) | Inode::Interpolate { .. } => {
-                return Some(current.index())
-            }
-            Inode::Ref(next) | Inode::Semantic { inner: next, .. } => current = *next,
-            Inode::Quantity { value, .. } => current = *value,
-            Inode::Env {
-                default: Some(next),
-                ..
-            } => current = *next,
-            _ => return None,
-        }
-    }
-    None
 }
 
 /// Rewrite every node reference in `node` through `remap`.
@@ -1273,6 +1317,14 @@ fn content_key_with(nodes: &[crate::ir::Inode], id: NodeId, framed: bool) -> Res
             I::Quantity { value, unit } => {
                 ch(out, 'q')?;
                 text(out, framed, &unit.discriminant().to_string())?;
+                if framed {
+                    // Every named unit shares one discriminant; without the
+                    // name two units render identically.
+                    if let UnitTag::Named(name) = unit {
+                        ch(out, 'n')?;
+                        text(out, framed, name)?;
+                    }
+                }
                 ch(out, ':')?;
                 render(nodes, framed, *value, out, depth + 1)?;
             }
@@ -1436,7 +1488,7 @@ fn content_key_with(nodes: &[crate::ir::Inode], id: NodeId, framed: bool) -> Res
                     }
                     other => text(out, framed, &format!("{other:?}"))?,
                 }
-                for optional in [
+                for (slot, optional) in [
                     spec.min,
                     spec.max,
                     spec.min_len,
@@ -1445,8 +1497,14 @@ fn content_key_with(nodes: &[crate::ir::Inode], id: NodeId, framed: bool) -> Res
                     spec.default,
                 ]
                 .into_iter()
-                .flatten()
+                .enumerate()
+                .flat_map(|(slot, node)| node.map(|node| (slot, node)))
                 {
+                    if framed {
+                        // `min` and `max` both pointing at the same node used to
+                        // render identically.
+                        ch(out, char::from(b'a' + slot as u8))?;
+                    }
                     render(nodes, framed, optional, out, depth + 1)?;
                 }
                 if let Some(spec_text) = &spec.deprecated {
@@ -1523,6 +1581,7 @@ fn break_key_ties(
     nodes: &[crate::ir::Inode],
     keys: &[String],
     entries: &mut [(usize, NodeId)],
+    total: &mut usize,
 ) -> Result<()> {
     let mut start = 0;
     while start < entries.len() {
@@ -1531,13 +1590,28 @@ fn break_key_ties(
             end += 1;
         }
         if end - start > 1 {
-            let mut detailed: Vec<(String, (usize, NodeId))> = entries[start..end]
-                .iter()
-                .map(|entry| Ok((content_key_framed(nodes, entry.1)?, *entry)))
-                .collect::<Result<Vec<_>>>()?;
-            detailed.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1 .1.cmp(&b.1 .1)));
-            for (offset, (_, entry)) in detailed.into_iter().enumerate() {
-                entries[start + offset] = entry;
+            // One render per *distinct* subject, not per annotation: a subject
+            // annotated a million times is one tie, not a million renders.
+            let mut seen = std::collections::HashSet::new();
+            let mut framed: std::collections::HashMap<NodeId, String> =
+                std::collections::HashMap::new();
+            for entry in &entries[start..end] {
+                if !seen.insert(entry.1) {
+                    continue;
+                }
+                let key = content_key_framed(nodes, entry.1)?;
+                *total = total.saturating_add(key.len());
+                if *total > MAX_ANNOTATION_KEY_BYTES {
+                    return Err(Error::Limit {
+                        kind: "annotation key bytes",
+                        limit: MAX_ANNOTATION_KEY_BYTES as u64,
+                    });
+                }
+                framed.insert(entry.1, key);
+            }
+            if framed.len() > 1 {
+                entries[start..end]
+                    .sort_by(|a, b| framed[&a.1].cmp(&framed[&b.1]).then_with(|| a.1.cmp(&b.1)));
             }
         }
         start = end;
@@ -1578,7 +1652,7 @@ fn canonical_order(nodes: &[Inode], module: &InfinityModule) -> Result<Vec<NodeI
         .collect::<Result<Vec<_>>>()?;
     // Same order as sorting the `(key, id)` pairs: key bytes, then the id.
     subjects.sort_by(|a, b| keys[a.0].cmp(&keys[b.0]).then_with(|| a.1.cmp(&b.1)));
-    break_key_ties(nodes, &keys, &mut subjects)?;
+    break_key_ties(nodes, &keys, &mut subjects, &mut total)?;
     roots.extend(subjects.into_iter().map(|(_, id)| id));
     let mut exprs: Vec<(usize, NodeId)> = module
         .annotations()
@@ -1595,7 +1669,7 @@ fn canonical_order(nodes: &[Inode], module: &InfinityModule) -> Result<Vec<NodeI
         })
         .collect::<Result<Vec<_>>>()?;
     exprs.sort_by(|a, b| keys[a.0].cmp(&keys[b.0]).then_with(|| a.1.cmp(&b.1)));
-    break_key_ties(nodes, &keys, &mut exprs)?;
+    break_key_ties(nodes, &keys, &mut exprs, &mut total)?;
     roots.extend(exprs.into_iter().map(|(_, id)| id));
 
     let mut order = Vec::with_capacity(nodes.len());

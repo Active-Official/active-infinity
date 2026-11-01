@@ -166,7 +166,8 @@ impl<'a> Validated<'a> {
                     mark_canonical: true,
                     streamed: header.flags & crate::layout::FLAG_STREAMED != 0,
                 },
-            )?;
+            )
+            .map_err(|_| Error::NotCanonical)?;
             if image != buf {
                 return Err(Error::NotCanonical);
             }

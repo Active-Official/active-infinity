@@ -934,11 +934,11 @@ impl StreamDecoder {
     /// Feed raw frame bytes. Frames may be split across calls and several may
     /// arrive in one call; partial frames are buffered.
     ///
-    /// A refused frame is consumed and the semantic state is rolled back, so a
-    /// caller can fix that frame and send it again. The decoder is not rewound:
-    /// a fault that ends the call is permanent for the bytes already consumed,
-    /// which is why `stream-state` and `stream-delta` are documented as
-    /// recoverable *per frame*, not per buffer.
+    /// A fault ends the byte stream: the refused frame and any tail after it
+    /// are discarded, and the semantic state is rolled back. `push` (one frame)
+    /// stays retryable per frame; `push_bytes` is not, because the tail was
+    /// parsed against a frame that failed. A caller that wants to retry one
+    /// frame feeds it to `push` directly.
     pub fn push_bytes(&mut self, buf: &[u8]) -> Result<()> {
         self.partial.extend_from_slice(buf);
         // Parse against an offset and compact once: draining per frame moves the
@@ -969,8 +969,12 @@ impl StreamDecoder {
                     match self.push(&frame) {
                         Ok(()) => consumed_total += consumed,
                         Err(error) => {
-                            consumed_total += consumed;
-                            self.partial.drain(..consumed_total);
+                            // Sequence and semantic state are rolled back inside
+                            // `push`, but the *tail* of this buffer was parsed
+                            // against the frame that just failed, so it can
+                            // never be delivered. Drop it: a semantic fault ends
+                            // this byte stream, and the caller opens a new one.
+                            self.partial.clear();
                             return Err(error);
                         }
                     }
@@ -996,8 +1000,8 @@ impl StreamDecoder {
     ///
     /// A frame that fails semantic validation leaves the decoder exactly as it
     /// was: the sequence counter, the frame counter and any partially decoded
-    /// deltas are restored, so the caller can fix the input and retry instead of
-    /// being wedged at a sequence error.
+    /// deltas are restored, so the caller can fix the input and retry. A
+    /// sequence mismatch itself is fatal: the caller must reopen the stream.
     pub fn push(&mut self, frame: &Frame) -> Result<()> {
         if frame.sequence != self.expected {
             return Err(Error::StreamSequence {
@@ -1178,6 +1182,9 @@ impl StreamDecoder {
                 }
                 let mut cursor = 0usize;
                 let count = take_u32(&frame.payload, &mut cursor)?;
+                // Decoding is work even when the frame is later refused, and a
+                // replayed frame must not be free.
+                self.charge_generation(frame.payload.len())?;
                 if count == 0 {
                     // A zero-op delta still opens a generation that a closing
                     // `End` re-encodes and re-validates: refuse it instead.
@@ -1191,6 +1198,21 @@ impl StreamDecoder {
                     return Err(Error::Limit {
                         kind: "delta operations",
                         limit: self.limits.max_aux as u64,
+                    });
+                }
+                // `DeltaOp` is far larger than its wire form (a `SetRoot` is 5
+                // bytes and 144 bytes decoded). The bound is on decoded state,
+                // not on wire bytes: one frame otherwise buys a 54x amplifier.
+                let decoded = self
+                    .pending_deltas
+                    .len()
+                    .saturating_add(count as usize)
+                    .saturating_mul(std::mem::size_of::<DeltaOp>());
+                let held = decoded.saturating_add(self.pending_delta_bytes as usize) as u64;
+                if held > self.limits.max_total_bytes {
+                    return Err(Error::Limit {
+                        kind: "delta decoded bytes",
+                        limit: self.limits.max_total_bytes,
                     });
                 }
                 self.pending_delta_bytes = self
@@ -1237,9 +1259,14 @@ impl StreamDecoder {
                 }
                 if self.ended {
                     // Incremental generation: charge before the clone, merge
-                    // and encode, using the current image size as the estimate.
+                    // and encode. The apply loop's cost is proportional to the
+                    // decoded op count as well as to the image size.
                     let estimate = self.image.as_ref().map(|image| image.len()).unwrap_or(0);
-                    self.charge_generation(estimate)?;
+                    let ops = self
+                        .pending_deltas
+                        .len()
+                        .saturating_mul(std::mem::size_of::<DeltaOp>());
+                    self.charge_generation(estimate.max(ops))?;
                     let base = self
                         .module
                         .as_ref()
@@ -1283,9 +1310,21 @@ impl StreamDecoder {
                     self.image = Some(image);
                     return Ok(());
                 }
-                // Charge the declared size before assembling: a wrong-hash
-                // `End` is retryable, and the retry must not be free.
-                self.charge_generation(size as usize)?;
+                // Charge the *accumulated* size, not the peer's `End.size`: the
+                // declared number is untrusted, and charging it let a lie buy a
+                // full assembly for 224 bytes of budget. The assembled length is
+                // computable from the section buffers before allocating.
+                let expected = self.assembled_len()?;
+                // Charge first: the length is the work the assembly would do,
+                // and a disagreement below must still cost it.
+                let charge = usize::try_from(expected).map_err(|_| Error::TooLarge)?;
+                self.charge_generation(charge)?;
+                if expected != size {
+                    // The hash covers `total_size`, so a distinct size fault
+                    // would be a one-bit oracle; it is also the fuel for the
+                    // free-assembly loop.
+                    return Err(Error::StreamHashMismatch);
+                }
                 let image = self.assemble(size)?;
                 if hash_image(&image)? != hash {
                     return Err(Error::StreamHashMismatch);
@@ -1332,6 +1371,26 @@ impl StreamDecoder {
         Ok(())
     }
 
+    /// Length `assemble` would produce, computed from the section buffers.
+    ///
+    /// No allocation, so the work charge can be taken from the real size before
+    /// the assembly runs.
+    fn assembled_len(&self) -> Result<u64> {
+        if self.seen.iter().any(|seen| !seen) {
+            return Err(Error::StreamState("generation missing a section"));
+        }
+        let mut total = HEADER_SIZE as u64;
+        for section in Section::ALL {
+            let body = self.sections[section as usize].len() as u64;
+            total = total
+                .checked_add(body)
+                .and_then(|sum| sum.checked_add(7))
+                .ok_or(Error::TooLarge)?
+                & !7u64;
+        }
+        Ok(total)
+    }
+
     fn assemble(&self, size: u64) -> Result<Vec<u8>> {
         if size < HEADER_SIZE as u64 {
             return Err(Error::StreamDelta("declared size smaller than a header"));
@@ -1368,9 +1427,9 @@ impl StreamDecoder {
         let hash = hash_image(&image)?;
         image[16..48].copy_from_slice(&hash);
         if image.len() as u64 != size {
-            return Err(Error::StreamDelta(
-                "reassembled size disagrees with the end frame",
-            ));
+            // Unreachable after `assembled_len`'s pre-check; kept as a guard and
+            // classified like the hash fault it really is.
+            return Err(Error::StreamHashMismatch);
         }
         Ok(image)
     }
@@ -1460,6 +1519,11 @@ impl StreamEncoder {
     pub fn push_delta(&mut self, base: &InfinityModule, ops: &[DeltaOp]) -> Result<()> {
         let updated = apply_delta(base, ops)?;
         let image = encode_with(&updated, EncodeOpts::default())?;
+        if image == encode_with(base, EncodeOpts::default())? {
+            // The decoder refuses a no-op generation; emitting one would produce
+            // a stream the producer's own peer rejects.
+            return Err(Error::StreamDelta("delta did not change the module"));
+        }
         let mut payload = Vec::new();
         payload.extend_from_slice(
             &u32::try_from(ops.len())

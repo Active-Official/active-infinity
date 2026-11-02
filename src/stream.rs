@@ -929,9 +929,24 @@ impl StreamDecoder {
 
     /// Use explicit decode limits for the reassembled image and for every
     /// intermediate bound.
+    ///
+    /// The value is not validated here: a zero ceiling is discovered on the
+    /// first input that touches it. Prefer [`StreamDecoder::try_with_limits`]
+    /// when the limits come from configuration or a caller.
     pub fn with_limits(mut self, limits: crate::layout::Limits) -> Self {
         self.limits = limits;
         self
+    }
+
+    /// [`StreamDecoder::with_limits`] with the ceiling check at construction.
+    ///
+    /// A `Limits` with a zero anywhere is an argument error, not a limit the
+    /// reader should discover as `infinity/limit` on a hostile frame; refusing it
+    /// here names the field that is wrong.
+    pub fn try_with_limits(mut self, limits: crate::layout::Limits) -> crate::Result<Self> {
+        limits.check()?;
+        self.limits = limits;
+        Ok(self)
     }
 
     /// Feed raw frame bytes. Frames may be split across calls and several may

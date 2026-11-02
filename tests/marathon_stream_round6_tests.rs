@@ -192,3 +192,30 @@ fn the_encoder_refuses_a_no_op_delta() {
         .expect_err("a no-op delta is a producer bug");
     assert_eq!(error.code(), "infinity/stream-delta", "{error}");
 }
+
+/// A `Limits` with a zero ceiling is an argument error: the checked constructor
+/// refuses it and names the field, instead of letting the decoder discover it as
+/// a non-fatal refusal on a hostile frame.
+#[test]
+fn an_invalid_limits_value_is_refused_at_construction() {
+    let mut limits = active_infinity::Limits::strict();
+    limits.max_total_bytes = 0;
+    let error = StreamDecoder::new()
+        .try_with_limits(limits)
+        .expect_err("a zero ceiling is not a limit");
+    assert_eq!(error.code(), "infinity/invalid-argument");
+    assert!(error.to_string().contains("max_total_bytes"), "{error}");
+
+    // The honest value is accepted, and the decoder it builds still decodes.
+    let base = wide_base(10);
+    let image = encode(&base).expect("encode");
+    let frames = encode_stream(&base, 4096).expect("frames");
+    let mut decoder = StreamDecoder::new()
+        .try_with_limits(active_infinity::Limits::default())
+        .expect("valid limits");
+    for frame in frames {
+        decoder.push(&frame).expect("frame");
+    }
+    let out = decoder.finish().expect("assembled");
+    assert_eq!(out.image, image);
+}

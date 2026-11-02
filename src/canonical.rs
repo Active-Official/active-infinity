@@ -82,6 +82,22 @@ pub(crate) struct Prepared {
     pub number_index: HashMap<i64, u32>,
 }
 
+impl Drop for Prepared {
+    /// Overwrite the crate's own raw copies of secret bytes.
+    ///
+    /// `SecretBytes` already zeroes its buffer, but `secrets` is a second
+    /// transcription used by the payload scan and the encoder, and the allocator
+    /// hands a freed block to the next allocation. `strings` is not touched: the
+    /// format stores metadata prose there deliberately (redacted, and promoted
+    /// fragments by design), so it is content, not residue.
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+        for secret in &mut self.secrets {
+            secret.as_mut_slice().zeroize();
+        }
+    }
+}
+
 /// True when `value` is the one NaN bit pattern the format permits.
 pub(crate) fn is_canonical_nan(value: f64) -> bool {
     value.to_bits() == crate::layout::CANONICAL_NAN_BITS
@@ -542,7 +558,11 @@ pub(crate) fn redact_text(text: &str, secrets: &[String]) -> String {
             SECRET_MARKER.to_string()
         };
     }
-    let mut out = text.to_string();
+    // The intermediate buffer holds the text *before* every replacement, which
+    // is exactly where a secret still sits: each pass allocates a new string and
+    // drops the old one, so wrap it and let `Zeroizing` overwrite the freed
+    // block instead of leaving it for the next allocation.
+    let mut out = zeroize::Zeroizing::new(text.to_string());
     // A replacement can create a new secret by joining the text around it
     // (`hid` + `***SECRET***` + `den` is a secret again), so a pass repeats
     // until the text is clean. Every pass either removes an occurrence, collapses
@@ -554,7 +574,7 @@ pub(crate) fn redact_text(text: &str, secrets: &[String]) -> String {
             .filter(|secret| !secret.is_empty() && out.contains(secret.as_str()))
             .collect();
         if matched.is_empty() {
-            return out;
+            return out.to_string();
         }
         if marker_tainted {
             // The marker itself contains a secret, so inserting it would publish
@@ -566,7 +586,7 @@ pub(crate) fn redact_text(text: &str, secrets: &[String]) -> String {
         // order of the secret table.
         matched.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
         for secret in matched {
-            out = out.replace(secret.as_str(), SECRET_MARKER);
+            out = zeroize::Zeroizing::new(out.replace(secret.as_str(), SECRET_MARKER));
         }
     }
     SECRET_MARKER.to_string()

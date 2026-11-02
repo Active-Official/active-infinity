@@ -1318,7 +1318,7 @@ behaviour.
 | F9 | medium | an empty materialised blob and a detached blob with the same hash emitted duplicate records | **fixed**: an empty payload is keyed as absent in the blob table (the node flag still round-trips) |
 | F10 | low | a re-encode ceiling fault was flattened to `not-canonical` | **fixed**: `infinity/limit` is preserved |
 | F11 | low | annotations that redact to the same text are silently merged | open; refused for provenance, documented for annotations |
-| F12 | low | `Prepared.secrets` and redaction `String`s are not zeroized | open; the image carries secret bytes by design, this is heap residue |
+| F12 | low | `Prepared.secrets` and redaction `String`s are not zeroized | **reduced** (2026-11-02): `Prepared` zeroizes its secret copies on drop, and `redact_text` holds its intermediate buffer in `Zeroizing` so each replaced string is overwritten instead of freed intact. Heap residue is not observable from a test; the change is the type contract. The image still carries secret bytes by design |
 
 **I-13 round 7** found the work ceiling was still numerically bypassable:
 a `PutNode` fragment's merge cost was not charged (critical), and the decoded

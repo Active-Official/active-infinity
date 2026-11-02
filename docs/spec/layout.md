@@ -175,11 +175,17 @@ Kinds above 24 are refused with `infinity/node`.
 Two secret **payloads** never compare equal (`SecretBytes::eq` is always false);
 module equality blinds the payload and compares structure, which is what lets a
 re-encoded module equal its source without revealing whether two secrets match.
-`SecretBytes` overwrites its buffer on drop. The secret table is never
-enumerated by any projection.
+Equality is therefore *weaker* than byte identity whenever a secret is present:
+two modules whose secret nodes sit in the same structure but carry different
+bytes — or the same bytes in a different order — compare equal while hashing
+differently. Use the content hash (or the canonical image) as an identity key,
+never `PartialEq`. `SecretBytes` overwrites its buffer on drop. The secret table is
+never enumerated by any projection.
 
-Redaction covers free text: annotation text and provenance keys, values,
-producer, model and tool. Structural names - table field names, binding names,
+Redaction covers free text: annotation text, provenance keys, values,
+producer, model and tool, and schema-field deprecation notes. A deprecation note
+is redacted before the string heap is collected, so the unredacted copy is never
+interned. Structural names - table field names, binding names,
 unit names and an env variable's name - are schema, not free text, and are
 carried verbatim; a module that puts secret material into a name publishes that
 name, just as the secret table carries the secret itself. An interpolation's

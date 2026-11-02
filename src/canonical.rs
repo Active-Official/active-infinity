@@ -129,7 +129,7 @@ pub(crate) fn prepare(module: &InfinityModule) -> Result<Prepared> {
     // `secret(pw + "-suffix")` — is re-encoded as a structural secret (or a
     // `Secret` reference from an interpolation): the bytes move to the secret
     // heap, which no projection enumerates.
-    let (canonical_nodes, fragments) = promote_secret_locators(canonical_nodes, module);
+    let (mut canonical_nodes, fragments) = promote_secret_locators(canonical_nodes, module);
     // A promoted fragment is not a stored-metadata redaction target: rewriting
     // every occurrence of a one-byte fragment would destroy the prose. It must
     // therefore not occur in the metadata at all. If it did, the image would not
@@ -138,6 +138,24 @@ pub(crate) fn prepare(module: &InfinityModule) -> Result<Prepared> {
     // The fragment check runs after the metadata redaction below, on the text
     // that is actually stored: inserting the marker can create a fragment at a
     // boundary, and a fragment inside the marker would otherwise slip through.
+
+    // One cumulative redaction budget for the whole metadata block: a
+    // per-string ceiling multiplies by the number of annotations and entries.
+    let redaction = std::cell::Cell::new(MAX_REDACTION_SCAN_BYTES);
+
+    // A deprecation note is stored prose, exactly like an annotation. Redact it
+    // **before** the node order is derived: `content_key` renders the note when a
+    // schema field is an annotation subject, so ordering by the unredacted text
+    // and storing the redacted one makes the image a different fixed point (two
+    // subjects can swap places). It must also run before the string heap is
+    // collected, because `Inode::strings` interns the note.
+    for node in &mut canonical_nodes {
+        if let Inode::SchemaField(spec) = node {
+            if let Some(text) = &mut spec.deprecated {
+                *text = try_redact_text_with(text, &secret_literals, &redaction)?;
+            }
+        }
+    }
 
     // 2. Pre-order numbering from the roots.
     let order = canonical_order(&canonical_nodes, module)?;
@@ -161,7 +179,6 @@ pub(crate) fn prepare(module: &InfinityModule) -> Result<Prepared> {
         remap_node_in_place(&mut node, &remap)?;
         nodes.push(node);
     }
-    let mut nodes = nodes;
 
     let root = module.root().map(|id| remap[id.index()]);
     let mut bindings: Vec<(String, NodeId)> = module
@@ -173,7 +190,6 @@ pub(crate) fn prepare(module: &InfinityModule) -> Result<Prepared> {
 
     // One cumulative redaction budget for the whole metadata block: a
     // per-string ceiling multiplies by the number of annotations and entries.
-    let redaction = std::cell::Cell::new(MAX_REDACTION_SCAN_BYTES);
     let annotations: Vec<Annotation> = module
         .annotations()
         .iter()
@@ -219,14 +235,6 @@ pub(crate) fn prepare(module: &InfinityModule) -> Result<Prepared> {
             AnnotationKind::AiImmutable(_) => {}
         }
     }
-    for node in &mut nodes {
-        if let Inode::SchemaField(spec) = node {
-            if let Some(text) = &mut spec.deprecated {
-                // A deprecation note is stored prose, exactly like an annotation.
-                *text = try_redact_text_with(text, &secret_literals, &redaction)?;
-            }
-        }
-    }
     let provenance = module
         .provenance()
         .cloned()
@@ -235,7 +243,7 @@ pub(crate) fn prepare(module: &InfinityModule) -> Result<Prepared> {
     if !fragments.is_empty() {
         reject_fragments_in_annotations(&annotations, &fragments)?;
         reject_fragments_in_provenance(provenance.as_ref(), &fragments)?;
-        reject_fragments_in_labels(&nodes, &bindings, module, &fragments)?;
+        reject_fragments_in_labels(&nodes, &bindings, &annotations, &fragments)?;
     }
     if let Some(prov) = &provenance {
         if let Some(producer) = &prov.producer {
@@ -535,11 +543,15 @@ pub(crate) fn try_redact_text_with(
 pub(crate) const MAX_REDACTION_SCAN_BYTES: usize = 64 << 20;
 
 /// Upper bound on the comparisons one redaction performs.
+///
+/// The length is floored at one: an empty string still costs one `contains` per
+/// secret per pass, and charging zero let a module with many empty annotations
+/// and a large secret table spend unbounded CPU for free.
 pub(crate) fn redaction_cost(text: &str, secrets: &[String]) -> usize {
     const PASSES: usize = 8;
     secrets
         .len()
-        .saturating_mul(text.len())
+        .saturating_mul(text.len().max(1))
         .saturating_mul(PASSES)
 }
 
@@ -869,7 +881,7 @@ fn reject_fragments_in_provenance(
 fn reject_fragments_in_labels(
     nodes: &[Inode],
     bindings: &[(String, NodeId)],
-    module: &InfinityModule,
+    annotations: &[Annotation],
     fragments: &[String],
 ) -> Result<()> {
     let mut hit = bindings
@@ -923,9 +935,11 @@ fn reject_fragments_in_labels(
         };
     }
     // A constraint expression subtree is metadata: its strings are stored too.
+    // The expression ids come from the *remapped* annotations, so they index the
+    // canonical `nodes`; using the original arena ids here read unrelated nodes
+    // and silently missed the fragment.
     if !hit {
-        let mut stack: Vec<NodeId> = module
-            .annotations()
+        let mut stack: Vec<NodeId> = annotations
             .iter()
             .filter_map(|annotation| match &annotation.kind {
                 AnnotationKind::Constraint { expr, .. } => Some(*expr),
@@ -1980,5 +1994,21 @@ fn prov_kind_rank(value: &ProvValue) -> u32 {
         ProvValue::Int(_) => 1,
         ProvValue::Flag(_) => 2,
         ProvValue::Hash(_) => 3,
+    }
+}
+
+#[cfg(test)]
+mod redaction_cost_tests {
+    use super::{redaction_cost, MAX_REDACTION_SCAN_BYTES};
+
+    /// An empty string is not free to scan: every redaction still walks the
+    /// secret table once per pass. Charging zero let 10k empty annotations
+    /// against 10k secrets spend eight seconds of release CPU in one encode.
+    #[test]
+    fn an_empty_text_is_charged_one_pass_per_secret() {
+        let secrets: Vec<String> = (0..1_000).map(|index| format!("s{index}")).collect();
+        let cost = redaction_cost("", &secrets);
+        assert_eq!(cost, secrets.len() * 8);
+        assert!(cost <= MAX_REDACTION_SCAN_BYTES);
     }
 }

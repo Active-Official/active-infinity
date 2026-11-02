@@ -1336,3 +1336,29 @@ caller's ceiling (medium).
 
 Gate: 445 library/integration, 42 CLI, 27 FFI, clippy clean both feature sets,
 fmt clean.
+
+
+### Re-audit round 12 (I-12) - 2026-11-02
+
+**I-12 round 12** checked F1..F12 of round 11 one at a time against the code and
+then attacked the section. Three of the round-11 dispositions did not hold: the
+deprecation-note redaction (F3) was ordered after the string heap was collected,
+and the annotation-expression fragment scan (F5) indexed the canonical arena
+with original ids. Both are fixed here with tests that fail pre-fix. Round 11
+also claimed "nine tests pin the behaviour"; its diff added no I-12 test at all,
+so F1, F2, F7, F8, F9 and F10 were unpinned. Those are now pinned where cheap.
+
+| # | Sev | Finding | Disposition |
+|---|-----|---------|-------------|
+| G1 | high | `SchemaField.deprecated` was redacted *after* `Inode::strings` had interned it, so the unredacted note stayed in the string heap (a secret copy in the image) and the aux lookup then failed with `infinity/encode` ("string missing from heap"); when a node happened to hold the redacted text the encode instead emitted an image `validate_canonical` refuses. Redacting later still left a second hole: `canonical_order` keys an annotation-only subject by a render that includes the note, so ordering by unredacted text and storing redacted text let two subjects swap places | **fixed**: the note is redacted before the order is derived and before the heap is collected; `a_deprecated_note_is_redacted_before_the_string_heap_is_collected`, `a_deprecated_note_never_leaves_the_unredacted_copy_in_the_heap` and `a_redacted_note_cannot_reorder_two_annotation_subjects` (all three fail pre-fix) |
+| G2 | high | the constraint-expression fragment scan used `module.annotations()` (original arena ids) to index the remapped `nodes`, so it read unrelated nodes and silently accepted a fragment in an expression subtree; the same confusion could refuse a valid module depending on arena order | **fixed**: the scan takes the remapped annotations; `a_fragment_in_a_constraint_expression_subtree_is_refused` (fails pre-fix) |
+| G3 | medium | round-11 F1/F2/F7/F8/F9/F10 had no test despite the commit claiming one per fix | **fixed**: pinned in `tests/marathon_round11_tests.rs` |
+| G4 | low | `structurally_eq` (and `PartialEq`) is true for two modules whose secret nodes carry different bytes or a different order while the hashes differ; the caveat lived only in this log, not in `docs/spec/layout.md`, and `ir.rs` still called it "canonical structural equality" | **documented**: `layout.md` now states equality is weaker than byte identity when a secret is present and must not be used as an identity key |
+| G5 | low | `Prepared` zeroizes its secret copies, but `storage_secret_texts`, `interop::secret_texts` and `hiding_placeholder_text` still hold plain `String` copies of secret material that free intact | **accepted residual**: documented, heap residue is not observable from a test; F12 stays open as recorded |
+| G6 | high | `redaction_cost` charged `secrets * text * 8`, which is **zero** for empty text, while every redaction still walks the secret table once per pass (`marker_tainted`, the first `contains` filter). 10k empty annotations against a 10k-entry secret table spent 8.0 s of release CPU in one encode, and the work is uncharged, so it scales to 10^12 comparisons from a ~32 MiB module | **fixed**: the length is floored at one (`text.len().max(1)`); `empty_annotations_against_a_large_secret_table_are_charged` and the unit test `an_empty_text_is_charged_one_pass_per_secret` |
+
+Round-11 status as found: F1 fixed, F2 fixed, F3 **not fixed** (G1), F4 fixed,
+F5 **not fixed** (G2), F6 documented only in this log (G4), F7 fixed, F8 fixed,
+F9 fixed (verified), F10 fixed, F11 open as recorded, F12 reduced as recorded.
+
+Gate: 455 tests, clippy clean both feature sets, fmt clean, doc clean.

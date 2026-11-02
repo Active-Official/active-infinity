@@ -128,10 +128,11 @@ Structural names are the exception, in both directions:
   `$$env`) so module data cannot impersonate a projection marker such as
   `{"$env": ...}` or `{"$active.blob": ...}`.
 
-Metadata prose (annotations and provenance) is redacted in the image itself, with
-each occurrence replaced, so a copy cannot be stored there either. String
-*values* are user data: they are stored as written and redacted only when they
-leave through a projection.
+Metadata prose (annotations, provenance and schema-field deprecation notes) is
+redacted in the image itself, before the string heap is collected, with each
+occurrence replaced, so a copy cannot be stored there either. String *values*
+are user data: they are stored as written and redacted only when they leave
+through a projection.
 
 The test suite asserts that the secret literal does not appear anywhere in the
 projected bytes.

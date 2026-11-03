@@ -43,6 +43,14 @@
 - **Projection depth**: capped at 256 (was 1024) so the recursive projection
   walk cannot abort the process on a legal module.
 
+## 2.4.1 - 2026-11-03
+
+### Fixed
+
+- **Canonical form**: the tie-break signature added in 2.4.0 rendered a
+  constraint's expression by node id, which the encode remaps, so an image with
+  several identical constraint subjects was not a fixed point. The expression is
+  rendered by content now.
 ## Unreleased
 
 ### Fixed

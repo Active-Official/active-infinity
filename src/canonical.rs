@@ -1772,7 +1772,8 @@ fn break_key_ties(
                 // annotation multiset and a digest of every secret in the
                 // subtree; a digest is order-revealing, not the bytes.
                 key.push('#');
-                key.push_str(&annotation_signature(annotations, entry.1));
+                let signature = annotation_signature(nodes, annotations, entry.1, total)?;
+                key.push_str(&signature);
                 key.push('#');
                 for digest in secret_digests(nodes, entry.1) {
                     key.push_str(&crate::ir::hash_hex(&digest));
@@ -1800,21 +1801,40 @@ fn break_key_ties(
 ///
 /// Two roots that render identically are interchangeable only if everything
 /// stored about them is equal too; the annotations are stored per node, so they
-/// are part of the identity of the root.
-fn annotation_signature(annotations: &[Annotation], id: NodeId) -> String {
-    let mut parts: Vec<String> = annotations
+/// are part of the identity of the root. A constraint's expression is rendered
+/// by content, never by id: the id is remapped by the next encode, and an
+/// id-bearing signature would order the same module differently on the second
+/// pass (not a fixed point).
+fn annotation_signature(
+    nodes: &[crate::ir::Inode],
+    annotations: &[Annotation],
+    id: NodeId,
+    total: &mut usize,
+) -> Result<String> {
+    let mut parts: Vec<String> = Vec::new();
+    for annotation in annotations
         .iter()
         .filter(|annotation| annotation.node == id)
-        .map(|annotation| match &annotation.kind {
+    {
+        let part = match &annotation.kind {
             AnnotationKind::Intent(text) => format!("i:{text}"),
             AnnotationKind::Constraint { source, expr } => {
-                format!("c:{source}:{}", expr.0)
+                let rendered = content_key_framed(nodes, *expr)?;
+                *total = total.saturating_add(rendered.len());
+                if *total > MAX_ANNOTATION_KEY_BYTES {
+                    return Err(Error::Limit {
+                        kind: "annotation key bytes",
+                        limit: MAX_ANNOTATION_KEY_BYTES as u64,
+                    });
+                }
+                format!("c:{source}:{rendered}")
             }
             AnnotationKind::AiImmutable(flag) => format!("m:{flag}"),
-        })
-        .collect();
+        };
+        parts.push(part);
+    }
     parts.sort();
-    parts.join("|")
+    Ok(parts.join("|"))
 }
 
 /// BLAKE3 digests of every secret in a subtree, sorted.

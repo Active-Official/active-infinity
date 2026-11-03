@@ -26,7 +26,6 @@ use crate::ir::{
 };
 #[cfg(feature = "active-core")]
 use crate::ir::{BinOp, SchemaFieldSpec, SemanticTag, UnOp};
-#[cfg(feature = "active-core")]
 use crate::unit::UnitTag;
 
 /// Marker substituted for secret material in every projection.
@@ -203,7 +202,7 @@ mod bridge {
         // Literals lower recursively into composed nodes (arrays and tables are
         // node graphs in the canonical form).
         if let CoreNode::Literal(value) = node {
-            return push_value(value, out, map);
+            return push_value(value, out, map, depth);
         }
         let lowered = match node {
             CoreNode::Literal(_) => unreachable!("handled before the match"),
@@ -343,7 +342,16 @@ mod bridge {
         value: &CoreValue,
         out: &mut InfinityModule,
         map: &mut HashMap<u32, NodeId>,
+        depth: u32,
     ) -> Result<NodeId> {
+        // A literal's own nesting is caller-controlled too: a 10k-deep array
+        // aborted the stack before any reference walk ran (pass 2, #3).
+        if depth >= MAX_BRIDGE_DEPTH {
+            return Err(Error::Limit {
+                kind: "bridge depth",
+                limit: MAX_BRIDGE_DEPTH as u64,
+            });
+        }
         let _ = map;
         let node = match value {
             CoreValue::Quantity(amount, unit) => {
@@ -356,14 +364,14 @@ mod bridge {
             CoreValue::Array(items) => {
                 let mut elements = Vec::with_capacity(items.len());
                 for item in items {
-                    elements.push(push_value(item, out, map)?);
+                    elements.push(push_value(item, out, map, depth + 1)?);
                 }
                 Inode::Array { elements }
             }
             CoreValue::Table(entries) => {
                 let mut fields = Vec::with_capacity(entries.len());
                 for (name, item) in entries {
-                    fields.push((name.clone(), push_value(item, out, map)?));
+                    fields.push((name.clone(), push_value(item, out, map, depth + 1)?));
                 }
                 Inode::Table { fields }
             }
@@ -1070,6 +1078,9 @@ pub(crate) fn redacted_value(text: &str, secrets: &[String]) -> String {
 /// count.
 pub struct Redactor {
     secrets: Vec<String>,
+    /// The same literals as bytes: a binary surface (a hash, a payload) can
+    /// copy a secret a text comparison never sees (pass 2, #4).
+    raw: Vec<Vec<u8>>,
     placeholder: String,
 }
 
@@ -1086,9 +1097,11 @@ impl Redactor {
     /// Collect the secret literals a module names.
     pub fn for_module(module: &InfinityModule) -> Self {
         let secrets = secret_texts(module);
+        let raw = secret_bytes(module);
         let placeholder = hiding_placeholder(&secrets).to_string();
         Self {
             secrets,
+            raw,
             placeholder,
         }
     }
@@ -1125,11 +1138,25 @@ impl Redactor {
                     (redacted != *text).then_some(Inode::Str(redacted))
                 }
                 Inode::Ident(text) => {
-                    let redacted = redacted_value_within(text, &self.secrets, &mut budget)?;
+                    // A name is a label: the projection replaces occurrences,
+                    // not the whole text, so the two must agree (pass 2, #8).
+                    let redacted = redact_within(text, &self.secrets, &mut budget)?;
                     (redacted != *text).then_some(Inode::Ident(redacted))
                 }
+                // A custom unit name is text: a unit that copies a secret
+                // must not survive the redaction (pass 2, #1).
+                Inode::Quantity {
+                    value,
+                    unit: UnitTag::Named(name),
+                } => {
+                    let redacted = redact_within(name, &self.secrets, &mut budget)?;
+                    (redacted != *name).then(|| Inode::Quantity {
+                        value: *value,
+                        unit: UnitTag::Named(redacted),
+                    })
+                }
                 Inode::Env { name, default } => {
-                    let redacted = redacted_value_within(name, &self.secrets, &mut budget)?;
+                    let redacted = redact_within(name, &self.secrets, &mut budget)?;
                     (redacted != *name).then(|| Inode::Env {
                         name: redacted,
                         default: *default,
@@ -1235,7 +1262,49 @@ impl Redactor {
             }
         }
         self.redact_metadata(module, &mut budget)?;
+        self.reject_binary_copies(module)?;
         redact_binding_names(module, &self.secrets, &mut budget)
+    }
+
+    /// Refuse a module whose binary surfaces copy a secret.
+    ///
+    /// The codec refuses these when the module still holds the secret node, but
+    /// a cone built from a source whose secret lives outside it carries no
+    /// secret node: the encode would then accept the copy (pass 2, #4).
+    fn reject_binary_copies(&self, module: &InfinityModule) -> Result<()> {
+        if self.raw.is_empty() {
+            return Ok(());
+        }
+        let matches = |bytes: &[u8]| {
+            self.raw
+                .iter()
+                .any(|secret| !secret.is_empty() && secret == bytes)
+        };
+        let carries = |payload: &[u8]| {
+            self.raw.iter().any(|secret| {
+                !secret.is_empty()
+                    && secret.len() <= payload.len()
+                    && payload.windows(secret.len()).any(|window| window == secret)
+            })
+        };
+        for node in module.nodes() {
+            if let Inode::Blob { hash, payload, .. } = node {
+                if matches(hash) {
+                    return Err(Error::Encode("blob hash equals a secret"));
+                }
+                if let Some(payload) = payload {
+                    if carries(payload) {
+                        return Err(Error::Encode("blob payload carries a secret literal"));
+                    }
+                }
+            }
+        }
+        for (_, payload) in module.extensions() {
+            if carries(payload) {
+                return Err(Error::Encode("extension payload carries a secret literal"));
+            }
+        }
+        Ok(())
     }
 
     /// Redact an enum type's members.
@@ -1320,16 +1389,43 @@ impl Redactor {
                 *field = Some(redacted);
             }
         }
-        for entry in &mut provenance.entries {
+        if let Some(parent) = provenance.parent {
+            if self
+                .raw
+                .iter()
+                .any(|secret| secret.len() == 32 && secret.as_slice() == parent)
+            {
+                provenance.parent = None;
+                changed = true;
+            }
+        }
+        let mut entries = Vec::with_capacity(provenance.entries.len());
+        for mut entry in std::mem::take(&mut provenance.entries) {
             let redacted = redact_within(&entry.key, &self.secrets, budget)?;
             changed |= redacted != entry.key;
             entry.key = redacted;
-            if let ProvValue::Text(text) = &mut entry.value {
-                let redacted = redact_within(text, &self.secrets, budget)?;
-                changed |= redacted != *text;
-                *text = redacted;
+            match &mut entry.value {
+                ProvValue::Text(text) => {
+                    let redacted = redact_within(text, &self.secrets, budget)?;
+                    changed |= redacted != *text;
+                    *text = redacted;
+                }
+                ProvValue::Hash(hash) => {
+                    if self
+                        .raw
+                        .iter()
+                        .any(|secret| secret.len() == 32 && secret.as_slice() == hash)
+                    {
+                        // A content address that copies a secret is the secret.
+                        changed = true;
+                        continue;
+                    }
+                }
+                ProvValue::Int(_) | ProvValue::Flag(_) => {}
             }
+            entries.push(entry);
         }
+        provenance.entries = entries;
         if changed {
             module.set_provenance(Some(provenance));
         }
@@ -1369,7 +1465,7 @@ fn redact_field_names(
     let mut out = Vec::with_capacity(fields.len());
     let mut changed = false;
     for (name, id) in fields {
-        let redacted = redacted_value_within(name, secrets, budget)?;
+        let redacted = redact_within(name, secrets, budget)?;
         changed |= redacted != *name;
         out.push((redacted, *id));
     }
@@ -1391,7 +1487,7 @@ fn redact_binding_names(
     let mut out = Vec::with_capacity(module.bindings().len());
     let mut changed = false;
     for (name, id) in module.bindings() {
-        let redacted = redacted_value_within(name, secrets, budget)?;
+        let redacted = redact_within(name, secrets, budget)?;
         changed |= redacted != *name;
         out.push((redacted, *id));
     }
@@ -1916,10 +2012,21 @@ pub fn value_paths(module: &InfinityModule) -> HashMap<NodeId, String> {
     // must report `cfg.pw`, not only `cfg`. Binding labels are path text too, so
     // they are charged against the same byte cap.
     let mut emitted = 0usize;
+    // A binding label obeys the same rules as a dotted path: it is charged
+    // against the export cap and never shares another node's label (pass 2,
+    // #7). The fallback id label is applied in the deduplication pass below,
+    // which sees every entry.
+    let mut seen_bindings: std::collections::HashSet<String> = std::collections::HashSet::new();
     for (name, id) in module.bindings() {
-        let key = redacted_key_capped(name, &secrets, &mut budget)
+        let mut key = redacted_key_capped(name, &secrets, &mut budget)
             .unwrap_or_else(|| placeholder.to_string());
-        emitted = emitted.saturating_add(key.len());
+        if emitted.saturating_add(key.len()) > MAX_EXPORT_PATH_BYTES
+            || !seen_bindings.insert(key.clone())
+        {
+            key = format!("@node[{}]", id.0);
+        } else {
+            emitted = emitted.saturating_add(key.len());
+        }
         paths.insert(*id, key.clone());
         stack.push((*id, key, 0));
     }

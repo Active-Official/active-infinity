@@ -119,7 +119,10 @@ fn an_image_without_a_secret_is_returned_unchanged() {
 }
 
 #[test]
-fn two_field_names_that_redact_to_one_key_are_refused() {
+fn a_field_name_that_contains_a_secret_is_replaced_not_collapsed() {
+    // A name is a label: the projection replaces the occurrence, so two names
+    // that differ outside the secret stay distinct. The whole-value collapse
+    // belongs to data text (pass 2, #8).
     let mut module = InfinityModule::new();
     let secret = module.push(Inode::Secret("inner".into()));
     let left = module.push(Inode::Str("1".to_string()));
@@ -134,8 +137,20 @@ fn two_field_names_that_redact_to_one_key_are_refused() {
         fields: vec![("app".to_string(), table), ("secret".to_string(), secret)],
     });
     module.set_root(Some(root));
-    let error = interop::redact_module(&module).expect_err("collision");
-    assert!(error.to_string().contains("same key"), "{error}");
+    let redacted = interop::redact_module(&module).expect("a label, not a collision");
+    let names: Vec<String> = texts(&encode(&redacted).expect("encode"));
+    assert!(
+        names.iter().any(|name| name == "left-***SECRET***"),
+        "{names:?}"
+    );
+    assert!(
+        names.iter().any(|name| name == "right-***SECRET***"),
+        "{names:?}"
+    );
+    assert!(
+        names.iter().all(|name| !name.contains("inner")),
+        "{names:?}"
+    );
 }
 
 #[test]
@@ -264,4 +279,110 @@ fn a_copy_in_a_constraint_enum_or_patch_path_is_redacted() {
             );
         }
     }
+}
+
+/// A custom unit name is text (pass 2, #1).
+#[test]
+fn a_unit_name_that_copies_a_secret_is_redacted() {
+    use active_infinity::UnitTag;
+
+    let mut module = InfinityModule::new();
+    let secret = module.push(Inode::Secret(SECRET.into()));
+    let amount = module.push(Inode::Float(1.0));
+    let quantity = module.push(Inode::Quantity {
+        value: amount,
+        unit: UnitTag::Named(SECRET.to_string()),
+    });
+    let prefixed = module.push(Inode::Quantity {
+        value: amount,
+        unit: UnitTag::Named(format!("{SECRET}-per-second")),
+    });
+    let root = module.push(Inode::Table {
+        fields: vec![
+            ("quantity".to_string(), quantity),
+            ("prefixed".to_string(), prefixed),
+            ("secret".to_string(), secret),
+        ],
+    });
+    module.set_root(Some(root));
+    let image = interop::redact_image(&encode(&module).expect("encode")).expect("redact");
+    let decoded = decode(&image).expect("decode");
+    for index in 0..decoded.node_count() {
+        if let Some(Inode::Quantity {
+            unit: UnitTag::Named(name),
+            ..
+        }) = decoded.get(active_infinity::NodeId(index as u32))
+        {
+            assert!(!name.contains(SECRET), "a unit carries the secret: {name}");
+        }
+    }
+}
+
+/// A caller-built deep literal is refused, not aborted (pass 2, #3).
+#[cfg(feature = "active-core")]
+#[test]
+fn a_deep_literal_is_refused() {
+    use active_core::ir::{Module as CoreModule, Node as CoreNode, Value as CoreValue};
+
+    let mut value = CoreValue::Int(1);
+    for _ in 0..400 {
+        value = CoreValue::Array(vec![value]);
+    }
+    let mut core = CoreModule::new("deep");
+    let root = core.add_node(CoreNode::Literal(value));
+    core.root = Some(root);
+    let error = interop::from_active_core(&core).expect_err("too deep for the bridge");
+    assert_eq!(error.code(), "infinity/limit", "{error}");
+}
+
+/// A cone whose provenance copies a 32-byte secret is refused or cleansed
+/// (pass 2, #4).
+#[test]
+fn a_cone_hash_that_copies_a_secret_is_not_kept() {
+    let secret = [0x5au8; 32];
+    let mut module = InfinityModule::new();
+    let node = module.push(Inode::Secret(active_infinity::SecretBytes::new(secret)));
+    let root = module.push(Inode::Table {
+        fields: vec![("s".to_string(), node)],
+    });
+    module.set_root(Some(root));
+    module.set_provenance(Some(active_infinity::Provenance {
+        producer: Some("test".to_string()),
+        timestamp_ms: 1,
+        model: None,
+        tool: None,
+        parent: Some(secret),
+        entries: vec![active_infinity::ProvEntry {
+            key: "input".to_string(),
+            value: active_infinity::ProvValue::Hash(secret),
+        }],
+    }));
+    let redactor = interop::Redactor::for_module(&module);
+    let mut cone = InfinityModule::new();
+    let copy = cone.push(Inode::Str("public".to_string()));
+    let root = cone.push(Inode::Table {
+        fields: vec![("c".to_string(), copy)],
+    });
+    cone.set_root(Some(root));
+    cone.set_provenance(Some(active_infinity::Provenance {
+        producer: Some("test".to_string()),
+        timestamp_ms: 1,
+        model: None,
+        tool: None,
+        parent: Some(secret),
+        entries: vec![active_infinity::ProvEntry {
+            key: "input".to_string(),
+            value: active_infinity::ProvValue::Hash(secret),
+        }],
+    }));
+    redactor.redact(&mut cone).expect("redact");
+    let provenance = cone
+        .provenance()
+        .expect("provenance survives without the hash");
+    assert_eq!(provenance.parent, None, "a parent that copies the secret");
+    assert!(
+        provenance.entries.is_empty(),
+        "a hash entry that copies the secret: {:?}",
+        provenance.entries
+    );
 }

@@ -692,7 +692,10 @@ pub fn apply_delta(module: &InfinityModule, ops: &[DeltaOp]) -> Result<InfinityM
 fn delta_fault(error: Error) -> Error {
     match error {
         Error::Limit { .. } | Error::TooLarge => error,
-        Error::StreamDelta(_) | Error::StreamState(_) | Error::StreamHashMismatch => error,
+        Error::StreamDelta(_)
+        | Error::StreamState(_)
+        | Error::StreamHashMismatch
+        | Error::StreamChecksum => error,
         _ => Error::StreamDelta("the delta does not produce a canonical module"),
     }
 }

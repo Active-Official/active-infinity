@@ -1771,11 +1771,19 @@ fn break_key_ties(
                 // (cross-cutting pass 1, #1). The signature adds the redacted
                 // annotation multiset and a digest of every secret in the
                 // subtree; a digest is order-revealing, not the bytes.
+                // Length-prefixed parts: the rendered annotation text can
+                // contain any separator, so an unframed join made
+                // `Intent("a|i:b")` collide with `Intent("a") + Intent("b")`
+                // and the tie fell back to the arena id (pass 2, #2).
                 key.push('#');
-                let signature = annotation_signature(nodes, annotations, entry.1, total)?;
-                key.push_str(&signature);
+                for part in annotation_signature(nodes, annotations, entry.1, total)? {
+                    key.push_str(&part.len().to_string());
+                    key.push(':');
+                    key.push_str(&part);
+                }
                 key.push('#');
-                for digest in secret_digests(nodes, entry.1) {
+                let digests = secret_digests(nodes, entry.1, total)?;
+                for digest in digests {
                     key.push_str(&crate::ir::hash_hex(&digest));
                 }
                 *total = total.saturating_add(key.len());
@@ -1810,7 +1818,7 @@ fn annotation_signature(
     annotations: &[Annotation],
     id: NodeId,
     total: &mut usize,
-) -> Result<String> {
+) -> Result<Vec<String>> {
     let mut parts: Vec<String> = Vec::new();
     for annotation in annotations
         .iter()
@@ -1834,7 +1842,7 @@ fn annotation_signature(
         parts.push(part);
     }
     parts.sort();
-    Ok(parts.join("|"))
+    Ok(parts)
 }
 
 /// BLAKE3 digests of every secret in a subtree, sorted.
@@ -1842,10 +1850,14 @@ fn annotation_signature(
 /// The content key renders a secret as a constant, so two subjects holding
 /// different secrets tie. The digest orders them without putting the bytes into
 /// a `String` that would outlive the encoding.
-fn secret_digests(nodes: &[crate::ir::Inode], root: NodeId) -> Vec<[u8; 32]> {
+fn secret_digests(
+    nodes: &[crate::ir::Inode],
+    root: NodeId,
+    total: &mut usize,
+) -> Result<Vec<[u8; 32]>> {
     let mut out = Vec::new();
     if root.index() >= nodes.len() {
-        return out;
+        return Ok(out);
     }
     let mut seen = vec![false; nodes.len()];
     let mut stack = vec![root];
@@ -1854,13 +1866,23 @@ fn secret_digests(nodes: &[crate::ir::Inode], root: NodeId) -> Vec<[u8; 32]> {
             continue;
         }
         seen[id.index()] = true;
+        // The walk and each hash are work too: a tie group of many large
+        // subtrees would otherwise hash for free (pass 2, #5).
+        *total = total.saturating_add(1);
         if let Inode::Secret(secret) = &nodes[id.index()] {
+            *total = total.saturating_add(32);
             out.push(*blake3::hash(secret.expose()).as_bytes());
+        }
+        if *total > MAX_ANNOTATION_KEY_BYTES {
+            return Err(Error::Limit {
+                kind: "annotation key bytes",
+                limit: MAX_ANNOTATION_KEY_BYTES as u64,
+            });
         }
         stack.extend(nodes[id.index()].children());
     }
     out.sort();
-    out
+    Ok(out)
 }
 
 /// Deterministic pre-order numbering over the reachable graph.

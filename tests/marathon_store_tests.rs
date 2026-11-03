@@ -61,7 +61,10 @@ fn get_refuses_a_non_canonical_image_planted_at_its_hash() {
     let error = store
         .get(&hash)
         .expect_err("a non-canonical object is refused");
-    assert_eq!(error.code(), "infinity/not-canonical", "{error}");
+    // One code for every planted or absent object: the name comes from the
+    // caller's hash, so a validation code would be an existence oracle
+    // (pass 2, #9).
+    assert_eq!(error.code(), "infinity/store", "{error}");
 }
 
 #[test]

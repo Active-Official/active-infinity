@@ -40,7 +40,7 @@ the code → regression test first → minimal fix → targeted tests + clippy �
 | Wire confusion (AINF vs stream vs protobuf) | **pass 1 CLEAN** (checksum code split, delta fault mapping) | see cross-cutting pass 1 |
 | Resource bombs (depth, counts, sizes) | **pass 1 CLEAN** (protobuf work + depth, bridge depth) | see cross-cutting pass 1 |
 | Polyglot encoder golden | pending | — |
-| Second pass over changed sections | pending (I-12/I-13/I-06 re-rounds after 2.4.0) | — |
+| Second pass over changed sections | **pass 2 CLEAN** (2026-11-03, 9 findings closed) | 2.4.2 |
 
 ### Cross-cutting pass 1 - oracle/secret paths and wire confusion - 2026-11-03
 
@@ -66,6 +66,26 @@ Also in this batch: `interop::Redactor`, `redact_module` and `redact_image`
 
 Gate: `cargo test --all-features` and `--no-default-features` green, clippy
 `-D warnings` on both, `cargo doc` clean.
+
+### Cross-cutting pass 2 - second pass over the 2.4.x changes - 2026-11-03
+
+Reviewer: Muse through the Copilot CLI, `xhigh`, at `ae767dd`. Nine findings
+(4 high, 4 medium, 1 low); all closed except the recorded `value_to_json`-class
+residual.
+
+| # | Sev | Finding | Disposition |
+|---|-----|---------|-------------|
+| 1 | high | `Redactor` missed a custom unit name: a `Quantity { unit: Named }` copying a secret survived `redact_image` | **fixed**: the unit is redacted as text; `a_unit_name_that_copies_a_secret_is_redacted` |
+| 2 | high | the tie-break signature joined parts unframed, so `Intent("a\|i:b")` collided with `Intent("a") + Intent("b")` and the tie fell back to arena order | **fixed**: every part is length-prefixed |
+| 3 | high | `push_value` had no depth guard: a caller-built deep literal aborted the stack | **fixed**: the bridge depth ceiling applies; `a_deep_literal_is_refused` |
+| 4 | high | `Redactor` did not check binary surfaces, so a cone could carry a provenance parent, hash entry, extension or blob copy of a secret | **fixed**: a parent or hash entry that copies a 32-byte secret is dropped, a blob or extension copy is refused; `a_cone_hash_that_copies_a_secret_is_not_kept` |
+| 5 | medium | the secret-digest walk was uncharged | **fixed**: charged against the annotation key budget |
+| 6 | medium | merge annotation/provenance/extension keys used an unbounded redaction | **fixed**: one cumulative budget per block |
+| 7 | medium | binding labels bypassed the export cap and the uniqueness rule | **fixed**: a binding label is charged and falls back to `@node[id]` on collision or overflow |
+| 8 | medium | `Redactor` collapsed a name whole while the projections replace the occurrence, so `redact_image` refused a module the protobuf projection accepts | **fixed**: names use occurrence replacement, data text keeps the whole-value rule; `a_field_name_that_contains_a_secret_is_replaced_not_collapsed` |
+| 9 | low | `StreamChecksum` was folded into the delta fault; `Store::get` let a validation code distinguish a planted object from an absent one | **fixed**: the checksum code is preserved; every `get` fault is `infinity/store` |
+
+Gate: both feature sets green, clippy both, doc clean.
 
 ## Log
 

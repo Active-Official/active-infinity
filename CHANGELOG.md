@@ -51,6 +51,31 @@
   constraint's expression by node id, which the encode remaps, so an image with
   several identical constraint subjects was not a fixed point. The expression is
   rendered by content now.
+## 2.4.2 - 2026-11-03
+
+### Fixed
+
+- **Redaction**: a custom unit name (`Quantity { unit: Named }`) is text and is
+  redacted; a derived module whose binary surface (provenance parent, a hash
+  entry, an extension, a blob payload or hash) copies a secret is refused, and
+  a parent or hash entry that copies one is dropped.
+- **Redaction labels**: a name (identifier, `Env` name, field, binding, unit,
+  media type) replaces the occurrence it contains, as the projections do; only
+  data text collapses whole. Two names that differ outside a secret stay
+  distinct.
+- **Canonical form**: the tie-break signature length-prefixes every part, so an
+  annotation text containing the join separators can no longer collide with a
+  different annotation set and fall back to arena order.
+- **Canonical form**: the secret-digest walk is charged against the annotation
+  key budget.
+- **Bridge**: a deeply nested literal is refused with `infinity/limit` instead of
+  aborting the stack.
+- **Value paths**: a binding label is charged against the export cap and never
+  shares another node's label.
+- **Merge**: annotation, provenance and extension keys share one cumulative
+  redaction budget.
+- **Codes**: `StreamChecksum` is preserved through the delta path; every fault a
+  planted object raises in `Store::get` is `infinity/store`.
 ## Unreleased
 
 ### Fixed

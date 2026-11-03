@@ -601,11 +601,14 @@ impl Ctx<'_> {
             conflicts.push("<bindings>".to_string(), ConflictKind::KindMismatch)?;
         }
 
-        // Provenance: one block, compared through a redacted rendering.
-        let left_key = provenance_key(self.left, &self.hash_secrets);
-        let right_key = provenance_key(self.right, &self.hash_secrets);
+        // Provenance: one block, compared through a redacted rendering. One
+        // cumulative budget per block: an infallible replacement per field let
+        // 10k entries x 1k secrets run for minutes (pass 2, #6).
+        let mut provenance_budget = self.redaction.get();
+        let left_key = provenance_key(self.left, &self.hash_secrets, &mut provenance_budget);
+        let right_key = provenance_key(self.right, &self.hash_secrets, &mut provenance_budget);
         if left_key != right_key {
-            let base_key = provenance_key(self.base, &self.hash_secrets);
+            let base_key = provenance_key(self.base, &self.hash_secrets, &mut provenance_budget);
             if base_key == left_key {
                 plan.provenance = Some(self.right.provenance().cloned());
             } else if base_key != right_key {
@@ -616,12 +619,13 @@ impl Ctx<'_> {
         // Extensions: one set, sorted by tag, compared through redacted
         // payloads. A payload that is not text cannot be redacted, so a set
         // holding one next to a secret is never compared: it conflicts.
-        let left_key = extensions_key(self.left);
-        let right_key = extensions_key(self.right);
+        let mut extensions_budget = self.redaction.get();
+        let left_key = extensions_key(self.left, &mut extensions_budget);
+        let right_key = extensions_key(self.right, &mut extensions_budget);
         if left_key.is_none() || right_key.is_none() {
             conflicts.push("<extensions>".to_string(), ConflictKind::KindMismatch)?;
         } else if left_key != right_key {
-            let base_key = extensions_key(self.base);
+            let base_key = extensions_key(self.base, &mut extensions_budget);
             if left_key == base_key {
                 plan.extensions = Some(self.right.extensions().to_vec());
             } else if right_key != base_key {
@@ -639,6 +643,7 @@ impl Ctx<'_> {
 
     fn annotation_keys(&self, module: &InfinityModule) -> Result<Vec<String>> {
         let secrets = crate::interop::secret_texts(module);
+        let mut budget = self.redaction.get();
         let mut keys = Vec::with_capacity(module.annotations().len());
         for annotation in module.annotations() {
             let subject = if self.has_secret(module, annotation.node)? {
@@ -659,9 +664,10 @@ impl Ctx<'_> {
                 ),
                 AnnotationKind::AiImmutable(flag) => (2, flag.to_string(), String::new()),
             };
-            let text = crate::interop::redact_text(&text, &secrets);
+            let text = crate::interop::redact_within(&text, &secrets, &mut budget)?;
             keys.push(format!("{code}|{subject}|{expr}|{text}"));
         }
+        self.redaction.set(budget);
         keys.sort();
         Ok(keys)
     }
@@ -868,10 +874,17 @@ fn root_fields(module: &InfinityModule) -> Option<&[(String, NodeId)]> {
 }
 
 /// A deterministic rendering of provenance with every free text redacted.
-fn provenance_key(module: &InfinityModule, hash_secrets: &[Vec<u8>]) -> Option<String> {
+fn provenance_key(
+    module: &InfinityModule,
+    hash_secrets: &[Vec<u8>],
+    budget: &mut usize,
+) -> Option<String> {
     let provenance = module.provenance()?;
     let secrets = crate::interop::secret_texts(module);
-    let redact = |text: &str| crate::interop::redact_text(text, &secrets);
+    let mut redact = |text: &str| {
+        crate::interop::redact_within(text, &secrets, budget)
+            .unwrap_or_else(|_| crate::interop::SECRET_MARKER.to_string())
+    };
     // A 32-byte secret can be copied into a hash field. A hash has no text to
     // redact, so a copy becomes the marker, exactly as the projections do.
     let hash_text = |hash: &[u8; 32]| -> String {
@@ -929,7 +942,7 @@ fn provenance_key(module: &InfinityModule, hash_secrets: &[Vec<u8>]) -> Option<S
 ///
 /// `None` means the set cannot be compared safely: a secret is present and a
 /// payload is not UTF-8, so redaction would not be faithful.
-fn extensions_key(module: &InfinityModule) -> Option<String> {
+fn extensions_key(module: &InfinityModule, budget: &mut usize) -> Option<String> {
     let secrets = crate::interop::secret_texts(module);
     let mut extensions = module.extensions().to_vec();
     extensions.sort_by_key(|(tag, _)| *tag);
@@ -940,7 +953,7 @@ fn extensions_key(module: &InfinityModule) -> Option<String> {
             out.push_str(&hex(&payload));
         } else {
             let text = std::str::from_utf8(&payload).ok()?;
-            let text = crate::interop::redact_text(text, &secrets);
+            let text = crate::interop::redact_within(text, &secrets, budget).ok()?;
             out.push_str(&format!("{}:{}", text.len(), text));
         }
         out.push(';');
@@ -980,12 +993,13 @@ mod tests {
             ..Provenance::default()
         }));
 
-        let key = provenance_key(&module, &[CANARY.to_vec()]).expect("key");
+        let mut budget = MAX_MERGE_WORK;
+        let key = provenance_key(&module, &[CANARY.to_vec()], &mut budget).expect("key");
         assert!(key.contains(crate::canonical::SECRET_MARKER), "{key}");
         assert!(!key.contains(&hex(CANARY)), "{key}");
 
         // Without a matching secret the hash is ordinary data.
-        let key = provenance_key(&module, &[]).expect("key");
+        let key = provenance_key(&module, &[], &mut budget).expect("key");
         assert!(key.contains(&hex(CANARY)), "{key}");
     }
 }

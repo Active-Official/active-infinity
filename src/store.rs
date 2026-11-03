@@ -143,7 +143,13 @@ impl Store {
         // ceiling must not be distinguishable from an absent one by its code
         // (cross-cutting pass 1, #9).
         let image = read_bounded(&self.path_for(hash), object_limit()).map_err(store_read_fault)?;
-        let meta = validate_canonical(&image, Limits::default())?;
+        // Every fault a planted object can raise is the store's own code: the
+        // path is derived from the caller's hash, so a validation code would
+        // distinguish an absent name from a malformed one (pass 2, #9).
+        let meta = validate_canonical(&image, Limits::default()).map_err(|error| match error {
+            Error::Store(_) => error,
+            _ => Error::Store("object is absent or unreadable"),
+        })?;
         if &meta.content_hash != hash {
             return Err(Error::Store("object does not match its key"));
         }

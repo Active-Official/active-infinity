@@ -541,3 +541,45 @@ fn a_secret_inside_a_nested_table_keeps_the_parent_conflict() {
     assert_eq!(conflicts[0].field, "server");
     assert_eq!(conflicts[0].kind, ConflictKind::ModifyModify);
 }
+
+/// A conflict path is an export: a field name that copies a secret literal must
+/// not appear in the report (cross-cutting pass 1, #5).
+#[test]
+fn a_conflict_path_does_not_carry_a_secret_copy() {
+    use active_infinity::{merge, InfinityModule, Inode};
+
+    const CANARY: &str = "merge-path-canary";
+
+    let build = |value: i64, with_secret: bool| {
+        let mut module = InfinityModule::new();
+        let leaf = module.push(Inode::Int(value));
+        let table = module.push(Inode::Table {
+            fields: vec![(CANARY.to_string(), leaf)],
+        });
+        let mut fields = vec![("app".to_string(), table)];
+        if with_secret {
+            let secret = module.push(Inode::Secret(CANARY.into()));
+            fields.push(("secret".to_string(), secret));
+        }
+        let root = module.push(Inode::Table { fields });
+        module.set_root(Some(root));
+        module
+    };
+
+    // The secret lives in the base only; left and right disagree on the field
+    // that copies its text.
+    let base = build(1, true);
+    let left = build(2, false);
+    let right = build(3, false);
+    let result = merge(&base, &left, &right).expect("merge runs");
+    let active_infinity::Merge::Conflicts(conflicts) = result else {
+        panic!("the sides disagree: {result:?}");
+    };
+    for conflict in &conflicts {
+        assert!(
+            !conflict.field.contains(CANARY),
+            "the conflict path carries the secret text: {:?}",
+            conflict.field
+        );
+    }
+}

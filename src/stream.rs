@@ -226,10 +226,10 @@ impl Frame {
         let payload = &buf[payload_start..payload_end];
         let expected = frame_checksum(payload);
         if buf[24..32] != expected[..8] {
-            // A frame checksum fault is a stream fault, not the image content
+            // A frame checksum fault is a framing fault, not the image content
             // hash: a consumer that retries a frame must not be sent down the
-            // "the image is corrupt" path.
-            return Err(Error::StreamHashMismatch);
+            // "the image is corrupt" path (cross-cutting pass 1, #6).
+            return Err(Error::StreamChecksum);
         }
         Ok((
             Frame {
@@ -681,6 +681,20 @@ impl DeltaOp {
 /// Apply delta operations to a module, returning the updated module.
 pub fn apply_delta(module: &InfinityModule, ops: &[DeltaOp]) -> Result<InfinityModule> {
     apply_delta_with_limits(module, ops, crate::layout::Limits::default())
+}
+
+/// Report a delta-path fault as the delta fault it is.
+///
+/// The merge and the re-encode run on a peer-supplied frame, so an encoder
+/// refusal is not "the caller's own module": a receiver that saw
+/// `infinity/encode` would treat the frame as its own mistake and keep the
+/// connection (cross-cutting pass 1, #6). Resource ceilings keep their code.
+fn delta_fault(error: Error) -> Error {
+    match error {
+        Error::Limit { .. } | Error::TooLarge => error,
+        Error::StreamDelta(_) | Error::StreamState(_) | Error::StreamHashMismatch => error,
+        _ => Error::StreamDelta("the delta does not produce a canonical module"),
+    }
 }
 
 /// [`apply_delta`] under an explicit node ceiling.
@@ -1358,8 +1372,10 @@ impl StreamDecoder {
                         .module
                         .as_ref()
                         .ok_or(Error::StreamState("no module to patch"))?;
-                    let updated = apply_delta_with_limits(base, &self.pending_deltas, self.limits)?;
-                    let image = encode_with(&updated, EncodeOpts::default())?;
+                    let updated = apply_delta_with_limits(base, &self.pending_deltas, self.limits)
+                        .map_err(delta_fault)?;
+                    let image =
+                        encode_with(&updated, EncodeOpts::default()).map_err(delta_fault)?;
                     if image.len() > estimate {
                         self.charge_generation(image.len() - estimate)?;
                     }

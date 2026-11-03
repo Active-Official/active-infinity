@@ -80,7 +80,14 @@ fn get_refuses_an_object_larger_than_the_read_limit() {
     let error = store
         .get(&hash)
         .expect_err("an oversized object is refused");
-    assert_eq!(error.code(), "infinity/limit", "{error}");
+    // One answer for "no such object": an over-sized planted file must not be
+    // distinguishable from an absent one (cross-cutting pass 1, #9).
+    let absent = Store::open(directory.path())
+        .expect("store")
+        .get(&[0x22u8; 32])
+        .expect_err("an absent object is refused");
+    assert_eq!(error.code(), "infinity/store", "{error}");
+    assert_eq!(error.code(), absent.code(), "the two answers differ");
     assert!(
         store.contains(&hash),
         "the file exists; the read is what fails"

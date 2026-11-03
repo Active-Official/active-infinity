@@ -24,8 +24,10 @@ A frame payload larger than 64 MiB is refused with `infinity/stream-frame-len`.
 The fault is permanent: no amount of input makes an oversized frame legal, so
 the error is fatal and not `is_incomplete()`. A buffer that merely stops short
 of a legal frame is `infinity/truncated` and waits for more bytes, including a
-read shorter than the four-byte magic. A wrong checksum is
-`infinity/stream-hash`; a wrong magic is `infinity/stream-magic`; a skipped
+read shorter than the four-byte magic. A wrong *frame* checksum is
+`infinity/stream-checksum` (a framing fault the sender can retry); a wrong
+reassembled-module hash at `End` is `infinity/stream-hash`; a wrong magic is
+`infinity/stream-magic`; a skipped
 sequence number is `infinity/stream-sequence`. A non-zero `flags` or `reserved`
 field is `infinity/stream-flags` or `infinity/reserved`; the latter is the
 image-family code, listed in `layout.md` §9.
@@ -67,7 +69,9 @@ After an `End`, a stream may carry `Delta` frames followed by another `End`:
 
 Applying the same operations to the same base module is deterministic, so the
 result equals `encode(updated)`. A failure is `infinity/stream-delta`, except for
-a hash disagreement, which is `infinity/stream-hash`.
+a hash disagreement (`infinity/stream-hash`) and a resource ceiling
+(`infinity/limit`). An encoder or merge refusal on this path is a delta fault:
+the module came from the peer, so it is not the caller's own image.
 
 ## 3. Delta operations
 

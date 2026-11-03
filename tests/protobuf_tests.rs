@@ -885,3 +885,40 @@ fn taint_follows_references_in_interpolations() {
     );
     assert!(!json.contains("prefix"), "no literal prefix survives");
 }
+
+/// A deep chain is refused at the projection depth ceiling: the walk is
+/// recursive and 1024 frames abort the process (cross-cutting pass 1, #4).
+#[test]
+fn a_deep_projection_is_refused_not_aborted() {
+    use active_infinity::{InfinityModule, Inode};
+
+    let mut module = InfinityModule::new();
+    let mut current = module.push(Inode::Int(1));
+    for index in 0..300 {
+        current = module.push(Inode::Table {
+            fields: vec![(format!("f{index}"), current)],
+        });
+    }
+    module.set_root(Some(current));
+    let error = active_infinity::protobuf::to_protobuf(&module).expect_err("too deep");
+    assert_eq!(error.code(), "infinity/limit", "{error}");
+}
+
+/// A wide projection costs one copy per field: a table of many large strings
+/// exceeds the copying budget and is refused instead of stalling.
+#[test]
+fn a_wide_projection_charges_its_copies() {
+    use active_infinity::{InfinityModule, Inode};
+
+    let payload = "x".repeat(64 << 10);
+    let mut module = InfinityModule::new();
+    let text = module.push(Inode::Str(payload));
+    let fields: Vec<(String, active_infinity::NodeId)> = (0..1500)
+        .map(|index| (format!("f{index:04}"), text))
+        .collect();
+    let root = module.push(Inode::Table { fields });
+    module.set_root(Some(root));
+    let error = active_infinity::protobuf::to_protobuf(&module)
+        .expect_err("the copies exceed the work ceiling");
+    assert_eq!(error.code(), "infinity/limit", "{error}");
+}

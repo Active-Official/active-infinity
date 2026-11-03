@@ -188,6 +188,14 @@ impl<'a> Validated<'a> {
         self.hash_verified
     }
 
+    /// The validated image, byte for byte.
+    ///
+    /// This is the caller's own buffer, so it exposes nothing the caller did
+    /// not already hold. It is not a redacted view: `section(Section::Secrets)`
+    /// returns the secret heap verbatim. ADR-0010's rule is about a library
+    /// type that hands out secret text (no `SecretBytes` accessor does); a
+    /// wrapper over a caller-supplied buffer is outside it. Keep the distinction
+    /// when adding a convenience accessor.
     pub fn buf(&self) -> &'a [u8] {
         self.buf
     }
@@ -215,6 +223,11 @@ impl<'a> Validated<'a> {
         self.ends[section as usize] - self.header.span(section).offset as u64
     }
 
+    /// One section body, verbatim.
+    ///
+    /// `Section::Secrets` is the secret heap: the bytes the caller supplied,
+    /// with no redaction (see [`Validated::buf`]). Every other section is
+    /// structural.
     pub fn section(&self, section: Section) -> &'a [u8] {
         let (offset, _) = self.limits_span(section);
         let end = self.ends[section as usize];
@@ -1219,6 +1232,11 @@ impl<'a> Validated<'a> {
         let mut next_children = 0u64;
         let mut next_fields = 0u64;
         let mut next_parts = 0u64;
+        // Secret entries are packed in node order, exactly like the range
+        // tables: an image that aliases one entry from two nodes and leaves
+        // another unreferenced carries bytes no node names (a covert carrier
+        // that survived structural validation, cross-cutting pass 1, #3).
+        let mut next_secret = 0u64;
         for index in 0..count {
             let id = NodeId(index);
             let rec = self.node(id)?;
@@ -1404,9 +1422,10 @@ impl<'a> Validated<'a> {
                     }
                 }
                 9 => {
-                    if rec.a >= secret_count as u64 {
+                    if rec.a != next_secret || rec.a >= secret_count as u64 {
                         return Err(Error::SecretEntry(rec.a as u32));
                     }
+                    next_secret += 1;
                     if rec.aux != 0 || rec.b != 0 || rec.c != 0 || rec.flags != 0 {
                         return Err(Error::Node {
                             id: index,
@@ -1806,6 +1825,11 @@ impl<'a> Validated<'a> {
             if next != total as u64 {
                 return Err(Error::Count { field, value: next });
             }
+        }
+        // Every secret entry is named by exactly one node, in order: a trailing
+        // entry no node references is secret bytes the decoder never reports.
+        if next_secret != secret_count as u64 {
+            return Err(Error::SecretEntry(next_secret.min(u32::MAX as u64) as u32));
         }
         Ok(())
     }

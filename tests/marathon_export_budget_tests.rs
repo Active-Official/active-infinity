@@ -105,6 +105,10 @@ fn a_provenance_json_text_is_redacted_when_the_export_budget_is_spent() {
 
 /// Field-name redaction draws on the same budget: past it a key saturates to
 /// the placeholder rather than scanning 3000 secrets for every field.
+///
+/// A saturated key is not a unique name, so every path after the first one is
+/// the id label instead: two nodes must never answer one label (cross-cutting
+/// pass 1, #8).
 #[test]
 fn value_paths_saturate_after_the_export_budget() {
     let mut module = many_secrets(3000);
@@ -116,13 +120,16 @@ fn value_paths_saturate_after_the_export_budget() {
     let root = module.push(Inode::Table { fields });
     module.set_root(Some(root));
     let paths = value_paths(&module);
-    let saturated = paths
-        .values()
-        .filter(|path| path.as_str() == "***SECRET***")
-        .count();
     assert!(
-        saturated > 1000,
-        "only {saturated} of {} paths saturated",
+        paths.values().any(|path| path.as_str() == "***SECRET***"),
+        "no key saturated"
+    );
+    let unique: std::collections::HashSet<&str> = paths.values().map(String::as_str).collect();
+    assert_eq!(
+        unique.len(),
+        paths.len(),
+        "two nodes share one label: {} of {}",
+        unique.len(),
         paths.len()
     );
 }

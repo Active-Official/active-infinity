@@ -157,8 +157,35 @@ pub(crate) fn prepare(module: &InfinityModule) -> Result<Prepared> {
         }
     }
 
+    // 1c. Redact the annotation prose **before** the order is derived: the
+    // tie-break reads it to tell two subjects that render identically apart, and
+    // ordering by the raw text while storing the redacted one would make the
+    // image a different fixed point (the same rule as the deprecation note
+    // above).
+    let redacted_annotations: Vec<Annotation> = module
+        .annotations()
+        .iter()
+        .map(|annotation| {
+            let kind: Result<AnnotationKind> =
+                match &annotation.kind {
+                    AnnotationKind::Intent(text) => Ok(AnnotationKind::Intent(
+                        try_redact_text_with(text, &secret_literals, &redaction)?,
+                    )),
+                    AnnotationKind::Constraint { source, expr } => Ok(AnnotationKind::Constraint {
+                        source: try_redact_text_with(source, &secret_literals, &redaction)?,
+                        expr: *expr,
+                    }),
+                    AnnotationKind::AiImmutable(flag) => Ok(AnnotationKind::AiImmutable(*flag)),
+                };
+            Ok(Annotation {
+                node: annotation.node,
+                kind: kind?,
+            })
+        })
+        .collect::<Result<Vec<Annotation>>>()?;
+
     // 2. Pre-order numbering from the roots.
-    let order = canonical_order(&canonical_nodes, module)?;
+    let order = canonical_order(&canonical_nodes, module, &redacted_annotations)?;
     let mut remap = vec![NodeId::NONE; canonical_nodes.len()];
     for (new_index, old) in order.iter().enumerate() {
         remap[old.index()] = NodeId(new_index as u32);
@@ -190,25 +217,21 @@ pub(crate) fn prepare(module: &InfinityModule) -> Result<Prepared> {
 
     // One cumulative redaction budget for the whole metadata block: a
     // per-string ceiling multiplies by the number of annotations and entries.
-    let annotations: Vec<Annotation> = module
-        .annotations()
+    let annotations: Vec<Annotation> = redacted_annotations
         .iter()
         .map(|annotation| {
             let node = remap[annotation.node.index()];
-            let kind: Result<AnnotationKind> =
-                match &annotation.kind {
-                    AnnotationKind::Intent(text) => Ok(AnnotationKind::Intent(
-                        try_redact_text_with(text, &secret_literals, &redaction)?,
-                    )),
-                    AnnotationKind::Constraint { source, expr } => Ok(AnnotationKind::Constraint {
-                        source: try_redact_text_with(source, &secret_literals, &redaction)?,
-                        expr: remap[expr.index()],
-                    }),
-                    AnnotationKind::AiImmutable(flag) => Ok(AnnotationKind::AiImmutable(*flag)),
-                };
-            Ok(Annotation { node, kind: kind? })
+            let kind = match &annotation.kind {
+                AnnotationKind::Intent(text) => AnnotationKind::Intent(text.clone()),
+                AnnotationKind::Constraint { source, expr } => AnnotationKind::Constraint {
+                    source: source.clone(),
+                    expr: remap[expr.index()],
+                },
+                AnnotationKind::AiImmutable(flag) => AnnotationKind::AiImmutable(*flag),
+            };
+            Annotation { node, kind }
         })
-        .collect::<Result<Vec<Annotation>>>()?;
+        .collect();
 
     // 4. Collect and sort every symbol table.
     let mut strings = Vec::new();
@@ -1720,6 +1743,7 @@ fn content_key_framed(nodes: &[crate::ir::Inode], id: NodeId) -> Result<String> 
 fn break_key_ties(
     nodes: &[crate::ir::Inode],
     keys: &[String],
+    annotations: &[Annotation],
     entries: &mut [(usize, NodeId)],
     total: &mut usize,
 ) -> Result<()> {
@@ -1739,7 +1763,20 @@ fn break_key_ties(
                 if !seen.insert(entry.1) {
                     continue;
                 }
-                let key = content_key_framed(nodes, entry.1)?;
+                let mut key = content_key_framed(nodes, entry.1)?;
+                // The render is not injective: it folds every secret to one
+                // constant, and two subjects that differ only in their
+                // annotations render the same. Ordering those by arena id let
+                // construction order reach the canonical bytes and the hash
+                // (cross-cutting pass 1, #1). The signature adds the redacted
+                // annotation multiset and a digest of every secret in the
+                // subtree; a digest is order-revealing, not the bytes.
+                key.push('#');
+                key.push_str(&annotation_signature(annotations, entry.1));
+                key.push('#');
+                for digest in secret_digests(nodes, entry.1) {
+                    key.push_str(&crate::ir::hash_hex(&digest));
+                }
                 *total = total.saturating_add(key.len());
                 if *total > MAX_ANNOTATION_KEY_BYTES {
                     return Err(Error::Limit {
@@ -1759,6 +1796,53 @@ fn break_key_ties(
     Ok(())
 }
 
+/// The redacted annotations attached to one root, in a fixed order.
+///
+/// Two roots that render identically are interchangeable only if everything
+/// stored about them is equal too; the annotations are stored per node, so they
+/// are part of the identity of the root.
+fn annotation_signature(annotations: &[Annotation], id: NodeId) -> String {
+    let mut parts: Vec<String> = annotations
+        .iter()
+        .filter(|annotation| annotation.node == id)
+        .map(|annotation| match &annotation.kind {
+            AnnotationKind::Intent(text) => format!("i:{text}"),
+            AnnotationKind::Constraint { source, expr } => {
+                format!("c:{source}:{}", expr.0)
+            }
+            AnnotationKind::AiImmutable(flag) => format!("m:{flag}"),
+        })
+        .collect();
+    parts.sort();
+    parts.join("|")
+}
+
+/// BLAKE3 digests of every secret in a subtree, sorted.
+///
+/// The content key renders a secret as a constant, so two subjects holding
+/// different secrets tie. The digest orders them without putting the bytes into
+/// a `String` that would outlive the encoding.
+fn secret_digests(nodes: &[crate::ir::Inode], root: NodeId) -> Vec<[u8; 32]> {
+    let mut out = Vec::new();
+    if root.index() >= nodes.len() {
+        return out;
+    }
+    let mut seen = vec![false; nodes.len()];
+    let mut stack = vec![root];
+    while let Some(id) = stack.pop() {
+        if id.index() >= nodes.len() || seen[id.index()] {
+            continue;
+        }
+        seen[id.index()] = true;
+        if let Inode::Secret(secret) = &nodes[id.index()] {
+            out.push(*blake3::hash(secret.expose()).as_bytes());
+        }
+        stack.extend(nodes[id.index()].children());
+    }
+    out.sort();
+    out
+}
+
 /// Deterministic pre-order numbering over the reachable graph.
 ///
 /// The roots are the module root, the bindings in name order, and the annotation
@@ -1766,7 +1850,11 @@ fn break_key_ties(
 /// numeric id (or by the order they were added) would let arena construction and
 /// `annotate` call order leak into the canonical bytes: two modules with the same
 /// content would hash differently.
-fn canonical_order(nodes: &[Inode], module: &InfinityModule) -> Result<Vec<NodeId>> {
+fn canonical_order(
+    nodes: &[Inode],
+    module: &InfinityModule,
+    annotations: &[Annotation],
+) -> Result<Vec<NodeId>> {
     let mut roots: Vec<NodeId> = Vec::new();
     if let Some(root) = module.root() {
         roots.push(root);
@@ -1780,8 +1868,7 @@ fn canonical_order(nodes: &[Inode], module: &InfinityModule) -> Result<Vec<NodeI
     let mut keys: Vec<String> = Vec::new();
     let mut index: HashMap<NodeId, usize> = HashMap::new();
     let mut total = 0usize;
-    let mut subjects: Vec<(usize, NodeId)> = module
-        .annotations()
+    let mut subjects: Vec<(usize, NodeId)> = annotations
         .iter()
         .map(|annotation| {
             Ok((
@@ -1792,10 +1879,9 @@ fn canonical_order(nodes: &[Inode], module: &InfinityModule) -> Result<Vec<NodeI
         .collect::<Result<Vec<_>>>()?;
     // Same order as sorting the `(key, id)` pairs: key bytes, then the id.
     subjects.sort_by(|a, b| keys[a.0].cmp(&keys[b.0]).then_with(|| a.1.cmp(&b.1)));
-    break_key_ties(nodes, &keys, &mut subjects, &mut total)?;
+    break_key_ties(nodes, &keys, annotations, &mut subjects, &mut total)?;
     roots.extend(subjects.into_iter().map(|(_, id)| id));
-    let mut exprs: Vec<(usize, NodeId)> = module
-        .annotations()
+    let mut exprs: Vec<(usize, NodeId)> = annotations
         .iter()
         .filter_map(|annotation| match &annotation.kind {
             AnnotationKind::Constraint { expr, .. } => Some(*expr),
@@ -1809,7 +1895,7 @@ fn canonical_order(nodes: &[Inode], module: &InfinityModule) -> Result<Vec<NodeI
         })
         .collect::<Result<Vec<_>>>()?;
     exprs.sort_by(|a, b| keys[a.0].cmp(&keys[b.0]).then_with(|| a.1.cmp(&b.1)));
-    break_key_ties(nodes, &keys, &mut exprs, &mut total)?;
+    break_key_ties(nodes, &keys, annotations, &mut exprs, &mut total)?;
     roots.extend(exprs.into_iter().map(|(_, id)| id));
 
     let mut order = Vec::with_capacity(nodes.len());

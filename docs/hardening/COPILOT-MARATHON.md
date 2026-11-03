@@ -36,11 +36,36 @@ the code → regression test first → minimal fix → targeted tests + clippy �
 | Pass | State | Notes |
 |---|---|---|
 | Concurrency / multi-tenant | pending | — |
-| Oracle and secret paths (Display/Debug/Serialize) | pending | — |
-| Wire confusion (AINF vs stream vs protobuf) | pending | — |
-| Resource bombs (depth, counts, sizes) | pending | — |
+| Oracle and secret paths (Display/Debug/Serialize) | **pass 1 CLEAN** (2026-11-03, 10 findings closed) | `marathon_order_tests`, `marathon_redaction_tests` |
+| Wire confusion (AINF vs stream vs protobuf) | **pass 1 CLEAN** (checksum code split, delta fault mapping) | see cross-cutting pass 1 |
+| Resource bombs (depth, counts, sizes) | **pass 1 CLEAN** (protobuf work + depth, bridge depth) | see cross-cutting pass 1 |
 | Polyglot encoder golden | pending | — |
-| Second pass over changed sections | pending | — |
+| Second pass over changed sections | pending (I-12/I-13/I-06 re-rounds after 2.4.0) | — |
+
+### Cross-cutting pass 1 - oracle/secret paths and wire confusion - 2026-11-03
+
+Reviewer: DeepSeek V4.1 Flash through the Copilot CLI, `xhigh`, at `0127484`.
+Ten findings (2 high, 3 medium, 5 low/info); all closed except #10, which is a
+documentation correction.
+
+| # | Sev | Finding | Disposition |
+|---|-----|---------|-------------|
+| 1 | high | canonical bytes depended on arena order when two roots render identically (equal integers, secrets, identical constraint expressions): the tie-break fell back to the node id while annotations are stored per node | **fixed**: the tie-break signature adds the redacted annotation multiset and a BLAKE3 digest per secret in the subtree; `marathon_order_tests` (4) builds each module in both arena orders |
+| 2 | high | `redact_image` (new in this batch) missed constraint enum/pattern/custom text, enum type members and patch paths: a copy stayed in the image | **fixed**: `Redactor::redact` covers every surface the codec interns, with a test that walks each of them |
+| 3 | medium | `validate` accepted an aliased secret entry and an unreferenced trailing entry: covert bytes `decode` never reports | **fixed**: secret entries are packed in node order and fully consumed; `an_aliased_or_unreferenced_secret_entry_is_refused` |
+| 4 | medium | `to_protobuf` was quadratic in depth x payload (110 KB / depth 800 measured 15.6 s) and the depth ceiling (1024) aborted the process at 600 frames in a debug build | **fixed**: every nested copy is charged against a 64 MiB work ceiling (`infinity/limit`), and the projection depth is 256; `a_deep_projection_is_refused_not_aborted`, `a_wide_projection_charges_its_copies` |
+| 5 | medium | merge conflict paths carried a field name that copied a secret literal | **fixed**: labels are redacted against the union of the three inputs' secrets; `a_conflict_path_does_not_carry_a_secret_copy` |
+| 6 | low | a frame checksum fault shared `infinity/stream-hash` with an `End` module-hash mismatch, and an encode fault on the delta path surfaced as `infinity/encode` (non-fatal) | **fixed**: `infinity/stream-checksum` added and specified; the delta path maps non-`Limit` faults to `infinity/stream-delta` (defensive: the shipped encoder refuses at `push_delta`, so the end-path check is unreachable through the public API) |
+| 7 | low | `from_active_core` recursed without a cycle or depth bound: a caller-built `CoreModule` could abort the stack | **fixed**: a visiting set (`infinity/cycle`) and a 256-level ceiling (`infinity/limit`); `a_cyclic_core_module_is_refused_not_aborted` |
+| 8 | low | two nodes could receive the same redacted path, and label dedup then dropped one from `why`/`impact` | **fixed**: a colliding path falls back to `@node[id]`; the saturation test now asserts every label is unique |
+| 9 | low | `Store::get` distinguished an absent object (`infinity/store`) from an over-sized planted one (`infinity/limit`) | **fixed**: one code for both; the store test pins it |
+| 10 | info | `Validated::buf`/`section(Section::Secrets)` is a raw secret accessor that ADR-0010's wording does not mention | **documented**: it returns the caller's own buffer; the ADR rule is about a library type that hands out secret text, which no `SecretBytes` accessor does |
+
+Also in this batch: `interop::Redactor`, `redact_module` and `redact_image`
+(2.4.0), which the RPC domain provider uses for cones, patches and evaluation.
+
+Gate: `cargo test --all-features` and `--no-default-features` green, clippy
+`-D warnings` on both, `cargo doc` clean.
 
 ## Log
 

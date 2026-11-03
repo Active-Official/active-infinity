@@ -21,10 +21,11 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::error::{Error, Result};
 use crate::ir::{
-    AnnotationKind, InfinityModule, Inode, InterpPart, NodeId, ProvEntry, ProvValue, Provenance,
+    AnnotationKind, Constraint, InfinityModule, Inode, InterpPart, NodeId, PatchOp, ProvEntry,
+    ProvValue, Provenance, TypeSpec,
 };
 #[cfg(feature = "active-core")]
-use crate::ir::{BinOp, Constraint, PatchOp, SchemaFieldSpec, SemanticTag, TypeSpec, UnOp};
+use crate::ir::{BinOp, SchemaFieldSpec, SemanticTag, UnOp};
 #[cfg(feature = "active-core")]
 use crate::unit::UnitTag;
 
@@ -131,10 +132,17 @@ mod bridge {
         ActiveType as CoreType, Constraint as CoreConstraint, Unit as CoreUnit,
     };
 
+    /// Deepest reference chain the bridge will follow.
+    const MAX_BRIDGE_DEPTH: u32 = 256;
+
     /// Convert a parsed `active-core` module into an Infinity module.
     pub fn from_active_core(module: &CoreModule) -> Result<InfinityModule> {
         let mut out = InfinityModule::new();
         let mut map: HashMap<u32, NodeId> = HashMap::new();
+        // A caller-built `CoreModule` is arbitrary input: a cycle or a very deep
+        // reference chain used to recurse until the stack aborted. The guard
+        // turns both into a refusal (cross-cutting pass 1, #7).
+        let mut visiting: HashSet<u32> = HashSet::new();
         // Ids are allocated in arena order so the conversion is deterministic
         // and diagnostics that reference `n<id>` stay interpretable.
         for index in 0..module.arena.len() {
@@ -142,7 +150,7 @@ mod bridge {
             if module.get(core_id).is_none() {
                 continue;
             }
-            let node = lower_node(module, core_id, &mut out, &mut map)?;
+            let node = lower_node(module, core_id, &mut out, &mut map, &mut visiting, 0)?;
             map.insert(core_id.0, node);
         }
         for (name, core_id) in &module.bindings {
@@ -188,6 +196,8 @@ mod bridge {
         id: active_core::NodeId,
         out: &mut InfinityModule,
         map: &mut HashMap<u32, NodeId>,
+        visiting: &mut HashSet<u32>,
+        depth: u32,
     ) -> Result<NodeId> {
         let node = module.get(id).ok_or(Error::EncodeDangling(id.0))?;
         // Literals lower recursively into composed nodes (arrays and tables are
@@ -199,7 +209,7 @@ mod bridge {
             CoreNode::Literal(_) => unreachable!("handled before the match"),
             CoreNode::Env { name, default } => {
                 let default = match default {
-                    Some(default) => Some(lower_ref(module, *default, out, map)?),
+                    Some(default) => Some(lower_ref(module, *default, out, map, visiting, depth)?),
                     None => None,
                 };
                 Inode::Env {
@@ -208,9 +218,11 @@ mod bridge {
                 }
             }
             CoreNode::Secret { locator } => Inode::SecretRef {
-                locator: lower_ref(module, *locator, out, map)?,
+                locator: lower_ref(module, *locator, out, map, visiting, depth)?,
             },
-            CoreNode::Ref(target) => Inode::Ref(lower_ref(module, *target, out, map)?),
+            CoreNode::Ref(target) => {
+                Inode::Ref(lower_ref(module, *target, out, map, visiting, depth)?)
+            }
             CoreNode::Ident(name) => Inode::Ident(name.clone()),
             CoreNode::Interpolate { parts } => Inode::Interpolate {
                 parts: parts
@@ -219,45 +231,50 @@ mod bridge {
                         active_core::InterpPart::Literal(text) => {
                             Ok(InterpPart::Literal(text.clone()))
                         }
-                        active_core::InterpPart::Expr(id) => {
-                            Ok(InterpPart::Expr(lower_ref(module, *id, out, map)?))
-                        }
+                        active_core::InterpPart::Expr(id) => Ok(InterpPart::Expr(lower_ref(
+                            module, *id, out, map, visiting, depth,
+                        )?)),
                     })
                     .collect::<Result<Vec<_>>>()?,
             },
             CoreNode::Binary { op, lhs, rhs } => Inode::Binary {
                 op: lower_binop(*op),
-                lhs: lower_ref(module, *lhs, out, map)?,
-                rhs: lower_ref(module, *rhs, out, map)?,
+                lhs: lower_ref(module, *lhs, out, map, visiting, depth)?,
+                rhs: lower_ref(module, *rhs, out, map, visiting, depth)?,
             },
             CoreNode::Unary { op, expr } => Inode::Unary {
                 op: lower_unop(*op),
-                expr: lower_ref(module, *expr, out, map)?,
+                expr: lower_ref(module, *expr, out, map, visiting, depth)?,
             },
             CoreNode::Array { elements } => Inode::Array {
                 elements: elements
                     .iter()
-                    .map(|id| lower_ref(module, *id, out, map))
+                    .map(|id| lower_ref(module, *id, out, map, visiting, depth))
                     .collect::<Result<Vec<_>>>()?,
             },
             CoreNode::Table { fields } => Inode::Table {
                 fields: fields
                     .iter()
-                    .map(|(name, id)| Ok((name.clone(), lower_ref(module, *id, out, map)?)))
+                    .map(|(name, id)| {
+                        Ok((
+                            name.clone(),
+                            lower_ref(module, *id, out, map, visiting, depth)?,
+                        ))
+                    })
                     .collect::<Result<Vec<_>>>()?,
             },
             CoreNode::Quantity { value, unit } => Inode::Quantity {
-                value: lower_ref(module, *value, out, map)?,
+                value: lower_ref(module, *value, out, map, visiting, depth)?,
                 unit: UnitTag::from(unit),
             },
             CoreNode::ApplyConstraint { target, constraint } => Inode::Constrained {
-                target: lower_ref(module, *target, out, map)?,
+                target: lower_ref(module, *target, out, map, visiting, depth)?,
                 constraint: lower_constraint(constraint)?,
             },
             CoreNode::PatchDirective { op } => Inode::Patch(match op {
                 active_core::ir::PatchOp::Set { path, value } => PatchOp::Set {
                     path: path.clone(),
-                    value: lower_ref(module, *value, out, map)?,
+                    value: lower_ref(module, *value, out, map, visiting, depth)?,
                 },
                 active_core::ir::PatchOp::Remove { path } => PatchOp::Remove { path: path.clone() },
                 active_core::ir::PatchOp::Rename { from, to } => PatchOp::Rename {
@@ -267,23 +284,28 @@ mod bridge {
             }),
             CoreNode::SchemaField { field } => Inode::SchemaField(SchemaFieldSpec {
                 typ: lower_type(&field.typ)?,
-                min: lower_opt(module, field.min, out, map)?,
-                max: lower_opt(module, field.max, out, map)?,
-                min_len: lower_opt(module, field.min_len, out, map)?,
-                max_len: lower_opt(module, field.max_len, out, map)?,
-                pattern: lower_opt(module, field.pattern, out, map)?,
-                default: lower_opt(module, field.default, out, map)?,
+                min: lower_opt(module, field.min, out, map, visiting, depth)?,
+                max: lower_opt(module, field.max, out, map, visiting, depth)?,
+                min_len: lower_opt(module, field.min_len, out, map, visiting, depth)?,
+                max_len: lower_opt(module, field.max_len, out, map, visiting, depth)?,
+                pattern: lower_opt(module, field.pattern, out, map, visiting, depth)?,
+                default: lower_opt(module, field.default, out, map, visiting, depth)?,
                 deprecated: field.deprecated.clone(),
             }),
             CoreNode::SchemaTable { fields, closed } => Inode::SchemaTable {
                 fields: fields
                     .iter()
-                    .map(|(name, id)| Ok((name.clone(), lower_ref(module, *id, out, map)?)))
+                    .map(|(name, id)| {
+                        Ok((
+                            name.clone(),
+                            lower_ref(module, *id, out, map, visiting, depth)?,
+                        ))
+                    })
                     .collect::<Result<Vec<_>>>()?,
                 closed: *closed,
             },
             CoreNode::SchemaArray { element } => Inode::SchemaArray {
-                element: lower_ref(module, *element, out, map)?,
+                element: lower_ref(module, *element, out, map, visiting, depth)?,
             },
             CoreNode::Semantic { tag, inner } => Inode::Semantic {
                 tag: match tag {
@@ -291,7 +313,7 @@ mod bridge {
                     active_core::ir::SemanticTag::Policy => SemanticTag::Policy,
                     active_core::ir::SemanticTag::Template => SemanticTag::Template,
                 },
-                inner: lower_ref(module, *inner, out, map)?,
+                inner: lower_ref(module, *inner, out, map, visiting, depth)?,
             },
         };
         let id = out.push(lowered);
@@ -355,11 +377,23 @@ mod bridge {
         id: active_core::NodeId,
         out: &mut InfinityModule,
         map: &mut HashMap<u32, NodeId>,
+        visiting: &mut HashSet<u32>,
+        depth: u32,
     ) -> Result<NodeId> {
         if let Some(mapped) = map.get(&id.0) {
             return Ok(*mapped);
         }
-        let lowered = lower_node(module, id, out, map)?;
+        if !visiting.insert(id.0) {
+            return Err(Error::Cycle { node: id.0 });
+        }
+        if depth >= MAX_BRIDGE_DEPTH {
+            return Err(Error::Limit {
+                kind: "bridge depth",
+                limit: MAX_BRIDGE_DEPTH as u64,
+            });
+        }
+        let lowered = lower_node(module, id, out, map, visiting, depth + 1)?;
+        visiting.remove(&id.0);
         map.insert(id.0, lowered);
         Ok(lowered)
     }
@@ -369,9 +403,11 @@ mod bridge {
         id: Option<active_core::NodeId>,
         out: &mut InfinityModule,
         map: &mut HashMap<u32, NodeId>,
+        visiting: &mut HashSet<u32>,
+        depth: u32,
     ) -> Result<Option<NodeId>> {
         match id {
-            Some(id) => Ok(Some(lower_ref(module, id, out, map)?)),
+            Some(id) => Ok(Some(lower_ref(module, id, out, map, visiting, depth)?)),
             None => Ok(None),
         }
     }
@@ -711,7 +747,14 @@ pub use bridge::{evaluate, from_active_core, to_active_core};
 /// Deepest graph the projection will follow. A validated module is at most
 /// `Limits::max_depth` deep; this is a second, independent stop so a
 /// hand-built module cannot exhaust the stack.
-const PROJECTION_DEPTH: usize = 1024;
+/// Deepest container nesting a projection will walk.
+///
+/// The walk is recursive (build, redaction check, protobuf encode), and the
+/// module depth ceiling alone is 1024: 600 nested tables overflow the default
+/// thread stack in a debug build, which aborts the process instead of refusing
+/// (cross-cutting pass 1, #4). 256 is far past any schema and safely inside the
+/// smallest stack this crate runs on.
+const PROJECTION_DEPTH: usize = 256;
 
 /// Maximum number of nodes a single projection may materialise.
 ///
@@ -1018,6 +1061,354 @@ pub(crate) fn redacted_value(text: &str, secrets: &[String]) -> String {
     }
 }
 
+/// A redaction handle for one module's secret literals.
+///
+/// A cone, a restricted subtree or a projection derived from a module no longer
+/// contains the secret node itself, so the redactor cannot rediscover the text
+/// a copy must be compared against. The handle carries that text for the life of
+/// the operation and exposes no accessor: only rewriting. `Debug` prints the
+/// count.
+pub struct Redactor {
+    secrets: Vec<String>,
+    placeholder: String,
+}
+
+impl std::fmt::Debug for Redactor {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Redactor")
+            .field("secrets", &self.secrets.len())
+            .finish()
+    }
+}
+
+impl Redactor {
+    /// Collect the secret literals a module names.
+    pub fn for_module(module: &InfinityModule) -> Self {
+        let secrets = secret_texts(module);
+        let placeholder = hiding_placeholder(&secrets).to_string();
+        Self {
+            secrets,
+            placeholder,
+        }
+    }
+
+    /// True when the module names no secret, so redaction is a no-op.
+    pub fn is_empty(&self) -> bool {
+        self.secrets.is_empty()
+    }
+
+    /// Rewrite `module` in place until no text carries a secret literal.
+    ///
+    /// Every secret node becomes [`SECRET_MARKER`]; a `Str`, `Ident`, `Env`
+    /// name, table or schema field name, interpolated literal, blob media type,
+    /// deprecation note, annotation text or provenance text that contains a
+    /// secret becomes the marker whole (value position) or loses the occurrence
+    /// (metadata prose), the same rule the projections apply.
+    ///
+    /// The node set is untouched, so an id resolved against the source module
+    /// still names the same node. Returns [`Error::Encode`] when two field or
+    /// binding names redact to the same key.
+    pub fn redact(&self, module: &mut InfinityModule) -> Result<()> {
+        let mut budget = PROJECTION_REDACTION_BUDGET;
+        for index in 0..module.node_count() {
+            let id = NodeId(index as u32);
+            let Some(node) = module.get(id) else {
+                continue;
+            };
+            let replacement = match node {
+                Inode::Secret(_) | Inode::SecretRef { .. } => {
+                    Some(Inode::Str(self.placeholder.clone()))
+                }
+                Inode::Str(text) => {
+                    let redacted = redacted_value_within(text, &self.secrets, &mut budget)?;
+                    (redacted != *text).then_some(Inode::Str(redacted))
+                }
+                Inode::Ident(text) => {
+                    let redacted = redacted_value_within(text, &self.secrets, &mut budget)?;
+                    (redacted != *text).then_some(Inode::Ident(redacted))
+                }
+                Inode::Env { name, default } => {
+                    let redacted = redacted_value_within(name, &self.secrets, &mut budget)?;
+                    (redacted != *name).then(|| Inode::Env {
+                        name: redacted,
+                        default: *default,
+                    })
+                }
+                Inode::Table { fields } => {
+                    let (fields, changed) = redact_field_names(fields, &self.secrets, &mut budget)?;
+                    changed.then_some(Inode::Table { fields })
+                }
+                Inode::SchemaTable { fields, closed } => {
+                    let (fields, changed) = redact_field_names(fields, &self.secrets, &mut budget)?;
+                    changed.then_some(Inode::SchemaTable {
+                        fields,
+                        closed: *closed,
+                    })
+                }
+                Inode::Interpolate { parts } => {
+                    let mut out = Vec::with_capacity(parts.len());
+                    let mut changed = false;
+                    for part in parts {
+                        match part {
+                            InterpPart::Literal(text) => {
+                                let redacted =
+                                    redacted_value_within(text, &self.secrets, &mut budget)?;
+                                changed |= redacted != *text;
+                                out.push(InterpPart::Literal(redacted));
+                            }
+                            other => out.push(other.clone()),
+                        }
+                    }
+                    changed.then_some(Inode::Interpolate { parts: out })
+                }
+                Inode::SchemaField(spec) => {
+                    let mut spec = spec.clone();
+                    let mut changed = false;
+                    if let Some(note) = &spec.deprecated {
+                        let redacted = redact_within(note, &self.secrets, &mut budget)?;
+                        changed |= redacted != *note;
+                        spec.deprecated = Some(redacted);
+                    }
+                    changed |= self.redact_type(&mut spec.typ, &mut budget)?;
+                    changed.then_some(Inode::SchemaField(spec))
+                }
+                Inode::Constrained { target, constraint } => {
+                    let mut constraint = constraint.clone();
+                    if self.redact_constraint(&mut constraint, &mut budget)? {
+                        Some(Inode::Constrained {
+                            target: *target,
+                            constraint,
+                        })
+                    } else {
+                        None
+                    }
+                }
+                Inode::Patch(op) => {
+                    let mut op = op.clone();
+                    let changed = match &mut op {
+                        PatchOp::Set { path, .. } => {
+                            let redacted = redacted_value_within(path, &self.secrets, &mut budget)?;
+                            let changed = redacted != *path;
+                            *path = redacted;
+                            changed
+                        }
+                        PatchOp::Remove { path } => {
+                            let redacted = redacted_value_within(path, &self.secrets, &mut budget)?;
+                            let changed = redacted != *path;
+                            *path = redacted;
+                            changed
+                        }
+                        PatchOp::Rename { from, to } => {
+                            let redacted_from =
+                                redacted_value_within(from, &self.secrets, &mut budget)?;
+                            let redacted_to =
+                                redacted_value_within(to, &self.secrets, &mut budget)?;
+                            let changed = redacted_from != *from || redacted_to != *to;
+                            *from = redacted_from;
+                            *to = redacted_to;
+                            changed
+                        }
+                    };
+                    changed.then_some(Inode::Patch(op))
+                }
+                Inode::Blob {
+                    hash,
+                    size,
+                    tainted,
+                    media_type,
+                    payload,
+                } => {
+                    let redacted = redacted_value_within(media_type, &self.secrets, &mut budget)?;
+                    (redacted != *media_type).then(|| Inode::Blob {
+                        hash: *hash,
+                        size: *size,
+                        tainted: *tainted,
+                        media_type: redacted,
+                        payload: payload.clone(),
+                    })
+                }
+                _ => None,
+            };
+            if let Some(replacement) = replacement {
+                *module.node_mut(id)? = replacement;
+            }
+        }
+        self.redact_metadata(module, &mut budget)?;
+        redact_binding_names(module, &self.secrets, &mut budget)
+    }
+
+    /// Redact an enum type's members.
+    fn redact_type(&self, typ: &mut TypeSpec, budget: &mut usize) -> Result<bool> {
+        let TypeSpec::Enum(members) = typ else {
+            return Ok(false);
+        };
+        let mut changed = false;
+        for member in members.iter_mut() {
+            let redacted = redacted_value_within(member, &self.secrets, budget)?;
+            changed |= redacted != *member;
+            *member = redacted;
+        }
+        Ok(changed)
+    }
+
+    /// Redact an enum, pattern or custom constraint.
+    fn redact_constraint(&self, constraint: &mut Constraint, budget: &mut usize) -> Result<bool> {
+        match constraint {
+            Constraint::Enum(members) => {
+                let mut changed = false;
+                for member in members.iter_mut() {
+                    let redacted = redacted_value_within(member, &self.secrets, budget)?;
+                    changed |= redacted != *member;
+                    *member = redacted;
+                }
+                Ok(changed)
+            }
+            Constraint::Pattern(text) | Constraint::Custom(text) => {
+                let redacted = redacted_value_within(text, &self.secrets, budget)?;
+                let changed = redacted != *text;
+                *text = redacted;
+                Ok(changed)
+            }
+            Constraint::MinMax { .. } | Constraint::Odd => Ok(false),
+        }
+    }
+
+    /// Redact annotation and provenance prose.
+    fn redact_metadata(&self, module: &mut InfinityModule, budget: &mut usize) -> Result<()> {
+        let mut changed = false;
+        let mut kept: Vec<(NodeId, AnnotationKind)> =
+            Vec::with_capacity(module.annotations().len());
+        for annotation in module.annotations() {
+            let kind = match &annotation.kind {
+                AnnotationKind::Intent(text) => {
+                    let redacted = redact_within(text, &self.secrets, budget)?;
+                    changed |= redacted != *text;
+                    AnnotationKind::Intent(redacted)
+                }
+                AnnotationKind::Constraint { source, expr } => {
+                    let redacted = redact_within(source, &self.secrets, budget)?;
+                    changed |= redacted != *source;
+                    AnnotationKind::Constraint {
+                        source: redacted,
+                        expr: *expr,
+                    }
+                }
+                other => other.clone(),
+            };
+            kept.push((annotation.node, kind));
+        }
+        if changed {
+            module.clear_annotations();
+            for (node, kind) in kept {
+                module.annotate(node, kind);
+            }
+        }
+
+        let Some(mut provenance) = module.provenance().cloned() else {
+            return Ok(());
+        };
+        let mut changed = false;
+        for field in [
+            &mut provenance.producer,
+            &mut provenance.model,
+            &mut provenance.tool,
+        ] {
+            if let Some(text) = field {
+                let redacted = redact_within(text, &self.secrets, budget)?;
+                changed |= redacted != *text;
+                *field = Some(redacted);
+            }
+        }
+        for entry in &mut provenance.entries {
+            let redacted = redact_within(&entry.key, &self.secrets, budget)?;
+            changed |= redacted != entry.key;
+            entry.key = redacted;
+            if let ProvValue::Text(text) = &mut entry.value {
+                let redacted = redact_within(text, &self.secrets, budget)?;
+                changed |= redacted != *text;
+                *text = redacted;
+            }
+        }
+        if changed {
+            module.set_provenance(Some(provenance));
+        }
+        Ok(())
+    }
+}
+
+/// A copy of `module` in which no text carries secret material.
+///
+/// This is the projection rule applied to the image itself. The canonical encode
+/// runs first, while the secret nodes are still present: that is when the codec
+/// can refuse a free-text or binary copy and redact the metadata prose, and when
+/// a secret locator is promoted out of the public string heap.
+pub fn redact_module(module: &InfinityModule) -> Result<InfinityModule> {
+    let canonical = crate::encode(module)?;
+    let mut redacted = crate::decode(&canonical)?;
+    let redactor = Redactor::for_module(&redacted);
+    if !redacted.nodes().iter().any(|node| node.is_secret()) && redactor.is_empty() {
+        return Ok(redacted);
+    }
+    redactor.redact(&mut redacted)?;
+    Ok(redacted)
+}
+
+/// [`redact_module`] over image bytes, returning image bytes.
+pub fn redact_image(bytes: &[u8]) -> Result<Vec<u8>> {
+    let module = crate::decode(bytes)?;
+    crate::encode(&redact_module(&module)?)
+}
+
+/// Redact field names, refusing a collapse onto one key.
+fn redact_field_names(
+    fields: &[(String, NodeId)],
+    secrets: &[String],
+    budget: &mut usize,
+) -> Result<(Vec<(String, NodeId)>, bool)> {
+    let mut out = Vec::with_capacity(fields.len());
+    let mut changed = false;
+    for (name, id) in fields {
+        let redacted = redacted_value_within(name, secrets, budget)?;
+        changed |= redacted != *name;
+        out.push((redacted, *id));
+    }
+    if changed {
+        let mut seen = std::collections::BTreeSet::new();
+        if out.iter().any(|(name, _)| !seen.insert(name.clone())) {
+            return Err(Error::Encode("two field names redact to the same key"));
+        }
+    }
+    Ok((out, changed))
+}
+
+/// Redact binding names, refusing a collapse onto one key.
+fn redact_binding_names(
+    module: &mut InfinityModule,
+    secrets: &[String],
+    budget: &mut usize,
+) -> Result<()> {
+    let mut out = Vec::with_capacity(module.bindings().len());
+    let mut changed = false;
+    for (name, id) in module.bindings() {
+        let redacted = redacted_value_within(name, secrets, budget)?;
+        changed |= redacted != *name;
+        out.push((redacted, *id));
+    }
+    if !changed {
+        return Ok(());
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    if out.iter().any(|(name, _)| !seen.insert(name.clone())) {
+        return Err(Error::Encode("two binding names redact to the same key"));
+    }
+    module.clear_bindings();
+    for (name, id) in out {
+        module.bind(name, id);
+    }
+    Ok(())
+}
+
 /// One entry per key, first occurrence wins, in the module's order.
 ///
 /// The encoder refuses duplicate provenance keys, so this only decides what a
@@ -1118,7 +1509,10 @@ fn build_projected(
     bytes: &mut usize,
 ) -> Result<Projected> {
     if depth > PROJECTION_DEPTH {
-        return Err(Error::Encode("projection nesting exceeds the limit"));
+        return Err(Error::Limit {
+            kind: "projection depth",
+            limit: PROJECTION_DEPTH as u64,
+        });
     }
     *budget += 1;
     if *budget > PROJECTION_NODE_BUDGET {
@@ -1586,8 +1980,21 @@ pub fn value_paths(module: &InfinityModule) -> HashMap<NodeId, String> {
         }
         order.push((id, path));
     }
+    // Two nodes can reach the same text: two field names that redact to one
+    // key, or a budget-saturated label. Deduplicating labels then silently
+    // dropped a node from `why`/`impact` (cross-cutting pass 1, #8), so a
+    // collision falls back to the id label, which is unique per node.
+    let mut used: std::collections::HashSet<String> = std::collections::HashSet::new();
     for (id, path) in order {
-        paths.entry(id).or_insert(path);
+        if paths.contains_key(&id) {
+            continue;
+        }
+        let chosen = if used.insert(path.clone()) {
+            path
+        } else {
+            format!("@node[{}]", id.0)
+        };
+        paths.insert(id, chosen);
     }
     paths
 }

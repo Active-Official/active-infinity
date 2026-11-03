@@ -276,15 +276,17 @@ fn a_newer_minor_generation_is_a_minor_version_error() {
     assert_eq!(error.code(), "infinity/version-minor", "{error}");
 }
 
-/// A frame checksum fault is a stream fault, not the image content hash: a
-/// consumer that retries a frame must not be sent down the image path.
+/// A frame checksum fault is a framing fault, not the image content hash: a
+/// consumer that retries a frame must not be sent down the image path. The two
+/// were one code until cross-cutting pass 1, #6.
 #[test]
-fn a_corrupt_frame_checksum_is_a_stream_hash_fault() {
+fn a_corrupt_frame_checksum_is_a_framing_fault() {
     let mut bytes = Frame::new(FrameKind::Batch, 0, b"payload".to_vec()).to_bytes();
     let last = bytes.len() - 1;
     bytes[last] ^= 0x01;
     let error = Frame::parse(&bytes).expect_err("the checksum disagrees");
-    assert_eq!(error.code(), "infinity/stream-hash", "{error}");
+    assert_eq!(error.code(), "infinity/stream-checksum", "{error}");
+    assert!(error.is_fatal(), "a corrupt frame is a permanent fault");
 }
 
 /// `try_new` is the fallible constructor for a payload size from input; `new`

@@ -670,3 +670,40 @@ fn a_hash_index_out_of_range_is_an_offset_fault() {
     let error = validated.hash_entry(count).expect_err("out of range");
     assert_eq!(error.code(), "infinity/offset", "{error}");
 }
+
+/// A secret entry a node does not name is covert bytes: `decode` never reports
+/// it, yet it is inside the image and its hash. Aliasing one entry from two
+/// nodes while another sits unreferenced used to pass `validate` (cross-cutting
+/// pass 1, #3).
+#[test]
+fn an_aliased_or_unreferenced_secret_entry_is_refused() {
+    use active_infinity::{InfinityModule, Inode};
+
+    let mut module = InfinityModule::new();
+    let first = module.push(Inode::Secret("first-secret".into()));
+    let second = module.push(Inode::Secret("second-secret".into()));
+    let root = module.push(Inode::Table {
+        fields: vec![("first".to_string(), first), ("second".to_string(), second)],
+    });
+    module.set_root(Some(root));
+    let mut bytes = encode(&module).expect("encode");
+    validate(&bytes).expect("the canonical image validates");
+    active_infinity::validate_canonical(&bytes, active_infinity::Limits::default())
+        .expect("canonical");
+
+    // Point the second Secret node at the first entry: entry 0 is now named
+    // twice and entry 1 by nobody.
+    let secret_nodes: Vec<usize> = (0..3)
+        .filter(|index| {
+            let at = node_offset(&bytes, *index);
+            bytes[at] == 9
+        })
+        .collect();
+    assert_eq!(secret_nodes.len(), 2, "two secret nodes");
+    let at = node_offset(&bytes, secret_nodes[1]);
+    bytes[at + 8..at + 16].copy_from_slice(&0u64.to_le_bytes());
+    rewrite_hash(&mut bytes);
+
+    let error = validate(&bytes).expect_err("an aliased secret entry is refused");
+    assert_eq!(error.code(), "infinity/secret-entry", "{error:?}");
+}

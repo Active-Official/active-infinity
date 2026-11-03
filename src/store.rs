@@ -139,7 +139,10 @@ impl Store {
     /// checked against the requested key before they are returned. A symbolic
     /// link at the object path is refused; objects are regular files.
     pub fn get(&self, hash: &[u8; 32]) -> Result<Vec<u8>> {
-        let image = read_bounded(&self.path_for(hash), object_limit())?;
+        // One answer for "no such object": a planted file larger than the
+        // ceiling must not be distinguishable from an absent one by its code
+        // (cross-cutting pass 1, #9).
+        let image = read_bounded(&self.path_for(hash), object_limit()).map_err(store_read_fault)?;
         let meta = validate_canonical(&image, Limits::default())?;
         if &meta.content_hash != hash {
             return Err(Error::Store("object does not match its key"));
@@ -631,4 +634,16 @@ fn hex32(hash: &[u8; 32]) -> String {
         let _ = write!(out, "{byte:02x}");
     }
     out
+}
+
+/// Report any object-read fault as the store's own code.
+///
+/// The path is derived from a hash the caller chose, so an over-sized planted
+/// object would otherwise answer `infinity/limit` and tell a prober that the
+/// name exists.
+fn store_read_fault(error: Error) -> Error {
+    match error {
+        Error::Store(_) => error,
+        _ => Error::Store("object is absent or unreadable"),
+    }
 }

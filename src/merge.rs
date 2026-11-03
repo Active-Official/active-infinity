@@ -161,6 +161,16 @@ pub fn merge(
     for module in [base, left, right] {
         hash_secrets.extend(crate::interop::secret_bytes(module));
     }
+    // A conflict path is an export: a field name that copies a secret literal
+    // would publish it in the report, exactly like an annotation or a binding
+    // name. One union of the three inputs' text forms covers a copy that lives
+    // in a different input (cross-cutting pass 1, #5).
+    let mut secret_texts: Vec<String> = Vec::new();
+    for module in [base, left, right] {
+        secret_texts.extend(crate::interop::secret_texts(module));
+    }
+    secret_texts.sort();
+    secret_texts.dedup();
     let ctx = Ctx {
         base,
         left,
@@ -168,6 +178,8 @@ pub fn merge(
         budget: Cell::new(MAX_MERGE_WORK),
         bytes: Cell::new(MAX_MERGE_BYTES),
         hash_secrets,
+        secret_texts,
+        redaction: Cell::new(MAX_MERGE_WORK),
     };
 
     let mut conflicts = ConflictSet::default();
@@ -209,7 +221,7 @@ pub fn merge(
                 let before = conflicts.len();
                 ctx.nested_conflicts(name, b, l, r, 0, &mut conflicts)?;
                 if conflicts.len() == before {
-                    conflicts.push(escape_field(name), kind)?;
+                    conflicts.push(ctx.field_label(name)?, kind)?;
                 }
             }
             decision => {
@@ -326,9 +338,22 @@ struct Ctx<'a> {
     budget: Cell<usize>,
     bytes: Cell<usize>,
     hash_secrets: Vec<Vec<u8>>,
+    /// Text of every secret in the three inputs, for conflict labels.
+    secret_texts: Vec<String>,
+    /// Cumulative budget for redacting labels.
+    redaction: Cell<usize>,
 }
 
 impl Ctx<'_> {
+    /// A field name as a conflict path: redacted against every secret, escaped
+    /// for the dotted path syntax.
+    fn field_label(&self, name: &str) -> Result<String> {
+        let mut budget = self.redaction.get();
+        let redacted = crate::interop::redact_within(name, &self.secret_texts, &mut budget)?;
+        self.redaction.set(budget);
+        Ok(escape_field(&redacted))
+    }
+
     fn charge(&self, nodes: usize) -> Result<()> {
         let remaining = self.budget.get();
         if remaining < nodes {
@@ -520,7 +545,7 @@ impl Ctx<'_> {
             let child_left = left_fields.get(name).copied();
             let child_right = right_fields.get(name).copied();
             if let Decision::Conflict(kind) = self.decide(child_base, child_left, child_right)? {
-                let child_path = format!("{path}.{}", escape_field(name));
+                let child_path = format!("{path}.{}", self.field_label(name)?);
                 let before = out.len();
                 self.nested_conflicts(
                     &child_path,

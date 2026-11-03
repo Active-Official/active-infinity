@@ -1,5 +1,48 @@
 # Changelog - Active Infinity
 
+## 2.4.0 - 2026-11-03
+
+### Added
+
+- **`interop::Redactor`**: a handle for one module's secret literals that
+  rewrites a derived module (a cone, a restricted subtree, an evaluation copy)
+  until no text carries a secret. It covers every surface the codec interns —
+  string, identifier, `Env` name, table and schema field names, interpolated
+  literals, blob media type, deprecation notes, enum members and constraint
+  pattern/custom text, patch paths, annotations, provenance and binding names —
+  and refuses a redaction that would collapse two names onto one key.
+- **`interop::redact_module` / `interop::redact_image`**: the same rule applied
+  to a whole module or image. This is the projection rule applied to the bytes:
+  a plain `Str` that copies a secret literal is redacted too, because the codec
+  has no way to tell a copy from data.
+- **`infinity/stream-checksum`**: a frame checksum fault now has its own code;
+  `infinity/stream-hash` is reserved for an `End`-frame module-hash mismatch.
+- **`MAX_PROTOBUF_WORK`**: the protobuf projection charges every nested copy and
+  refuses past 64 MiB of copying (`infinity/limit`), so a deep chain over a
+  large shared string is a refusal instead of a 15-second stall.
+
+### Fixed
+
+- **Canonical form**: two roots that render identically (equal integers, two
+  secrets, identical constraint expressions) were ordered by arena id, so the
+  same logical module built in another order produced other bytes and another
+  hash. The tie-break now orders them by the redacted annotation multiset
+  attached to the root and by a digest of each secret in the subtree.
+- **Validation**: a secret entry must be named by exactly one node, in node
+  order; an aliased entry and an unreferenced trailing entry are
+  `infinity/secret-entry` instead of covert bytes `decode` never reports.
+- **Merge**: a conflict path (a field name) is redacted against every secret in
+  the three inputs before it reaches the report.
+- **Graph labels**: two nodes that would receive the same redacted path now take
+  an id label instead, so `why`/`impact` no longer silently drop one.
+- **Store**: an over-sized planted object and an absent one answer the same
+  code, `infinity/store`.
+- **Bridge**: lowering an arbitrary `CoreModule` refuses a reference cycle
+  (`infinity/cycle`) and a chain past 256 levels (`infinity/limit`) instead of
+  recursing until the stack aborts.
+- **Projection depth**: capped at 256 (was 1024) so the recursive projection
+  walk cannot abort the process on a legal module.
+
 ## Unreleased
 
 ### Fixed

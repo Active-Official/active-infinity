@@ -278,3 +278,17 @@ fn malformed_input_never_panics_and_always_fails_closed() {
     }
     assert!(cases > 50, "mutation campaign must actually run");
 }
+
+/// A caller-built `CoreModule` is arbitrary input: a reference cycle and a very
+/// deep chain must be refusals, not a stack abort (cross-cutting pass 1, #7).
+#[test]
+fn a_cyclic_core_module_is_refused_not_aborted() {
+    use active_core::ir::{Module as CoreModule, Node as CoreNode};
+
+    let mut core = CoreModule::new("cycle");
+    let a = core.add_node(CoreNode::Ref(active_core::NodeId(1)));
+    let _b = core.add_node(CoreNode::Ref(a));
+    core.root = Some(a);
+    let error = from_active_core(&core).expect_err("a cycle is refused");
+    assert_eq!(error.code(), "infinity/cycle", "{error}");
+}

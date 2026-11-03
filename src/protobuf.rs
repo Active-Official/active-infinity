@@ -171,17 +171,30 @@ fn string(out: &mut Vec<u8>, field: u32, value: &str) {
     bytes(out, field, value.as_bytes());
 }
 
-fn message(out: &mut Vec<u8>, field: u32, body: &[u8]) {
+fn message(out: &mut Vec<u8>, field: u32, body: &[u8], work: &mut usize) -> Result<()> {
+    // Every nested message is built in its own buffer and copied into the
+    // parent, so cost is depth x payload. The byte ceilings bound the result but
+    // not the copying: a deep chain sharing one large string measured 15.6 s at
+    // 110 KB (cross-cutting pass 1, #4). Charge the copy and refuse past the
+    // ceiling instead of stalling.
+    *work = work.saturating_add(body.len());
+    if *work > MAX_PROTOBUF_WORK {
+        return Err(Error::Limit {
+            kind: "protobuf work bytes",
+            limit: MAX_PROTOBUF_WORK as u64,
+        });
+    }
     bytes(out, field, body);
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
 // value tree
 // ---------------------------------------------------------------------------
 
-fn encode_value(value: &Projected, out: &mut Vec<u8>) {
+fn encode_value(value: &Projected, out: &mut Vec<u8>, work: &mut usize) -> Result<()> {
     match value {
-        Projected::Null => message(out, 1, &[]),
+        Projected::Null => message(out, 1, &[], work)?,
         Projected::Bool(flag) => boolean(out, 2, *flag),
         Projected::Int(number) => sint(out, 3, *number),
         Projected::Float(number) => double(out, 4, *number),
@@ -189,24 +202,24 @@ fn encode_value(value: &Projected, out: &mut Vec<u8>) {
         Projected::DurationMs(ms) => {
             let mut body = Vec::new();
             uint(&mut body, 1, *ms);
-            message(out, 6, &body);
+            message(out, 6, &body, work)?;
         }
         Projected::Quantity(value, unit) => {
             let mut body = Vec::new();
             let mut inner = Vec::new();
-            encode_value(value, &mut inner);
-            message(&mut body, 1, &inner);
+            encode_value(value, &mut inner, work)?;
+            message(&mut body, 1, &inner, work)?;
             string(&mut body, 2, unit);
-            message(out, 7, &body);
+            message(out, 7, &body, work)?;
         }
         Projected::Array(items) => {
             let mut body = Vec::new();
             for item in items {
                 let mut encoded = Vec::new();
-                encode_value(item, &mut encoded);
-                message(&mut body, 1, &encoded);
+                encode_value(item, &mut encoded, work)?;
+                message(&mut body, 1, &encoded, work)?;
             }
-            message(out, 8, &body);
+            message(out, 8, &body, work)?;
         }
         Projected::Record(fields) => {
             let mut body = Vec::new();
@@ -214,11 +227,11 @@ fn encode_value(value: &Projected, out: &mut Vec<u8>) {
                 let mut field = Vec::new();
                 string(&mut field, 1, name);
                 let mut encoded = Vec::new();
-                encode_value(value, &mut encoded);
-                message(&mut field, 2, &encoded);
-                message(&mut body, 1, &field);
+                encode_value(value, &mut encoded, work)?;
+                message(&mut field, 2, &encoded, work)?;
+                message(&mut body, 1, &field, work)?;
             }
-            message(out, 9, &body);
+            message(out, 9, &body, work)?;
         }
         Projected::Blob {
             hash,
@@ -231,19 +244,20 @@ fn encode_value(value: &Projected, out: &mut Vec<u8>) {
             uint(&mut body, 2, *size);
             string(&mut body, 3, media_type);
             boolean(&mut body, 4, *tainted);
-            message(out, 10, &body);
+            message(out, 10, &body, work)?;
         }
         Projected::Env(name) => {
             let mut body = Vec::new();
             string(&mut body, 1, name);
-            message(out, 11, &body);
+            message(out, 11, &body, work)?;
         }
         Projected::Expr(kind) => {
             let mut body = Vec::new();
             string(&mut body, 1, kind);
-            message(out, 12, &body);
+            message(out, 12, &body, work)?;
         }
     }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -257,6 +271,13 @@ fn encode_value(value: &Projected, out: &mut Vec<u8>) {
 /// ceiling is refused with `infinity/limit` instead of growing until the
 /// process aborts.
 pub const MAX_PROTOBUF_BYTES: usize = 1 << 30;
+
+/// Total bytes this projection will copy while nesting, before it refuses.
+///
+/// Every nested message is copied into its parent; a chain of depth `d` over a
+/// payload of `p` bytes costs `d * p`. The result ceiling does not bound that
+/// work, so it is charged here.
+pub const MAX_PROTOBUF_WORK: usize = 64 << 20;
 
 /// Project `module` into protobuf wire format.
 ///
@@ -285,6 +306,7 @@ pub fn to_protobuf(module: &InfinityModule) -> Result<Vec<u8>> {
     let raw_secrets = secret_bytes(module);
 
     let mut out = Vec::new();
+    let mut work = 0usize;
     bytes(&mut out, 1, &hash);
     uint(&mut out, 2, image.len() as u64);
     check_size(&out)?;
@@ -317,9 +339,9 @@ pub fn to_protobuf(module: &InfinityModule) -> Result<Vec<u8>> {
             });
         }
         let mut body = Vec::new();
-        encode_value(&value, &mut body);
+        encode_value(&value, &mut body, &mut work)?;
         check_size(&body)?;
-        message(&mut out, 3, &body);
+        message(&mut out, 3, &body, &mut work)?;
         check_size(&out)?;
     }
 
@@ -349,10 +371,10 @@ pub fn to_protobuf(module: &InfinityModule) -> Result<Vec<u8>> {
         }
         string(&mut binding, 1, &name);
         let mut encoded = Vec::new();
-        encode_value(&value, &mut encoded);
+        encode_value(&value, &mut encoded, &mut work)?;
         check_size(&encoded)?;
-        message(&mut binding, 2, &encoded);
-        message(&mut out, 4, &binding);
+        message(&mut binding, 2, &encoded, &mut work)?;
+        message(&mut out, 4, &binding, &mut work)?;
         check_size(&out)?;
     }
 
@@ -360,8 +382,9 @@ pub fn to_protobuf(module: &InfinityModule) -> Result<Vec<u8>> {
         message(
             &mut out,
             5,
-            &encode_provenance(prov, &secrets, &mut redaction)?,
-        );
+            &encode_provenance(prov, &secrets, &mut redaction, &mut work)?,
+            &mut work,
+        )?;
         check_size(&out)?;
     }
 
@@ -369,8 +392,9 @@ pub fn to_protobuf(module: &InfinityModule) -> Result<Vec<u8>> {
         message(
             &mut out,
             6,
-            &encode_annotation(annotation, &secrets, &mut redaction)?,
-        );
+            &encode_annotation(annotation, &secrets, &mut redaction, &mut work)?,
+            &mut work,
+        )?;
         check_size(&out)?;
     }
 
@@ -385,7 +409,7 @@ pub fn to_protobuf(module: &InfinityModule) -> Result<Vec<u8>> {
         let mut extension = Vec::new();
         uint(&mut extension, 1, *tag);
         bytes(&mut extension, 2, payload);
-        message(&mut out, 7, &extension);
+        message(&mut out, 7, &extension, &mut work)?;
         check_size(&out)?;
     }
 
@@ -480,6 +504,7 @@ fn encode_annotation(
     annotation: &crate::ir::Annotation,
     secrets: &[String],
     budget: &mut usize,
+    work: &mut usize,
 ) -> Result<Vec<u8>> {
     let mut body = Vec::new();
     uint(&mut body, 1, annotation.node.index() as u64);
@@ -495,7 +520,7 @@ fn encode_annotation(
                 &redacted_value_within(source, secrets, budget)?,
             );
             uint(&mut constraint, 2, expr.index() as u64);
-            message(&mut body, 3, &constraint);
+            message(&mut body, 3, &constraint, work)?;
         }
         AnnotationKind::AiImmutable(flag) => boolean(&mut body, 4, *flag),
     }
@@ -506,6 +531,7 @@ fn encode_provenance(
     prov: &crate::ir::Provenance,
     secrets: &[String],
     budget: &mut usize,
+    work: &mut usize,
 ) -> Result<Vec<u8>> {
     let mut body = Vec::new();
     string(
@@ -544,7 +570,7 @@ fn encode_provenance(
             ProvValue::Flag(flag) => boolean(&mut encoded, 4, *flag),
             ProvValue::Hash(hash) => bytes(&mut encoded, 5, hash),
         }
-        message(&mut body, 6, &encoded);
+        message(&mut body, 6, &encoded, work)?;
     }
     Ok(body)
 }

@@ -160,6 +160,12 @@ pub enum Error {
     StreamState(&'static str),
     /// The reassembled module hash does not match the `End` frame.
     StreamHashMismatch,
+    /// A frame's own checksum does not match its payload.
+    ///
+    /// Distinct from [`Error::StreamHashMismatch`]: a corrupt frame is a framing
+    /// fault and the frame can be retried, while an `End` mismatch means the
+    /// reassembled module is not the one the sender hashed.
+    StreamChecksum,
     /// A delta operation cannot be applied to the current module state.
     StreamDelta(&'static str),
     /// The stream ended without an `End` frame.
@@ -224,6 +230,7 @@ impl Error {
             Error::StreamSequence { .. } => "infinity/stream-sequence",
             Error::StreamState(_) => "infinity/stream-state",
             Error::StreamHashMismatch => "infinity/stream-hash",
+            Error::StreamChecksum => "infinity/stream-checksum",
             Error::StreamDelta(_) => "infinity/stream-delta",
             Error::StreamUnterminated => "infinity/stream-unterminated",
         }
@@ -313,6 +320,7 @@ impl Error {
                 | Error::StreamPayloadLen { .. }
                 | Error::StreamSequence { .. }
                 | Error::StreamHashMismatch
+                | Error::StreamChecksum
                 | Error::StreamUnterminated
         )
     }
@@ -383,6 +391,7 @@ impl fmt::Display for Error {
             Error::EncodeDangling(id) => write!(f, "cannot encode: dangling node {id}"),
             Error::TooLarge => write!(f, "module exceeds the 4 GiB addressable image"),
             Error::StreamMagic => write!(f, "not an Active Infinity stream frame"),
+            Error::StreamChecksum => write!(f, "stream frame checksum mismatch"),
             Error::StreamVersion(v) => write!(f, "unsupported stream frame version {v}"),
             Error::StreamFlags(bits) => write!(f, "unknown stream frame flag bits {bits:#06x}"),
             Error::StreamFrameLen {

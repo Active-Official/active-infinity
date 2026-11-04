@@ -63,8 +63,7 @@ class _Reader {
   final StreamIterator<Uint8List> _iterator;
   Uint8List _buffer = Uint8List(0);
 
-  Future<Uint8List> read(int count) async {
-    while (_buffer.length < count) {
+  Future<Uint8List> read(int count) async {    while (_buffer.length < count) {
       if (!await _iterator.moveNext()) throw StateError('truncated frame');
       final joined = Uint8List(_buffer.length + _iterator.current.length)
         ..setRange(0, _buffer.length, _buffer)
@@ -76,6 +75,9 @@ class _Reader {
     _buffer = Uint8List.sublistView(_buffer, count);
     return head;
   }
+
+  /// Drop the underlying subscription so the isolate can exit.
+  Future<void> cancel() => _iterator.cancel();
 }
 
 Future<(int, String, Uint8List)> call(String address, Uint8List envelope) async {
@@ -83,6 +85,7 @@ Future<(int, String, Uint8List)> call(String address, Uint8List envelope) async 
   final host = address.substring(0, split);
   final port = int.parse(address.substring(split + 1));
   final socket = await Socket.connect(host, port);
+  final reader = _Reader(StreamIterator<Uint8List>(socket));
   try {
     final header = ByteData(4)..setUint32(0, envelope.length, Endian.little);
     socket.add(header.buffer.asUint8List());
@@ -91,7 +94,6 @@ Future<(int, String, Uint8List)> call(String address, Uint8List envelope) async 
     // Read the length, then exactly that many bytes. A fold() waits for EOF,
     // and the server keeps the connection open for the next frame, so it hung
     // on a persistent server (audit AINF-005).
-    final reader = _Reader(StreamIterator<Uint8List>(socket));
     final lengthBytes = await reader.read(4);
     final length = ByteData.sublistView(lengthBytes).getUint32(0, Endian.little);
     if (length > 1 << 20) throw StateError('frame exceeds the ceiling');
@@ -106,7 +108,12 @@ Future<(int, String, Uint8List)> call(String address, Uint8List envelope) async 
     final method = utf8.decode(frame.sublist(20, 20 + methodLength));
     return (kind, method, frame);
   } finally {
-    await socket.close();
+    // Drop the read subscription and destroy the socket. `Socket.close()`
+    // waits for the subscription and can leave its future pending, and a live
+    // subscription keeps the isolate alive: the client printed PASS and never
+    // exited (CI 2026-11-04).
+    await reader.cancel();
+    socket.destroy();
   }
 }
 

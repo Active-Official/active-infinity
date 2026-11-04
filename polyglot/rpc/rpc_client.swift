@@ -87,7 +87,7 @@ func call(_ address: String, _ envelope: [UInt8]) throws -> (Int, String, [UInt8
 
     var header = [UInt8](repeating: 0, count: 4)
     try readExact(descriptor, &header)
-    let length = header.withUnsafeBytes { $0.load(as: UInt32.self) }
+    let length = readU32(header, 0)
     guard length <= 1 << 20 else {
         close(descriptor)
         throw NSError(domain: "rpc", code: 8)
@@ -98,7 +98,7 @@ func call(_ address: String, _ envelope: [UInt8]) throws -> (Int, String, [UInt8
     guard body.count >= 20, String(decoding: body[0..<4], as: UTF8.self) == "ARP1", body[4] == 1 else {
         throw NSError(domain: "rpc", code: 4)
     }
-    let methodLength = body[16..<20].withUnsafeBytes { $0.load(as: UInt32.self) }
+    let methodLength = readU32(body, 16)
     guard Int(methodLength) <= body.count - 20 else {
         throw NSError(domain: "rpc", code: 9)
     }

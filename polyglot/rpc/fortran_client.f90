@@ -128,11 +128,28 @@ contains
         at = at + 1
     end subroutine put_u8
 
+    ! ARP1 is little-endian on every host, so the byte order is written out
+    ! explicitly instead of relying on the host's in-memory representation
+    ! (audit AINF-003).
+    integer(c_int8_t) function byte_to_i8(value) result(converted)
+        integer, intent(in) :: value
+        if (value > 127) then
+            converted = int(value - 256, c_int8_t)
+        else
+            converted = int(value, c_int8_t)
+        end if
+    end function byte_to_i8
+
     subroutine put_u16(buffer, at, value)
         integer(c_int8_t), intent(inout) :: buffer(0:)
         integer, intent(inout) :: at
         integer(c_int16_t), intent(in) :: value
-        buffer(at:at+1) = transfer(value, buffer(at:at+1))
+        integer(c_int16_t) :: bits
+        integer :: byte_index
+        bits = value
+        do byte_index = 0, 1
+            buffer(at + byte_index) = byte_to_i8(int(iand(ishft(bits, -8 * byte_index), 255_c_int16_t)))
+        end do
         at = at + 2
     end subroutine put_u16
 
@@ -140,7 +157,12 @@ contains
         integer(c_int8_t), intent(inout) :: buffer(0:)
         integer, intent(inout) :: at
         integer(c_int32_t), intent(in) :: value
-        buffer(at:at+3) = transfer(value, buffer(at:at+3))
+        integer(c_int32_t) :: bits
+        integer :: byte_index
+        bits = value
+        do byte_index = 0, 3
+            buffer(at + byte_index) = byte_to_i8(int(iand(ishft(bits, -8 * byte_index), 255_c_int32_t)))
+        end do
         at = at + 4
     end subroutine put_u32
 
@@ -148,7 +170,12 @@ contains
         integer(c_int8_t), intent(inout) :: buffer(0:)
         integer, intent(inout) :: at
         integer(c_int64_t), intent(in) :: value
-        buffer(at:at+7) = transfer(value, buffer(at:at+7))
+        integer(c_int64_t) :: bits
+        integer :: byte_index
+        bits = value
+        do byte_index = 0, 7
+            buffer(at + byte_index) = byte_to_i8(int(iand(ishft(bits, -8 * byte_index), 255_c_int64_t)))
+        end do
         at = at + 8
     end subroutine put_u64
 
@@ -168,13 +195,23 @@ contains
     integer(c_int32_t) function get_u32(buffer, at) result(value)
         integer(c_int8_t), intent(in) :: buffer(0:)
         integer, intent(in) :: at
-        value = transfer(buffer(at:at+3), value)
+        integer :: byte_index
+        value = 0_c_int32_t
+        do byte_index = 3, 0, -1
+            value = ior(ishft(value, 8), &
+                        int(iand(int(buffer(at + byte_index)), 255), c_int32_t))
+        end do
     end function get_u32
 
     integer(c_int64_t) function get_u64(buffer, at) result(value)
         integer(c_int8_t), intent(in) :: buffer(0:)
         integer, intent(in) :: at
-        value = transfer(buffer(at:at+7), value)
+        integer :: byte_index
+        value = 0_c_int64_t
+        do byte_index = 7, 0, -1
+            value = ior(ishft(value, 8), &
+                        int(iand(int(buffer(at + byte_index)), 255), c_int64_t))
+        end do
     end function get_u64
 
     logical function matches(buffer, at, text) result(equal)
@@ -304,13 +341,17 @@ contains
         integer(c_int8_t) :: prefix(0:3)
         integer :: colon
         integer :: length
+        integer :: byte_index
         character(len=:), allocatable :: host
         integer(c_int64_t) :: handle
         integer(c_int64_t) :: port
         integer(c_int64_t) :: received
 
         call encode_request(request_id, method, payload, cap, with_cap, length)
-        prefix(0:3) = transfer(int(length, c_int32_t), prefix(0:3))
+        do byte_index = 0, 3
+            prefix(byte_index) = byte_to_i8(int(iand(ishft(int(length, c_int32_t), &
+                                                                 -8 * byte_index), 255_c_int32_t)))
+        end do
 
         colon = index(address, ":", back=.true.)
         if (colon <= 1) error stop "ACTIVE_RPC_ADDR must be host:port"

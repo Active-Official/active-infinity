@@ -2,6 +2,7 @@
 //
 //   dotnet run -c Release --project polyglot/rpc/csharp/RpcClient.csproj
 
+using System.Buffers.Binary;
 using System.Net.Sockets;
 using System.Text;
 
@@ -16,9 +17,20 @@ internal static class Program
             ? value
             : throw new InvalidOperationException($"{name} is required");
 
-    private static void PutU32(List<byte> buffer, uint value) => buffer.AddRange(BitConverter.GetBytes(value));
+    private static void PutU32(List<byte> buffer, uint value)
+    {
+        // ARP1 is little-endian on every host; BitConverter follows the host.
+        Span<byte> bytes = stackalloc byte[4];
+        BinaryPrimitives.WriteUInt32LittleEndian(bytes, value);
+        buffer.AddRange(bytes.ToArray());
+    }
 
-    private static void PutU64(List<byte> buffer, ulong value) => buffer.AddRange(BitConverter.GetBytes(value));
+    private static void PutU64(List<byte> buffer, ulong value)
+    {
+        Span<byte> bytes = stackalloc byte[8];
+        BinaryPrimitives.WriteUInt64LittleEndian(bytes, value);
+        buffer.AddRange(bytes.ToArray());
+    }
 
     private static void PutString(List<byte> buffer, string text)
     {
@@ -64,12 +76,13 @@ internal static class Program
         using var client = new TcpClient();
         client.Connect(host, port);
         using NetworkStream stream = client.GetStream();
-        byte[] header = BitConverter.GetBytes((uint)envelope.Length);
+        byte[] header = new byte[4];
+        BinaryPrimitives.WriteUInt32LittleEndian(header, (uint)envelope.Length);
         stream.Write(header);
         stream.Write(envelope);
         stream.Flush();
         ReadExact(stream, header);
-        uint length = BitConverter.ToUInt32(header);
+        uint length = BinaryPrimitives.ReadUInt32LittleEndian(header);
         if (length > 1u << 20)
         {
             throw new InvalidDataException("frame exceeds the ceiling");
@@ -85,7 +98,7 @@ internal static class Program
             throw new InvalidDataException("bad envelope magic");
         }
         int kind = body[5];
-        int methodLength = BitConverter.ToInt32(body, 16);
+        int methodLength = (int)BinaryPrimitives.ReadUInt32LittleEndian(body.AsSpan(16));
         if (methodLength < 0 || methodLength > body.Length - 20)
         {
             throw new InvalidDataException("truncated method");
@@ -97,7 +110,7 @@ internal static class Program
     private static bool Echoes(byte[] body, byte[] payload)
     {
         if (body.Length < payload.Length + 8) return false;
-        if (BitConverter.ToUInt32(body, body.Length - 4) != 0) return false;
+        if (BinaryPrimitives.ReadUInt32LittleEndian(body.AsSpan(body.Length - 4)) != 0) return false;
         return body.AsSpan(body.Length - 4 - payload.Length, payload.Length).SequenceEqual(payload);
     }
 
@@ -121,7 +134,7 @@ internal static class Program
         byte[] payload = File.ReadAllBytes(Require("ACTIVE_RPC_PAYLOAD"));
 
         var echo = Call(address, Request(42, "echo", payload, cap));
-        if (echo.Kind != 2 || BitConverter.ToUInt64(echo.Body, 8) != 42 || !Echoes(echo.Body, payload))
+        if (echo.Kind != 2 || BinaryPrimitives.ReadUInt64LittleEndian(echo.Body.AsSpan(8)) != 42 || !Echoes(echo.Body, payload))
             throw new Exception($"echo: {echo.Kind} {echo.Method}");
         var refused = Call(address, Request(43, "refuse", payload, cap));
         if (refused.Kind != 3 || refused.Method != "rpc/method-not-granted") throw new Exception($"refusal: {refused}");

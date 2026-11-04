@@ -45,14 +45,16 @@ static uint8_t *read_file(const char *path, size_t *length) {
   return buffer;
 }
 
+/* ARP1 is little-endian on every host; the host byte order is not the wire
+ * order on a big-endian machine (audit AINF-003). */
 static void put_u32(uint8_t *out, size_t *cursor, uint32_t value) {
-  memcpy(out + *cursor, &value, 4);
-  *cursor += 4;
+  for (int index = 0; index < 4; index++)
+    out[(*cursor)++] = (uint8_t)(value >> (8 * index));
 }
 
 static void put_u64(uint8_t *out, size_t *cursor, uint64_t value) {
-  memcpy(out + *cursor, &value, 8);
-  *cursor += 8;
+  for (int index = 0; index < 8; index++)
+    out[(*cursor)++] = (uint8_t)(value >> (8 * index));
 }
 
 static void put_str(uint8_t *out, size_t *cursor, const char *text) {
@@ -162,7 +164,8 @@ static uint8_t *rpc_call(const char *address, const uint8_t *request,
   }
 
   uint8_t header[4];
-  memcpy(header, &(uint32_t){(uint32_t)request_length}, 4);
+  for (int index = 0; index < 4; index++)
+    header[index] = (uint8_t)((uint32_t)request_length >> (8 * index));
   if (send_all(socket_fd, header, 4) != 0 ||
       send_all(socket_fd, request, request_length) != 0 ||
       recv_all(socket_fd, header, 4) != 0) {

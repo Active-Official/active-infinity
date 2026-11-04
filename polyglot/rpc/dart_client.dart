@@ -3,6 +3,7 @@
 //   dart run polyglot/rpc/dart_client.dart
 
 import 'dart:convert';
+import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
 
@@ -51,6 +52,32 @@ Uint8List request(int id, String method, Uint8List payload, Uint8List? capId) {
   return builder.toBytes();
 }
 
+/// Read exactly [count] bytes from a socket stream.
+///
+/// The server sends one frame per connection and may keep the socket open, so
+/// waiting for end-of-stream is not an option. Bytes that arrive in the same
+/// chunk past [count] stay buffered for the next read.
+class _Reader {
+  _Reader(this._iterator);
+
+  final StreamIterator<Uint8List> _iterator;
+  Uint8List _buffer = Uint8List(0);
+
+  Future<Uint8List> read(int count) async {
+    while (_buffer.length < count) {
+      if (!await _iterator.moveNext()) throw StateError('truncated frame');
+      final joined = Uint8List(_buffer.length + _iterator.current.length)
+        ..setRange(0, _buffer.length, _buffer)
+        ..setRange(_buffer.length, _buffer.length + _iterator.current.length,
+            _iterator.current);
+      _buffer = joined;
+    }
+    final head = Uint8List.sublistView(_buffer, 0, count);
+    _buffer = Uint8List.sublistView(_buffer, count);
+    return head;
+  }
+}
+
 Future<(int, String, Uint8List)> call(String address, Uint8List envelope) async {
   final split = address.lastIndexOf(':');
   final host = address.substring(0, split);
@@ -61,16 +88,14 @@ Future<(int, String, Uint8List)> call(String address, Uint8List envelope) async 
     socket.add(header.buffer.asUint8List());
     socket.add(envelope);
     await socket.flush();
-    final bytes = await socket.fold<BytesBuilder>(BytesBuilder(), (builder, chunk) {
-      builder.add(chunk);
-      return builder;
-    });
-    final body = bytes.toBytes();
-    if (body.length < 4) throw StateError('truncated frame header');
-    final length = ByteData.sublistView(body, 0, 4).getUint32(0, Endian.little);
+    // Read the length, then exactly that many bytes. A fold() waits for EOF,
+    // and the server keeps the connection open for the next frame, so it hung
+    // on a persistent server (audit AINF-005).
+    final reader = _Reader(StreamIterator<Uint8List>(socket));
+    final lengthBytes = await reader.read(4);
+    final length = ByteData.sublistView(lengthBytes).getUint32(0, Endian.little);
     if (length > 1 << 20) throw StateError('frame exceeds the ceiling');
-    if (body.length < 4 + length) throw StateError('truncated frame');
-    final frame = Uint8List.sublistView(body, 4, 4 + length);
+    final frame = await reader.read(length);
     if (frame.length < 20) throw StateError('short envelope');
     if (ascii.decode(frame.sublist(0, 4)) != 'ARP1' || frame[4] != 1) {
       throw StateError('bad magic');

@@ -343,16 +343,61 @@ fn matches_type(typ: &TypeSpec, module: &InfinityModule, node: &Inode) -> bool {
         TypeSpec::Bytes | TypeSpec::Blob => {
             matches!(node, Inode::Blob { tainted: false, .. })
         }
-        TypeSpec::Table { closed } => !closed && matches!(node, Inode::Table { .. }),
+        // An open table admits any shape, but its cone is still data: a nested
+        // `Ident` or `SecretRef` is program plane and must not pass because its
+        // parent is a table (F-05).
+        TypeSpec::Table { closed } => {
+            !closed && matches!(node, Inode::Table { .. }) && is_value_subtree(module, node)
+        }
         TypeSpec::Enum(values) => match node {
             Inode::Str(value) => values.iter().any(|candidate| candidate == value),
             _ => false,
         },
         // A locator is not a secret value; only the secret itself is.
         TypeSpec::Secret => matches!(node, Inode::Secret(_)),
-        // `Any` still means a value: it does not open the program plane.
-        TypeSpec::Any => is_value_node(module, node),
+        // `Any` still means a value: it does not open the program plane, and
+        // that has to hold for the whole cone, not only this node (F-05).
+        TypeSpec::Any => is_value_subtree(module, node),
     }
+}
+
+/// Whether this node and every node under it is value plane.
+///
+/// `Any` and an open table admit a container, but the schema's promise is that
+/// the data plane does not smuggle a program node (an `Ident`, a `SecretRef`, an
+/// interpolation) in a child. The walk is iterative and budgeted: a hostile
+/// graph (a cycle cannot survive validation, but `validate_instance` also
+/// accepts a hand-built module) is refused rather than walked forever (F-05).
+fn is_value_subtree(module: &InfinityModule, root: &Inode) -> bool {
+    let mut budget = module.node_count().saturating_mul(2).saturating_add(64);
+    let mut stack: Vec<&Inode> = vec![root];
+    while let Some(node) = stack.pop() {
+        match budget.checked_sub(1) {
+            Some(left) => budget = left,
+            None => return false,
+        }
+        match node {
+            Inode::Array { elements } => {
+                for item in elements {
+                    let Some(child) = module.get(*item) else {
+                        return false;
+                    };
+                    stack.push(child);
+                }
+            }
+            Inode::Table { fields } => {
+                for (_, value) in fields {
+                    let Some(child) = module.get(*value) else {
+                        return false;
+                    };
+                    stack.push(child);
+                }
+            }
+            other if is_value_node(module, other) => {}
+            _ => return false,
+        }
+    }
+    true
 }
 
 /// The value plane: literals and the containers a consumer can read directly.

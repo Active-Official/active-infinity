@@ -1,5 +1,16 @@
 # Changelog - Active Infinity
 
+## Unreleased
+
+### Fixed
+
+- **`Any` and an open `Table` keep their whole cone on the value plane.** The
+  schema walk accepted an array or table without looking inside, so an `Ident`
+  (or any other program node) nested under an `Any` field passed validation even
+  though the type is documented as a value that does not open the program plane.
+  The walk is iterative and budgeted, so a hand-built cyclic arena is refused
+  rather than walked forever (DeepSeek F-05).
+
 ## 2.4.0 - 2026-11-03
 
 ### Added

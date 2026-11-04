@@ -98,7 +98,11 @@ for client in "${requested[@]}"; do
     continue
   fi
   echo "--- $client"
-  if ! "run_$client"; then
+  # Bound each client: a thin client that waits on a peer that never answers
+  # used to hold the whole job until GitHub's six-hour limit, and the log said
+  # nothing about which language hung (2026-11-04). 300 s is far above every
+  # observed runtime, and a timeout fails the row with the client named.
+  if ! timeout 300 bash -c "source polyglot/rpc/clients.sh; run_$client"; then
     # A client that fails while the peer is alive is a real defect: report it
     # and stop. A client that fails because the peer went away is the peer's
     # problem, and the row can continue on a fresh one. The short wait lets the
@@ -116,7 +120,7 @@ for client in "${requested[@]}"; do
     fi
     echo "thin RPC matrix: peer restarted at $ACTIVE_RPC_ADDR" >&2
     echo "--- $client (retry)"
-    "run_$client"
+    timeout 300 bash -c "source polyglot/rpc/clients.sh; run_$client"
   fi
 done
 

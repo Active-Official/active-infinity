@@ -68,10 +68,19 @@ const ALLOC_ALIGN: usize = 8;
 /// allocated.
 static LIVE_ALLOCS: Mutex<BTreeSet<usize>> = Mutex::new(BTreeSet::new());
 
-fn live_allocations() -> std::sync::MutexGuard<'static, BTreeSet<usize>> {
-    LIVE_ALLOCS
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+/// Largest number of buffers this process may hold at once.
+///
+/// Each live buffer costs a registry entry, so an allocation storm in one
+/// tenant used to grow process-wide memory without a ceiling (cross-cutting
+/// pass 3, #1). The caller sees a null return, the same refusal as an
+/// over-sized request.
+pub const MAX_LIVE_ALLOCATIONS: usize = 1 << 16;
+
+fn live_allocations() -> Option<std::sync::MutexGuard<'static, BTreeSet<usize>>> {
+    // Fail closed: if the registry is poisoned its contents cannot be trusted,
+    // and handing out or freeing an address it no longer tracks is worse than
+    // refusing the call.
+    LIVE_ALLOCS.lock().ok()
 }
 
 const OK: i32 = 0;
@@ -270,7 +279,19 @@ fn alloc_tagged(len: usize) -> *mut u8 {
     }
     // SAFETY: the allocation is at least `ALLOC_HEADER` bytes.
     let pointer = unsafe { base.add(ALLOC_HEADER) };
-    if !live_allocations().insert(pointer as usize) {
+    let Some(mut live) = live_allocations() else {
+        // SAFETY: `base` came from `alloc_zeroed` with this layout.
+        unsafe { std::alloc::dealloc(base, layout) };
+        return ptr::null_mut();
+    };
+    if live.len() >= MAX_LIVE_ALLOCATIONS {
+        // One tenant's allocation storm must not exhaust memory for every
+        // caller in the process (cross-cutting pass 3, #1).
+        // SAFETY: `base` came from `alloc_zeroed` with this layout.
+        unsafe { std::alloc::dealloc(base, layout) };
+        return ptr::null_mut();
+    }
+    if !live.insert(pointer as usize) {
         // A fresh allocation cannot alias a live one; fail closed rather than
         // hand out two names for one buffer.
         // SAFETY: `base` came from `alloc_zeroed` with this layout.
@@ -302,7 +323,12 @@ fn free_tagged(ptr: *mut u8, len: usize) {
     // Removing the address under the lock is what makes a foreign pointer, a
     // forged tag and a double free a no-op: only an address this library
     // recorded can be reconstructed, and only once.
-    if !live_allocations().remove(&(ptr as usize)) {
+    let Some(mut live) = live_allocations() else {
+        // A poisoned registry cannot prove anything: leaking the buffer is the
+        // safe failure (cross-cutting pass 3, #1).
+        return;
+    };
+    if !live.remove(&(ptr as usize)) {
         // A foreign pointer or a double free: no-op. `free` never changes the
         // thread's code: a binding reads it after a failing call, and an
         // internal alloc/free between the failure and the read must not hide it.

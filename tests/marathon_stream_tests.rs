@@ -411,3 +411,22 @@ fn the_stream_debug_forms_do_not_print_payload_bytes() {
     assert!(!text.contains("112, 114, 111, 98"), "image leaked: {text}");
     assert!(text.contains("image_len"), "{text}");
 }
+
+/// One caller-supplied chunk is bounded before it is copied into the frame
+/// buffer. `push_bytes` extended first, so a single huge slice allocated its
+/// full size before any frame could be refused (cross-cutting pass 3, #5).
+#[test]
+fn a_single_oversized_chunk_is_refused_before_it_is_buffered() {
+    let limits = active_infinity::layout::Limits {
+        max_total_bytes: 1024,
+        ..active_infinity::layout::Limits::default()
+    };
+    let mut decoder = StreamDecoder::new().with_limits(limits);
+    // One byte past the largest buffer this decoder can ever need: the image
+    // ceiling, one maximal frame and its header.
+    let oversized = vec![0u8; MAX_FRAME_PAYLOAD as usize + 2048];
+    let error = decoder
+        .push_bytes(&oversized)
+        .expect_err("the chunk is refused");
+    assert_eq!(error.code(), "infinity/limit", "{error}");
+}

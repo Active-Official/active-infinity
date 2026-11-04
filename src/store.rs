@@ -488,13 +488,23 @@ fn is_group_or_world_writable(_meta: &fs::Metadata) -> bool {
     false
 }
 
-/// A clock-derived starting slot so a pre-planted `.tmp` run cannot exhaust the
-/// attempt budget.
+/// A starting slot that no other `Store` open in this process shares.
+///
+/// The clock alone is not enough: its resolution is coarse enough that two
+/// stores opened in one tick started at the same slot, and a tenant that
+/// planted that run of names could exhaust both stores' attempt budgets
+/// (cross-cutting pass 3, #3). The process id separates processes, the atomic
+/// counter separates opens inside one process, and the clock separates runs.
 fn scratch_seed() -> u64 {
-    std::time::SystemTime::now()
+    static OPENS: AtomicU64 = AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| u64::from(duration.subsec_nanos()))
-        .unwrap_or(0)
+        .map(|duration| duration.as_nanos() as u64)
+        .unwrap_or(0);
+    let sequence = OPENS.fetch_add(1, Ordering::Relaxed);
+    nanos
+        ^ u64::from(std::process::id()).rotate_left(32)
+        ^ sequence.wrapping_mul(0x9E37_79B9_7F4A_7C15)
 }
 
 /// The largest object `get` will read: the codec's own ceiling for one image.

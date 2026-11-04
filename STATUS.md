@@ -80,3 +80,19 @@ has a test or a CI job behind it; residual risks are listed, not hidden.
    v1; a host-call ABI needs a new ADR and capability policy.
 8. **Kotlin/Native and Swift** bindings are verified in the toolchain container
    and CI; local toolchains are not installed on every developer machine.
+9. **The store's owner-only permissions are Unix-only.** On Windows the root and
+   objects take the directory's inherited ACL, and the root identity is not
+   pinned because the file index/volume serial is unstable through `std`. A
+   multi-user Windows host must place the root under an owner-only ACL itself
+   (for example `%LOCALAPPDATA%`); an in-crate DACL needs `unsafe`, which the
+   crate forbids.
+10. **A filesystem without hard links shows a committed object while it is
+    written.** `Store::commit` falls back to an exclusive create at the
+    destination; a concurrent reader can then read a partial file and receives
+    `infinity/store` until the write completes. Validation is fail-closed, so a
+    partial object is refused and never accepted as valid; a caller retries.
+11. **The FFI live-allocation registry is process-wide by contract.** A C
+    caller may free from any thread, as with `free`; freeing a live pointer it
+    does not own is misuse in the same sense. The registry refuses a forged
+    pointer, a double free and a wrong length, fails closed when poisoned, and
+    caps live buffers at `MAX_LIVE_ALLOCATIONS`.

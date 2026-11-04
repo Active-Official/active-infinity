@@ -983,6 +983,22 @@ impl StreamDecoder {
     /// parsed against a frame that failed. A caller that wants to retry one
     /// frame feeds it to `push` directly.
     pub fn push_bytes(&mut self, buf: &[u8]) -> Result<()> {
+        // The buffer is extended before any frame is parsed, so a caller-
+        // controlled chunk must be bounded first: a single 1 GiB call used to
+        // allocate it before the image ceiling could refuse a frame
+        // (cross-cutting pass 3, #5). The ceiling allows a full image plus one
+        // maximal frame and its header.
+        let ceiling = self
+            .limits
+            .max_total_bytes
+            .saturating_add(FRAME_HEADER_SIZE as u64)
+            .saturating_add(MAX_FRAME_PAYLOAD as u64);
+        if (self.partial.len() as u64).saturating_add(buf.len() as u64) > ceiling {
+            return Err(Error::Limit {
+                kind: "stream input bytes",
+                limit: ceiling,
+            });
+        }
         self.partial.extend_from_slice(buf);
         // Parse against an offset and compact once: draining per frame moves the
         // remaining tail, which made this quadratic in frames per call.

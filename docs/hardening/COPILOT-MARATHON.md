@@ -35,7 +35,7 @@ the code → regression test first → minimal fix → targeted tests + clippy �
 
 | Pass | State | Notes |
 |---|---|---|
-| Concurrency / multi-tenant | pending | — |
+| Concurrency / multi-tenant | **pass 3 CLEAN** (2026-11-04, 1 critical + 2 high + 2 medium + 1 low; 3 fixed, 3 documented) | `marathon_stream_tests`, `STATUS.md` 9-11 |
 | Oracle and secret paths (Display/Debug/Serialize) | **pass 1 CLEAN** (2026-11-03, 10 findings closed) | `marathon_order_tests`, `marathon_redaction_tests` |
 | Wire confusion (AINF vs stream vs protobuf) | **pass 1 CLEAN** (checksum code split, delta fault mapping) | see cross-cutting pass 1 |
 | Resource bombs (depth, counts, sizes) | **pass 1 CLEAN** (protobuf work + depth, bridge depth) | see cross-cutting pass 1 |
@@ -66,6 +66,22 @@ Also in this batch: `interop::Redactor`, `redact_module` and `redact_image`
 
 Gate: `cargo test --all-features` and `--no-default-features` green, clippy
 `-D warnings` on both, `cargo doc` clean.
+
+### Cross-cutting pass 3 - concurrency and multi-tenant isolation - 2026-11-04
+
+Reviewer: Muse through the Copilot CLI, `xhigh`, at `770f40f`. Six findings
+(1 critical, 2 high, 2 medium, 1 low). Three fixed, three documented.
+
+| # | Sev | Finding | Disposition |
+|---|-----|---------|-------------|
+| 1 | critical | the FFI live-allocation registry is a process-wide `BTreeSet` with no ceiling, and a poisoned mutex was read through `into_inner` (fail-open) | **fixed**: `MAX_LIVE_ALLOCATIONS` (65 536) refuses with a null return, and a poisoned registry is fail-closed (alloc returns null, free is a no-op leak); cross-thread free is C `free` semantics and remains by contract (STATUS 11) |
+| 2 | high | on Windows the store root and objects take the inherited ACL, there is no owner-only mode, and the root identity is not pinned | **documented**: an in-crate DACL needs `unsafe`, which the crate forbids; STATUS 9 states the deployment rule and the identity gap |
+| 3 | high | the scratch slot seed was the clock's sub-second field only, so two `Store::open` calls in one tick shared a slot sequence and a planted run of 64 names could exhaust both | **fixed**: the seed mixes the clock, the process id and a process-wide open counter, so no two opens share a starting slot |
+| 4 | medium | a filesystem without hard links commits with an exclusive create at the destination, so the object is visible while written | **documented**: validation is fail-closed, so a reader refuses the partial object and retries; STATUS 10 |
+| 5 | medium | `StreamDecoder::push_bytes` extended its buffer before any ceiling check, so one 1 GiB slice was allocated before a frame could be refused | **fixed**: the combined length is checked against `max_total_bytes + header + MAX_FRAME_PAYLOAD` before the copy; `a_single_oversized_chunk_is_refused_before_it_is_buffered` |
+| 6 | low | `Redactor` is `Sync` and `hiding_placeholder` answers differently for a shared union, which invites a cross-tenant cache; `train_dictionary` has no per-tenant quota | **documented**: the API takes the secret set per call and holds no cache, so isolation is the caller's; `train_dictionary` is bounded by its own ceilings (I-09) |
+
+Gate: both feature sets green, clippy both, fmt, doc clean.
 
 ### Cross-cutting pass 2 - second pass over the 2.4.x changes - 2026-11-03
 

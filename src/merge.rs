@@ -605,10 +605,10 @@ impl Ctx<'_> {
         // cumulative budget per block: an infallible replacement per field let
         // 10k entries x 1k secrets run for minutes (pass 2, #6).
         let mut provenance_budget = self.redaction.get();
-        let left_key = provenance_key(self.left, &self.hash_secrets, &mut provenance_budget);
-        let right_key = provenance_key(self.right, &self.hash_secrets, &mut provenance_budget);
+        let left_key = provenance_key(self.left, &self.hash_secrets, &mut provenance_budget)?;
+        let right_key = provenance_key(self.right, &self.hash_secrets, &mut provenance_budget)?;
         if left_key != right_key {
-            let base_key = provenance_key(self.base, &self.hash_secrets, &mut provenance_budget);
+            let base_key = provenance_key(self.base, &self.hash_secrets, &mut provenance_budget)?;
             if base_key == left_key {
                 plan.provenance = Some(self.right.provenance().cloned());
             } else if base_key != right_key {
@@ -878,13 +878,15 @@ fn provenance_key(
     module: &InfinityModule,
     hash_secrets: &[Vec<u8>],
     budget: &mut usize,
-) -> Option<String> {
-    let provenance = module.provenance()?;
-    let secrets = crate::interop::secret_texts(module);
-    let mut redact = |text: &str| {
-        crate::interop::redact_within(text, &secrets, budget)
-            .unwrap_or_else(|_| crate::interop::SECRET_MARKER.to_string())
+) -> Result<Option<String>> {
+    let Some(provenance) = module.provenance() else {
+        return Ok(None);
     };
+    let secrets = crate::interop::secret_texts(module);
+    // A budget shortfall propagates: substituting the marker made two distinct
+    // provenance blocks compare equal, so the merge silently dropped one side
+    // (audit AINF-002).
+    let mut redact = |text: &str| crate::interop::redact_within(text, &secrets, budget);
     // A 32-byte secret can be copied into a hash field. A hash has no text to
     // redact, so a copy becomes the marker, exactly as the projections do.
     let hash_text = |hash: &[u8; 32]| -> String {
@@ -905,7 +907,7 @@ fn provenance_key(
     ] {
         match text {
             Some(text) => {
-                let text = redact(text);
+                let text = redact(text)?;
                 out.push_str(&format!("S{}:{};", text.len(), text));
             }
             None => out.push_str("N;"),
@@ -920,21 +922,21 @@ fn provenance_key(
         .entries
         .iter()
         .map(|entry| {
-            let key = redact(&entry.key);
+            let key = redact(&entry.key)?;
             let value = match &entry.value {
-                crate::ir::ProvValue::Text(text) => format!("T{}", redact(text)),
+                crate::ir::ProvValue::Text(text) => format!("T{}", redact(text)?),
                 crate::ir::ProvValue::Int(value) => format!("I{value}"),
                 crate::ir::ProvValue::Flag(flag) => format!("F{flag}"),
                 crate::ir::ProvValue::Hash(hash) => format!("H{}", hash_text(hash)),
             };
-            (key, value)
+            Ok((key, value))
         })
-        .collect();
+        .collect::<Result<Vec<_>>>()?;
     entries.sort();
     for (key, value) in entries {
         out.push_str(&format!("K{}:{}={};", key.len(), key, value));
     }
-    Some(out)
+    Ok(Some(out))
 }
 
 /// A deterministic rendering of the extension set with payloads redacted when
@@ -994,12 +996,16 @@ mod tests {
         }));
 
         let mut budget = MAX_MERGE_WORK;
-        let key = provenance_key(&module, &[CANARY.to_vec()], &mut budget).expect("key");
+        let key = provenance_key(&module, &[CANARY.to_vec()], &mut budget)
+            .expect("key")
+            .expect("provenance");
         assert!(key.contains(crate::canonical::SECRET_MARKER), "{key}");
         assert!(!key.contains(&hex(CANARY)), "{key}");
 
         // Without a matching secret the hash is ordinary data.
-        let key = provenance_key(&module, &[], &mut budget).expect("key");
+        let key = provenance_key(&module, &[], &mut budget)
+            .expect("key")
+            .expect("provenance");
         assert!(key.contains(&hex(CANARY)), "{key}");
     }
 }

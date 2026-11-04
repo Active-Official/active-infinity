@@ -950,6 +950,14 @@ impl StreamDecoder {
     /// The value is not validated here: a zero ceiling is discovered on the
     /// first input that touches it. Prefer [`StreamDecoder::try_with_limits`]
     /// when the limits come from configuration or a caller.
+    /// Decoded bytes the pending delta state currently holds.
+    ///
+    /// Exposed so a caller can prove a refused frame left the accounting where
+    /// it found it (audit AINF-001).
+    pub fn pending_decoded_bytes(&self) -> u64 {
+        self.pending_decoded_bytes
+    }
+
     pub fn with_limits(mut self, limits: crate::layout::Limits) -> Self {
         self.limits = limits;
         self
@@ -1072,6 +1080,10 @@ impl StreamDecoder {
         }
         let deltas_before = self.pending_deltas.len();
         let bytes_before = self.pending_delta_bytes;
+        // The decoded-size charge happens while the frame decodes; a frame that
+        // fails after charging must not poison the budget for a retry
+        // (audit AINF-001).
+        let decoded_before = self.pending_decoded_bytes;
         let expected_before = self.expected;
         let frames_before = self.frames;
         self.expected += 1;
@@ -1083,6 +1095,7 @@ impl StreamDecoder {
                 self.frames = frames_before;
                 self.pending_deltas.truncate(deltas_before);
                 self.pending_delta_bytes = bytes_before;
+                self.pending_decoded_bytes = decoded_before;
                 Err(error)
             }
         }

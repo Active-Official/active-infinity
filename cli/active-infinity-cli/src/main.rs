@@ -200,12 +200,21 @@ fn store_root(flags: &BTreeMap<String, String>) -> Result<String, String> {
 }
 
 fn store_command(args: &[String]) -> Result<(), String> {
-    let usage = "usage: store put <image> [--root DIR] [--sign SEED_HEX | --sign-file PATH]\n       store get <hash> [--root DIR] [--output PATH] [--verify] [--key PUBLIC_HEX]\n       store signature <hash> [--root DIR]";
+    let usage = "usage: store put <image> [--root DIR] [--sign SEED_HEX --i-accept-argv-key-leak | --sign-file PATH]\n       store get <hash> [--root DIR] [--output PATH] [--verify] [--key PUBLIC_HEX]\n       store signature <hash> [--root DIR]";
     let (positional, flags) = split_args(&args[1..])?;
     let action = positional.first().ok_or_else(|| usage.to_string())?;
     match action.as_str() {
         "put" => {
-            check_flags(&flags, &["--root", "--sign", "--sign-file"], usage)?;
+            check_flags(
+                &flags,
+                &[
+                    "--root",
+                    "--sign",
+                    "--sign-file",
+                    "--i-accept-argv-key-leak",
+                ],
+                usage,
+            )?;
             check_positional(&positional, 2, usage)?;
             if flags.contains_key("--sign") && flags.contains_key("--sign-file") {
                 return Err("usage: --sign and --sign-file are mutually exclusive".to_string());
@@ -316,7 +325,9 @@ fn split_args(args: &[String]) -> Result<(Vec<String>, BTreeMap<String, String>)
             if flags.contains_key(&key) {
                 return Err(format!("usage: duplicate flag {key}"));
             }
-            let boolean = key == "--decompress" || key == "--verify";
+            let boolean = key == "--decompress"
+                || key == "--verify"
+                || key == "--i-accept-argv-key-leak";
             if !boolean {
                 match args.get(index + 1) {
                     Some(value) if !value.starts_with("--") => {
@@ -1095,6 +1106,22 @@ fn signing_seed(flags: &BTreeMap<String, String>) -> Result<Option<[u8; 32]>, St
         if path.is_empty() {
             return Err("usage: --sign-file needs a path".to_string());
         }
+        // A seed file readable by other users is a leaked seed. Refuse it
+        // rather than sign and warn (audit AI-02).
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(path)
+                .map_err(|error| format!("usage: --sign-file: {error}"))?
+                .permissions()
+                .mode();
+            if mode & 0o077 != 0 {
+                return Err(
+                    "usage: --sign-file must not be readable by group or other (chmod 600)"
+                        .to_string(),
+                );
+            }
+        }
         let text = read_text(path, MAX_SEED_BYTES)?;
         return parse_seed(text.trim()).map(Some);
     }
@@ -1102,6 +1129,17 @@ fn signing_seed(flags: &BTreeMap<String, String>) -> Result<Option<[u8; 32]>, St
         if seed.is_empty() {
             return Err("usage: --sign needs a hex seed".to_string());
         }
+        // A seed on argv is visible in process listings and shell history. It
+        // stays reachable only behind a flag that cannot be typed by accident
+        // (audit AI-02).
+        if !flags.contains_key("--i-accept-argv-key-leak") {
+            return Err(
+                "usage: --sign puts the seed in the process list; use --sign-file PATH, \
+                 or pass --i-accept-argv-key-leak when you accept that exposure"
+                    .to_string(),
+            );
+        }
+        eprintln!("warning: the signing seed was passed on argv and may be visible to other users");
         return parse_seed(seed).map(Some);
     }
     match std::env::var("ACTIVE_INFINITY_SIGN_SEED") {
@@ -1176,7 +1214,7 @@ usage: active-infinity-cli <command> [options]
       Print the Blake3 content hash over canonical bytes.
   stream <stream.ains>
       Reassemble an AINS stream and print its hash.
-  store put <image.ainf> [--root DIR] [--sign SEED_HEX | --sign-file PATH]
+  store put <image.ainf> [--root DIR] [--sign SEED_HEX --i-accept-argv-key-leak | --sign-file PATH]
   store get <hash> [--root DIR] [--output PATH] [--verify] [--key PUBLIC_HEX]
   store signature <hash> [--root DIR]
       Content-addressed local store (default root .active-store). --sign keeps a

@@ -62,6 +62,70 @@ fn a_generation_must_start_at_section_zero() {
     assert_eq!(error.code(), "infinity/stream-state", "{error:?}");
 }
 
+/// A delta frame that decodes a fragment and then fails on trailing bytes must
+/// leave the decoded-byte accounting where it found it: otherwise a peer poisons
+/// the budget with refused frames that never deliver anything
+/// (audit AINF-001).
+#[test]
+fn a_refused_delta_restores_the_decoded_byte_charge() {
+    let base = base_module();
+    let mut fragment = InfinityModule::new();
+    let leaf = fragment.push(Inode::Int(7));
+    let root = fragment.push(Inode::Table {
+        fields: vec![("leaf".to_string(), leaf)],
+    });
+    fragment.set_root(Some(root));
+    let ops = vec![DeltaOp::PutNode {
+        target: NodeId(0),
+        fragment: Box::new(fragment),
+    }];
+    let mut encoder = active_infinity::StreamEncoder::new(&base, 4096).expect("encoder");
+    let base_frames = encoder.frames();
+    encoder.push_delta(&base, &ops).expect("delta frames");
+    let all = encoder.frames();
+    let delta = all[base_frames.len()].clone();
+    assert_eq!(delta.kind, active_infinity::FrameKind::Delta);
+    let mut corrupt = delta.clone();
+    corrupt.payload.push(0xff);
+
+    let limits = active_infinity::Limits {
+        max_total_bytes: 8 << 20,
+        ..active_infinity::Limits::default()
+    };
+    let mut decoder = active_infinity::StreamDecoder::new().with_limits(limits);
+    for frame in &base_frames {
+        decoder.push(frame).expect("the base frames decode");
+    }
+    let before = decoder.pending_decoded_bytes();
+    let error = decoder
+        .push(&corrupt)
+        .expect_err("trailing bytes are refused");
+    assert_eq!(error.code(), "infinity/stream-delta", "{error:?}");
+    assert_eq!(
+        decoder.pending_decoded_bytes(),
+        before,
+        "a refused frame kept its decoded-byte charge"
+    );
+    decoder
+        .push(&delta)
+        .expect("the corrected frame is accepted");
+
+    // Repeated refusals cannot exhaust the budget for a valid frame.
+    let mut decoder = active_infinity::StreamDecoder::new().with_limits(active_infinity::Limits {
+        max_total_bytes: 4096,
+        ..active_infinity::Limits::default()
+    });
+    for frame in &base_frames {
+        decoder.push(frame).expect("the base frames decode");
+    }
+    for _ in 0..256 {
+        let _ = decoder.push(&corrupt);
+    }
+    decoder
+        .push(&delta)
+        .expect("refusals did not poison the decoded-byte budget");
+}
+
 #[test]
 fn a_fragment_without_a_root_is_refused() {
     let base = base_module();

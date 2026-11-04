@@ -362,6 +362,7 @@ fn store_signs_and_refuses_unsigned_or_foreign_objects() {
         store_arg,
         "--sign",
         &seed,
+        "--i-accept-argv-key-leak",
     ]);
     assert!(output.status.success(), "{}", stderr(&output));
     let hash = stdout(&output).trim().to_string();
@@ -420,6 +421,7 @@ fn store_signs_and_refuses_unsigned_or_foreign_objects() {
         store_arg,
         "--sign",
         &"02".repeat(32),
+        "--i-accept-argv-key-leak",
     ]);
     assert!(other.status.success(), "{}", stderr(&other));
     let other_hash = stdout(&other).trim().to_string();
@@ -623,6 +625,7 @@ fn a_signed_object_is_flagged_when_verification_is_not_requested() {
         store.to_str().expect("utf8"),
         "--sign",
         &"09".repeat(32),
+        "--i-accept-argv-key-leak",
     ]);
     assert!(put.status.success(), "{}", stderr(&put));
     let hash = stdout(&put).trim().to_string();
@@ -1235,6 +1238,7 @@ fn store_put_validates_the_seed_before_opening_the_store() {
         root.to_str().expect("utf8"),
         "--sign",
         "zz",
+        "--i-accept-argv-key-leak",
     ]);
     assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
     assert!(!root.exists(), "a bad seed created the store root");
@@ -1250,6 +1254,76 @@ fn store_put_validates_the_seed_before_opening_the_store() {
     ]);
     assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
     assert!(!root.exists(), "an empty sign-file created the store root");
+}
+
+
+/// A seed on argv is refused unless the leak is acknowledged, and the refusal
+/// happens before the store exists (audit AI-02).
+#[test]
+fn a_seed_on_argv_needs_the_leak_acknowledgement() {
+    let dir = sandbox("argv-seed-gate");
+    let path = dir.join("image.ainf");
+    write(&path, &image(9));
+    let root = dir.join("never");
+    let output = run(&[
+        "store",
+        "put",
+        path.to_str().expect("utf8"),
+        "--root",
+        root.to_str().expect("utf8"),
+        "--sign",
+        &"01".repeat(32),
+    ]);
+    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("--sign-file"),
+        "the refusal must point at --sign-file: {}",
+        stderr(&output)
+    );
+    assert!(!root.exists(), "the refusal created the store root");
+}
+
+/// A signing seed file readable by other users is refused (audit AI-02).
+#[cfg(unix)]
+#[test]
+fn a_world_readable_seed_file_is_refused() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = sandbox("seed-mode");
+    let path = dir.join("image.ainf");
+    write(&path, &image(10));
+    let seed_path = dir.join("seed.txt");
+    write(&seed_path, &("02".repeat(32).into_bytes()));
+    fs::set_permissions(&seed_path, fs::Permissions::from_mode(0o644)).expect("mode");
+    let root = dir.join("store");
+    let output = run(&[
+        "store",
+        "put",
+        path.to_str().expect("utf8"),
+        "--root",
+        root.to_str().expect("utf8"),
+        "--sign-file",
+        seed_path.to_str().expect("utf8"),
+    ]);
+    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("readable"),
+        "{}",
+        stderr(&output)
+    );
+    assert!(!root.exists(), "the refusal created the store root");
+
+    fs::set_permissions(&seed_path, fs::Permissions::from_mode(0o600)).expect("mode");
+    let output = run(&[
+        "store",
+        "put",
+        path.to_str().expect("utf8"),
+        "--root",
+        root.to_str().expect("utf8"),
+        "--sign-file",
+        seed_path.to_str().expect("utf8"),
+    ]);
+    assert!(output.status.success(), "{}", stderr(&output));
 }
 
 /// A hash is hex only: `from_str_radix` accepts a leading `+`.

@@ -4,8 +4,9 @@
 
 | Version | Security fixes |
 |---|---|
-| 1.1.x | yes |
-| < 1.1 | no |
+| 2.4.x | yes |
+| 2.3.x | until six months after 2.5.0 ships |
+| < 2.0 | no |
 
 ## Reporting a vulnerability
 
@@ -30,7 +31,8 @@ Please include:
 ## Scope
 
 In scope: the codec, validator, view and stream layers of this crate; the
-`active-core` bridge; the conformance vectors; the fuzz target.
+`active-core` bridge; the conformance vectors; the fuzz targets
+(`fuzz/fuzz_targets`, sixteen structure-aware lanes).
 
 Out of scope: confidentiality of a module at rest (a module contains its payload,
 including secret bytes — encrypt or protect the store), the security of an
@@ -44,7 +46,7 @@ including secret bytes — encrypt or protect the store), the security of an
 - No secret material in `Debug`, `Display`, `Serialize`, diagnostics, projections
   or error messages.
 - Every traversal is bounded; every count is checked against the bytes.
-- The fuzz target and the red-team suite are part of every release gate.
+- The fuzz targets and the red-team suite are part of every release gate.
 
 ## Maturity invariants (AIM-PROP-2026-10 §2)
 

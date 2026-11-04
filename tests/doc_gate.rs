@@ -340,3 +340,26 @@ fn the_streaming_spec_names_the_frame_checksum_code() {
         "the streaming spec still routes a frame checksum to the image code"
     );
 }
+
+/// The supported-versions table names the line this crate ships.
+///
+/// A policy page that lists an old major tells reporters the current release
+/// is unsupported (audit AI-01).
+#[test]
+fn security_policy_lists_the_shipped_version_line() {
+    let security = fs::read_to_string(repo_path("SECURITY.md")).expect("SECURITY.md exists");
+    let manifest = fs::read_to_string(repo_path("Cargo.toml")).expect("Cargo.toml exists");
+    let version = manifest
+        .lines()
+        .find_map(|line| line.strip_prefix("version = \""))
+        .and_then(|rest| rest.split('"').next())
+        .expect("the package version is in Cargo.toml");
+    let mut parts = version.split('.');
+    let major = parts.next().expect("major");
+    let minor = parts.next().expect("minor");
+    let line = format!("| {major}.{minor}.x | yes |");
+    assert!(
+        security.contains(&line),
+        "SECURITY.md must list `{line}` for version {version}"
+    );
+}

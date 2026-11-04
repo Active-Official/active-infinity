@@ -573,6 +573,13 @@ fn a_signing_seed_can_come_from_a_file() {
     write(&image_path, &image(0));
     let seed_path = dir.join("seed.txt");
     write(&seed_path, &"09".repeat(32).into_bytes());
+    // The CLI refuses a seed file that group or other can read, and a file
+    // created under a 022 umask is 0644 (audit AI-02).
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&seed_path, fs::Permissions::from_mode(0o600)).expect("mode");
+    }
 
     let put = run(&[
         "store",
@@ -1256,7 +1263,6 @@ fn store_put_validates_the_seed_before_opening_the_store() {
     assert!(!root.exists(), "an empty sign-file created the store root");
 }
 
-
 /// A seed on argv is refused unless the leak is acknowledged, and the refusal
 /// happens before the store exists (audit AI-02).
 #[test]
@@ -1306,11 +1312,7 @@ fn a_world_readable_seed_file_is_refused() {
         seed_path.to_str().expect("utf8"),
     ]);
     assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
-    assert!(
-        stderr(&output).contains("readable"),
-        "{}",
-        stderr(&output)
-    );
+    assert!(stderr(&output).contains("readable"), "{}", stderr(&output));
     assert!(!root.exists(), "the refusal created the store root");
 
     fs::set_permissions(&seed_path, fs::Permissions::from_mode(0o600)).expect("mode");

@@ -39,7 +39,7 @@ the code → regression test first → minimal fix → targeted tests + clippy �
 | Oracle and secret paths (Display/Debug/Serialize) | **pass 1 CLEAN** (2026-11-03, 10 findings closed) | `marathon_order_tests`, `marathon_redaction_tests` |
 | Wire confusion (AINF vs stream vs protobuf) | **pass 1 CLEAN** (checksum code split, delta fault mapping) | see cross-cutting pass 1 |
 | Resource bombs (depth, counts, sizes) | **pass 1 CLEAN** (protobuf work + depth, bridge depth) | see cross-cutting pass 1 |
-| Polyglot encoder golden | pending | — |
+| Polyglot encoder golden | **pass 4 CLEAN** (2026-11-04): the `polyglot-rpc` CI job runs `run_clients.sh` for all 24 clients with `ACTIVE_RPC_STRICT=1` and the `golden` step byte-compares every encoding with the Rust reference; run `41802901937` is green on `46fdff6`. The C, C#, Dart, Swift and Fortran clients were also verified locally (Docker encoder conformance: 2742 hex identical; Dart and C# captures match the reference) | `polyglot/rpc/*`, CI run 41802901937 |
 | Second pass over changed sections | **pass 2 CLEAN** (2026-11-03, 9 findings closed) | 2.4.2 |
 
 ### Cross-cutting pass 1 - oracle/secret paths and wire confusion - 2026-11-03

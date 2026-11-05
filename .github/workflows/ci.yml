@@ -247,6 +247,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      # The runner image no longer guarantees a Swift toolchain, and the
+      # conformance job used to rely on whatever the image happened to ship.
+      # Pin it like every other toolchain in this workflow.
+      - name: Set up Swift
+        uses: swift-actions/setup-swift@v2
+        with:
+          swift-version: "6.0"
       - name: Build the shared library
         working-directory: ffi/active-infinity-ffi
         run: cargo build --locked --release
@@ -371,6 +378,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Clone the RPC repository (thin peer)
         run: git clone --depth 1 https://github.com/Active-Official/active-rpc /tmp/rpc
+      # `ACTIVE_RPC_STRICT` turns a missing runtime into a failure, so the
+      # toolchain has to be installed rather than hoped for: the runner image
+      # stopped shipping `swiftc` and the Swift row failed as "not installed".
+      - name: Set up Swift
+        uses: swift-actions/setup-swift@v2
+        with:
+          swift-version: "6.0"
       - name: Install scripting runtimes
         run: |
           sudo apt-get update

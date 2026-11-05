@@ -12,7 +12,6 @@ fn any_schema() -> Schema {
     Schema::from_fields(&[("payload", TypeSpec::Any)], false).expect("schema")
 }
 
-
 #[test]
 fn a_nested_program_node_under_any_is_refused() {
     let schema = any_schema();

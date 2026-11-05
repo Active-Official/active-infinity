@@ -243,7 +243,9 @@ jobs:
         run: bash polyglot/kotlin-native/build.sh
 
   polyglot-swift:
-    runs-on: ubuntu-latest
+    # Pinned LTS: `ubuntu-latest` moved to 26.04, which ships no Swift and is
+    # not a target for the toolchain setup action.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -372,7 +374,9 @@ jobs:
         run: bash polyglot/shell/test.sh
 
   polyglot-rpc:
-    runs-on: ubuntu-latest
+    # Same LTS pin as `polyglot-swift`: this job installs a Swift toolchain and
+    # many distro packages, and `ubuntu-latest` is now 26.04.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

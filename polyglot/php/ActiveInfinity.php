@@ -23,6 +23,8 @@ const char *active_infinity_version(void);
 const char *active_infinity_last_error(void);
 uint8_t *active_infinity_alloc(size_t len);
 void active_infinity_free(uint8_t *ptr, size_t len);
+uint8_t *active_infinity_alloc_gen(size_t len, uint64_t *generation_out);
+int32_t active_infinity_free_gen(uint8_t *ptr, size_t len, uint64_t generation);
 int32_t active_infinity_validate(const uint8_t *ptr, size_t len);
 int32_t active_infinity_validate_canonical(const uint8_t *ptr, size_t len);
 typedef struct {
@@ -95,7 +97,12 @@ C;
     // with the library defaults; override the ceiling to tighten.
     public function limitsDefault(): FFI\CData
     {
-        $limits = FFI::new('active_infinity_limits');
+        // NF-FFI01-01: the static FFI::new() cannot resolve a CDEF-defined
+        // type (it only knows builtin types), so limitsDefault() threw
+        // "Undefined C type active_infinity_limits" on every call. The
+        // type must be allocated through the FFI instance that loaded the
+        // CDEF.
+        $limits = $this->ffi->new('active_infinity_limits');
         $this->check($this->ffi->active_infinity_limits_default(FFI::addr($limits)));
         return $limits;
     }
@@ -120,7 +127,7 @@ C;
             $size = FFI::new('size_t[1]');
             $size[0] = 0;
             $status = $this->ffi->active_infinity_decode_with_limits(
-                $input, strlen($image), FFI::addr($limits), null, $size
+                $input[0], strlen($image), FFI::addr($limits), null, $size
             );
             if ($status !== -2) {
                 $this->check($status);
@@ -133,7 +140,7 @@ C;
             $out = FFI::new("uint8_t[$required]");
             $size[0] = $required;
             $this->check($this->ffi->active_infinity_decode_with_limits(
-                $input, strlen($image), FFI::addr($limits), $out, $size
+                $input[0], strlen($image), FFI::addr($limits), $out, $size
             ));
             return FFI::string($out, (int) $size[0]);
         } finally {
@@ -173,12 +180,12 @@ C;
         $nameBytes = $name . "\0";
         $input = $binding->buffer($source);
         $nameRaw = $binding->buffer($nameBytes);
-        $namePointer = FFI::cast('char *', $nameRaw);
+        $namePointer = FFI::cast('char *', $nameRaw[0]);
         try {
             $size = FFI::new('size_t[1]');
             $size[0] = 0;
             $status = $binding->ffi->active_infinity_from_active(
-                $input,
+                $input[0],
                 strlen($source),
                 $namePointer,
                 null,
@@ -196,7 +203,7 @@ C;
             $size[0] = $required;
             $binding->check(
                 $binding->ffi->active_infinity_from_active(
-                    $input,
+                    $input[0],
                     strlen($source),
                     $namePointer,
                     $out,
@@ -227,30 +234,38 @@ C;
     {
         $buffer = $this->buffer($image);
         try {
-            $this->check($call($buffer, strlen($image)));
+            $this->check($call($buffer[0], strlen($image)));
         } finally {
             $this->release($buffer, strlen($image));
         }
     }
 
-    private function buffer(string $bytes): mixed
+    // INF-FFI-01: allocates generationally and returns the pointer with
+    // the generation the FFI handed out with it, as [pointer, generation].
+    // An empty input has no allocation: [null, 0]. The generation
+    // out-pointer is an FFI::new('uint64_t[1]') (not an FFI allocation), so
+    // the legacy pair is not involved. A refused free_gen (stale handle) is
+    // a binding bug; it is ignored in `release` rather than thrown from a
+    // `finally`, where it would mask the operation's own error.
+    private function buffer(string $bytes): array
     {
         if ($bytes === '') {
-            return null;
+            return [null, 0];
         }
-        $pointer = $this->ffi->active_infinity_alloc(strlen($bytes));
+        $generationOut = FFI::new('uint64_t[1]');
+        $pointer = $this->ffi->active_infinity_alloc_gen(strlen($bytes), $generationOut);
         // A null pointer means the FFI refused the allocation (1 GiB cap).
         if ($pointer === null) {
             throw new ActiveInfinityError('infinity/limit', -1);
         }
         FFI::memcpy($pointer, $bytes, strlen($bytes));
-        return $pointer;
+        return [$pointer, (int) $generationOut[0]];
     }
 
-    private function release(mixed $pointer, int $length): void
+    private function release(array $buffer, int $length): void
     {
-        if ($pointer !== null && $length > 0) {
-            $this->ffi->active_infinity_free($pointer, $length);
+        if ($buffer[0] !== null && $length > 0) {
+            $this->ffi->active_infinity_free_gen($buffer[0], $length, $buffer[1]);
         }
     }
 
@@ -260,7 +275,7 @@ C;
         try {
             $size = FFI::new('size_t[1]');
             $size[0] = 0;
-            $status = $call($input, strlen($image), null, $size);
+            $status = $call($input[0], strlen($image), null, $size);
             if ($status !== -2) {
                 $this->check($status);
                 return '';
@@ -271,7 +286,7 @@ C;
             }
             $out = FFI::new("uint8_t[$required]");
             $size[0] = $required;
-            $this->check($call($input, strlen($image), $out, $size));
+            $this->check($call($input[0], strlen($image), $out, $size));
             return FFI::string($out, (int) $size[0]);
         } finally {
             $this->release($input, strlen($image));

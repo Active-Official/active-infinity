@@ -33,6 +33,12 @@ internal static class Native
     internal static extern void active_infinity_free(IntPtr pointer, nuint length);
 
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr active_infinity_alloc_gen(nuint length, out ulong generation);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int active_infinity_free_gen(IntPtr pointer, nuint length, ulong generation);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
     internal static extern int active_infinity_validate(IntPtr pointer, nuint length);
 
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
@@ -289,14 +295,30 @@ public sealed class Image
 
     private byte[] Output(OutputCall call) => WithBuffer(Bytes, call);
 
-    private static byte[] WithBuffer(byte[] payload, OutputCall call)
+    // INF-FFI-01: allocates generationally and returns the pointer with
+    // the generation the FFI handed out with it. Free it with FreeGen,
+    // never with the legacy free. A refused free_gen (stale handle) is a
+    // binding bug; it is ignored in the finally blocks rather than thrown,
+    // where it would mask the operation's own error.
+    private static (IntPtr Pointer, ulong Generation) AllocGen(nuint length)
     {
-        IntPtr input = Native.active_infinity_alloc((nuint)payload.Length);
+        IntPtr pointer = Native.active_infinity_alloc_gen(length, out ulong generation);
         // The FFI caps one allocation at 1 GiB: a null pointer is a refusal.
-        if (input == IntPtr.Zero && payload.Length > 0)
+        if (pointer == IntPtr.Zero && length > 0)
         {
             throw new ActiveInfinityException("infinity/limit", -1);
         }
+        return (pointer, generation);
+    }
+
+    private static void FreeGen((IntPtr Pointer, ulong Generation) allocation, nuint length)
+    {
+        Native.active_infinity_free_gen(allocation.Pointer, length, allocation.Generation);
+    }
+
+    private static byte[] WithBuffer(byte[] payload, OutputCall call)
+    {
+        (IntPtr input, ulong generation) = AllocGen((nuint)payload.Length);
         try
         {
             Marshal.Copy(payload, 0, input, payload.Length);
@@ -324,17 +346,13 @@ public sealed class Image
         }
         finally
         {
-            Native.active_infinity_free(input, (nuint)payload.Length);
+            FreeGen((input, generation), (nuint)payload.Length);
         }
     }
 
     private void WithInput(Func<IntPtr, int> action)
     {
-        IntPtr input = Native.active_infinity_alloc((nuint)Bytes.Length);
-        if (input == IntPtr.Zero && Bytes.Length > 0)
-        {
-            throw new ActiveInfinityException("infinity/limit", -1);
-        }
+        (IntPtr input, ulong generation) = AllocGen((nuint)Bytes.Length);
         try
         {
             Marshal.Copy(Bytes, 0, input, Bytes.Length);
@@ -342,7 +360,7 @@ public sealed class Image
         }
         finally
         {
-            Native.active_infinity_free(input, (nuint)Bytes.Length);
+            FreeGen((input, generation), (nuint)Bytes.Length);
         }
     }
 }

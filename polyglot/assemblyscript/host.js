@@ -48,20 +48,38 @@ class Reference {
 		return new Reference(instance);
 	}
 
+	// INF-FFI-01: allocate generationally; returns {pointer, generation}.
+	// The generation out-pointer is an 8-byte scratch in WASM memory,
+	// allocated (and freed, exactly once) through the legacy pair.
 	alloc(length) {
-		return this.exports.active_infinity_alloc(length);
+		const scratch = this.exports.active_infinity_alloc(8);
+		if (scratch === 0) throw new Error("infinity/limit: allocation failed");
+		try {
+			const pointer = this.exports.active_infinity_alloc_gen(length, scratch);
+			if (!pointer && length > 0) {
+				throw new Error("infinity/limit: allocation failed");
+			}
+			const generation = new DataView(this.exports.memory.buffer, scratch, 8).getBigUint64(0, true);
+			return { pointer, generation };
+		} finally {
+			this.exports.active_infinity_free(scratch, 8);
+		}
 	}
 
-	free(pointer, length) {
-		if (pointer !== 0) this.exports.active_infinity_free(pointer, length);
+	// INF-FFI-01: free generationally. A refused free (stale handle) is a
+	// binding bug; it is ignored rather than thrown from a `finally`.
+	free(allocation, length) {
+		if (allocation.pointer !== 0) {
+			this.exports.active_infinity_free_gen(allocation.pointer, length, allocation.generation);
+		}
 	}
 
 	copyIn(bytes) {
-		if (bytes.length === 0) return 0;
-		const pointer = this.alloc(bytes.length);
-		if (!pointer) throw new Error("infinity/limit: allocation failed");
-		this.memory().set(bytes, pointer);
-		return pointer;
+		if (bytes.length === 0) return { pointer: 0, generation: 0n };
+		const allocation = this.alloc(bytes.length);
+		if (!allocation.pointer) throw new Error("infinity/limit: allocation failed");
+		this.memory().set(bytes, allocation.pointer);
+		return allocation;
 	}
 
 	u32(pointer) {
@@ -99,19 +117,20 @@ function bind(reference, getAssemblyMemory) {
 			// Address zero is not a buffer. Hand the null pointer to the
 			// reference so the caller gets infinity/null-input, never a read of
 			// the module's static data.
-			return { pointer: 0, length };
+			return { pointer: 0, generation: 0n, length };
 		}
 		const view = asMemory();
 		const end = Math.min(pointer + length, view.length);
 		const slice = view.subarray(pointer, Math.max(pointer, end));
-		return { pointer: reference.copyIn(slice), length: slice.length };
+		const allocation = reference.copyIn(slice);
+		return { pointer: allocation.pointer, generation: allocation.generation, length: slice.length };
 	};
 	const allocOrThrow = (length) => {
-		const pointer = reference.alloc(length);
-		if (!pointer && length > 0) {
+		const allocation = reference.alloc(length);
+		if (!allocation.pointer && length > 0) {
 			throw new Error("infinity/limit: allocation failed");
 		}
-		return pointer;
+		return allocation;
 	};
 	const writeToAs = (pointer, bytes) => {
 		asMemory().set(bytes, pointer);
@@ -134,9 +153,9 @@ function bind(reference, getAssemblyMemory) {
 		const capacity = readU32(outputLength);
 		const sizePointer = allocOrThrow(8);
 		try {
-			reference.setU32(sizePointer, 0);
-			let status = invoke(0, sizePointer);
-			const required = reference.u32(sizePointer);
+			reference.setU32(sizePointer.pointer, 0);
+			let status = invoke(0, sizePointer.pointer);
+			const required = reference.u32(sizePointer.pointer);
 			writeU32(outputLength, required);
 			if (status !== -2) return status;
 			if (required > capacity || !output) {
@@ -146,14 +165,14 @@ function bind(reference, getAssemblyMemory) {
 			}
 			const buffer = allocOrThrow(required);
 			try {
-				reference.setU32(sizePointer, required);
-				status = invoke(buffer, sizePointer);
+				reference.setU32(sizePointer.pointer, required);
+				status = invoke(buffer.pointer, sizePointer.pointer);
 				if (status !== 0) return status;
-				const written = Math.min(reference.u32(sizePointer), capacity);
+				const written = Math.min(reference.u32(sizePointer.pointer), capacity);
 				writeU32(outputLength, written);
 				writeToAs(
 					output,
-					new Uint8Array(reference.exports.memory.buffer, buffer, written),
+					new Uint8Array(reference.exports.memory.buffer, buffer.pointer, written),
 				);
 				return 0;
 			} finally {
@@ -174,7 +193,7 @@ function bind(reference, getAssemblyMemory) {
 						input.length,
 					);
 				} finally {
-					reference.free(input.pointer, input.length);
+					reference.free(input, input.length);
 				}
 			},
 			// INF-FFI-02: caller-supplied budget. The limits struct is
@@ -187,11 +206,11 @@ function bind(reference, getAssemblyMemory) {
 				}
 				const out = allocOrThrow(112);
 				try {
-					const status = reference.exports.active_infinity_limits_default(out);
+					const status = reference.exports.active_infinity_limits_default(out.pointer);
 					if (status === 0) {
 						writeToAs(
 							limits,
-							new Uint8Array(reference.exports.memory.buffer, out, 112),
+							new Uint8Array(reference.exports.memory.buffer, out.pointer, 112),
 						);
 					}
 					return status;
@@ -214,8 +233,8 @@ function bind(reference, getAssemblyMemory) {
 						limitsPointer,
 					);
 				} finally {
-					reference.free(input.pointer, input.length);
-					if (limitsCopied) reference.free(limitsCopied.pointer, 112);
+					reference.free(input, input.length);
+					if (limitsCopied) reference.free(limitsCopied, 112);
 				}
 			},
 			decode_with_limits: (pointer, length, limits, output, outputLength) => {
@@ -242,8 +261,8 @@ function bind(reference, getAssemblyMemory) {
 							),
 					);
 				} finally {
-					reference.free(input.pointer, input.length);
-					if (limitsCopied) reference.free(limitsCopied.pointer, 112);
+					reference.free(input, input.length);
+					if (limitsCopied) reference.free(limitsCopied, 112);
 				}
 			},
 			// INF-POLY-03: `validate` already proves the canonical form
@@ -256,7 +275,7 @@ function bind(reference, getAssemblyMemory) {
 						input.length,
 					);
 				} finally {
-					reference.free(input.pointer, input.length);
+					reference.free(input, input.length);
 				}
 			},
 			content_hash: (pointer, length, output) => {
@@ -277,19 +296,19 @@ function bind(reference, getAssemblyMemory) {
 						const status = reference.exports.active_infinity_content_hash(
 							input.pointer,
 							input.length,
-							hash,
+							hash.pointer,
 						);
 						if (status === 0)
 							writeToAs(
 								output,
-								new Uint8Array(reference.exports.memory.buffer, hash, 32),
+								new Uint8Array(reference.exports.memory.buffer, hash.pointer, 32),
 							);
 						return status;
 					} finally {
 						reference.free(hash, 32);
 					}
 				} finally {
-					reference.free(input.pointer, input.length);
+					reference.free(input, input.length);
 				}
 			},
 			reencode: (pointer, length, output, outputLength) => {
@@ -309,7 +328,7 @@ function bind(reference, getAssemblyMemory) {
 							),
 					);
 				} finally {
-					reference.free(input.pointer, input.length);
+					reference.free(input, input.length);
 				}
 			},
 			redacted_json: (pointer, length, output, outputLength) => {
@@ -329,7 +348,7 @@ function bind(reference, getAssemblyMemory) {
 							),
 					);
 				} finally {
-					reference.free(input.pointer, input.length);
+					reference.free(input, input.length);
 				}
 			},
 			from_active: (
@@ -359,7 +378,7 @@ function bind(reference, getAssemblyMemory) {
 							0,
 						);
 					} finally {
-						reference.free(input.pointer, input.length);
+						reference.free(input, input.length);
 					}
 				}
 				const nameBytes = asMemory().slice(name, name + nameLength);
@@ -376,14 +395,14 @@ function bind(reference, getAssemblyMemory) {
 							reference.exports.active_infinity_from_active(
 								input.pointer,
 								input.length,
-								namePointer,
+								namePointer.pointer,
 								buffer,
 								size,
 							),
 					);
 				} finally {
 					reference.free(namePointer, nameWithNul.length);
-					reference.free(input.pointer, input.length);
+					reference.free(input, input.length);
 				}
 			},
 		},

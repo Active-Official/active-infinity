@@ -22,6 +22,8 @@ const char *active_infinity_version(void);
 const char *active_infinity_last_error(void);
 uint8_t *active_infinity_alloc(size_t len);
 void active_infinity_free(uint8_t *ptr, size_t len);
+uint8_t *active_infinity_alloc_gen(size_t len, uint64_t *generation_out);
+int32_t active_infinity_free_gen(uint8_t *ptr, size_t len, uint64_t generation);
 int32_t active_infinity_validate(const uint8_t *ptr, size_t len);
 int32_t active_infinity_validate_canonical(const uint8_t *ptr, size_t len);
 typedef struct {
@@ -99,13 +101,20 @@ local function with_input(bytes, callback)
   if #bytes == 0 then
     return callback(nil, 0)
   end
-  local pointer = lib.active_infinity_alloc(#bytes)
+  -- INF-FFI-01: allocates generationally. The generation out-pointer is
+  -- an ffi.new uint64_t[1] (not an FFI allocation), so the legacy pair is
+  -- not involved. A refused free_gen (stale handle) is a binding bug; it
+  -- is ignored here rather than raised, where it would mask the callback's
+  -- own error.
+  local generation_out = ffi.new("uint64_t[1]")
+  local pointer = lib.active_infinity_alloc_gen(#bytes, generation_out)
   if pointer == nil then
     fail("infinity/limit", -1)
   end
+  local generation = generation_out[0]
   ffi.copy(pointer, bytes, #bytes)
   local ok, result = pcall(callback, pointer, #bytes)
-  lib.active_infinity_free(pointer, #bytes)
+  lib.active_infinity_free_gen(pointer, #bytes, generation)
   if not ok then
     error(result, 0)
   end

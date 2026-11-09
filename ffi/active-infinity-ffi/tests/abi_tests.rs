@@ -651,9 +651,8 @@ fn validate_with_limits_refuses_the_limit_vectors() {
             _ => unreachable!("{field}"),
         }
         // SAFETY: the vector is readable and `limits` is a valid struct.
-        let status = unsafe {
-            active_infinity_validate_with_limits(bytes.as_ptr(), bytes.len(), &limits)
-        };
+        let status =
+            unsafe { active_infinity_validate_with_limits(bytes.as_ptr(), bytes.len(), &limits) };
         assert_eq!(status, -1, "{name}");
         assert_eq!(last_error(), code, "{name}");
     }
@@ -717,9 +716,8 @@ fn a_zero_ceiling_is_refused_as_an_invalid_argument() {
     let mut limits = default_limits();
     limits.max_nodes = 0;
     // SAFETY: the vector is readable and `limits` is a valid struct.
-    let status = unsafe {
-        active_infinity_validate_with_limits(bytes.as_ptr(), bytes.len(), &limits)
-    };
+    let status =
+        unsafe { active_infinity_validate_with_limits(bytes.as_ptr(), bytes.len(), &limits) };
     assert_eq!(status, -1);
     assert_eq!(last_error(), "infinity/invalid-argument");
 }
@@ -737,9 +735,8 @@ fn validate_with_limits_matches_validate_canonical_under_defaults() {
     assert_eq!(status, 0, "{}", last_error());
     let bad = invalid_vector("not_canonical.ainf");
     // SAFETY: the vector is readable; null means defaults.
-    let status = unsafe {
-        active_infinity_validate_with_limits(bad.as_ptr(), bad.len(), std::ptr::null())
-    };
+    let status =
+        unsafe { active_infinity_validate_with_limits(bad.as_ptr(), bad.len(), std::ptr::null()) };
     assert_eq!(status, -1);
     assert_eq!(last_error(), "infinity/not-canonical");
 }
@@ -751,7 +748,7 @@ fn validate_with_limits_matches_validate_canonical_under_defaults() {
 #[test]
 fn free_gen_refuses_a_stale_free_after_address_reuse() {
     let mut reused = false;
-    for _ in 0..20 {
+    for _ in 0..200 {
         let mut gen1 = 0u64;
         // SAFETY: gen1 is a writable u64.
         let p1 = unsafe { active_infinity_alloc_gen(64, &mut gen1) };
@@ -767,7 +764,8 @@ fn free_gen_refuses_a_stale_free_after_address_reuse() {
             // The allocator did not reuse the address this round; free p2
             // and retry. (Same-size alloc/free cycles reuse the address
             // with overwhelming likelihood in both the system and WASM
-            // allocators, so 20 attempts is ample.)
+            // allocators. 200 attempts keeps the test stable when other
+            // tests allocate concurrently in the same process.)
             // SAFETY: p2 is a live 64-byte allocation with generation gen2.
             assert_eq!(unsafe { active_infinity_free_gen(p2, 64, gen2) }, 0);
             continue;
@@ -783,7 +781,11 @@ fn free_gen_refuses_a_stale_free_after_address_reuse() {
         // SAFETY: p1 is the same address as p2 with the stale generation.
         assert_eq!(unsafe { active_infinity_free_gen(p1, 64, gen1) }, -1);
         // SAFETY: p2 is still the live allocation (the stale free refused).
-        assert_eq!(unsafe { *p2 }, 0xB2, "the stale free must not touch the live buffer");
+        assert_eq!(
+            unsafe { *p2 },
+            0xB2,
+            "the stale free must not touch the live buffer"
+        );
         let mut gen3 = 0u64;
         // SAFETY: gen3 is a writable u64.
         let p3 = unsafe { active_infinity_alloc_gen(64, &mut gen3) };
@@ -794,7 +796,10 @@ fn free_gen_refuses_a_stale_free_after_address_reuse() {
         assert_eq!(unsafe { active_infinity_free_gen(p3, 64, gen3) }, 0);
         break;
     }
-    assert!(reused, "the allocator never reused the freed address in 20 attempts");
+    assert!(
+        reused,
+        "the allocator never reused the freed address in 200 attempts"
+    );
 }
 
 /// INF-FFI-01: an immediate double free through the generational path is
@@ -806,9 +811,15 @@ fn free_gen_refuses_an_immediate_double_free() {
     let pointer = unsafe { active_infinity_alloc_gen(64, &mut generation) };
     assert!(!pointer.is_null());
     // SAFETY: pointer is a live 64-byte allocation with this generation.
-    assert_eq!(unsafe { active_infinity_free_gen(pointer, 64, generation) }, 0);
+    assert_eq!(
+        unsafe { active_infinity_free_gen(pointer, 64, generation) },
+        0
+    );
     // SAFETY: pointer was already freed with this generation.
-    assert_eq!(unsafe { active_infinity_free_gen(pointer, 64, generation) }, -1);
+    assert_eq!(
+        unsafe { active_infinity_free_gen(pointer, 64, generation) },
+        -1
+    );
 }
 
 /// INF-FFI-01: a generational free with the wrong length is refused and the
@@ -820,10 +831,16 @@ fn free_gen_refuses_a_wrong_length_and_keeps_the_buffer_live() {
     let pointer = unsafe { active_infinity_alloc_gen(64, &mut generation) };
     assert!(!pointer.is_null());
     // SAFETY: pointer is a live 64-byte allocation; 63 is the wrong length.
-    assert_eq!(unsafe { active_infinity_free_gen(pointer, 63, generation) }, -1);
+    assert_eq!(
+        unsafe { active_infinity_free_gen(pointer, 63, generation) },
+        -1
+    );
     // The refusal must not untrack the buffer: the legitimate free works.
     // SAFETY: pointer is still the live 64-byte allocation.
-    assert_eq!(unsafe { active_infinity_free_gen(pointer, 64, generation) }, 0);
+    assert_eq!(
+        unsafe { active_infinity_free_gen(pointer, 64, generation) },
+        0
+    );
 }
 
 /// INF-FFI-01: the legacy free validates the header BEFORE removing the
@@ -841,7 +858,7 @@ fn legacy_free_with_a_wrong_length_keeps_the_buffer_live() {
     // SAFETY: pointer is still the live 64-byte allocation.
     unsafe { active_infinity_free(pointer, 64) };
     let mut reused = false;
-    for _ in 0..20 {
+    for _ in 0..200 {
         let again = active_infinity_alloc(64);
         assert!(!again.is_null());
         if again == pointer {
@@ -861,5 +878,8 @@ fn legacy_free_with_a_wrong_length_keeps_the_buffer_live() {
 fn alloc_gen_refuses_a_null_generation_out() {
     // SAFETY: a null out-pointer is the refused case.
     let pointer = unsafe { active_infinity_alloc_gen(64, std::ptr::null_mut()) };
-    assert!(pointer.is_null(), "a null generation out-pointer is refused");
+    assert!(
+        pointer.is_null(),
+        "a null generation out-pointer is refused"
+    );
 }

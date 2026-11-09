@@ -152,7 +152,37 @@ func (i *Instance) check(ctx context.Context, status int32) error {
 
 // alloc allocates in the module and refuses a null pointer. The FFI caps one
 // allocation at 1 GiB, so a larger input must fail closed before any write.
-func (i *Instance) alloc(ctx context.Context, length uint64) (uint32, error) {
+// INF-FFI-01: allocates generationally and returns the generation with the
+// pointer; the caller must pass both to free_gen. The generation out-pointer
+// is an 8-byte scratch in WASM memory, allocated (and freed, exactly once)
+// through the legacy pair.
+func (i *Instance) alloc(ctx context.Context, length uint64) (uint32, uint64, error) {
+	scratch, err := i.allocLegacy(ctx, 8)
+	if err != nil {
+		return 0, 0, err
+	}
+	defer func() {
+		_, _ = i.module.ExportedFunction("active_infinity_free").Call(ctx, uint64(scratch), 8)
+	}()
+	values, err := i.module.ExportedFunction("active_infinity_alloc_gen").Call(ctx, length, uint64(scratch))
+	if err != nil {
+		return 0, 0, err
+	}
+	pointer := uint32(values[0])
+	if pointer == 0 && length > 0 {
+		return 0, 0, &Error{Code: "infinity/limit", Status: -1}
+	}
+	generation, ok := i.module.Memory().ReadUint64Le(scratch)
+	if !ok {
+		return 0, 0, fmt.Errorf("wasm memory read failed")
+	}
+	return pointer, generation, nil
+}
+
+// allocLegacy allocates through the legacy (non-generational) pair. It is
+// used only for the 8-byte generation scratch in alloc, which is allocated
+// and freed exactly once, so the legacy pair is safe there.
+func (i *Instance) allocLegacy(ctx context.Context, length uint64) (uint32, error) {
 	values, err := i.module.ExportedFunction("active_infinity_alloc").Call(ctx, length)
 	if err != nil {
 		return 0, err
@@ -164,13 +194,19 @@ func (i *Instance) alloc(ctx context.Context, length uint64) (uint32, error) {
 	return pointer, nil
 }
 
+// freeGen frees generationally. A refused free (stale handle) is a binding
+// bug; it is ignored rather than returned from a deferred release, where it
+// would mask the operation's own error.
+func (i *Instance) freeGen(ctx context.Context, pointer uint32, length uint64, generation uint64) {
+	_, _ = i.module.ExportedFunction("active_infinity_free_gen").Call(ctx, uint64(pointer), length, generation)
+}
+
 // writeInput copies data into the module and returns the pointer and a release.
 func (i *Instance) writeInput(ctx context.Context, data []byte) (uint32, func(), error) {
-	free := i.module.ExportedFunction("active_infinity_free")
 	if len(data) == 0 {
 		return 0, func() {}, nil
 	}
-	pointer, err := i.alloc(ctx, uint64(len(data)))
+	pointer, generation, err := i.alloc(ctx, uint64(len(data)))
 	if err != nil {
 		return 0, nil, err
 	}
@@ -178,7 +214,7 @@ func (i *Instance) writeInput(ctx context.Context, data []byte) (uint32, func(),
 		return 0, nil, fmt.Errorf("wasm memory write failed")
 	}
 	return pointer, func() {
-		_, _ = free.Call(ctx, uint64(pointer), uint64(len(data)))
+		i.freeGen(ctx, pointer, uint64(len(data)), generation)
 	}, nil
 }
 
@@ -347,11 +383,10 @@ func (l *Limits) SetField(name string, value uint64) error {
 // writeLimits copies a Limits into WASM memory and returns the pointer and
 // a release. A nil limits means the library defaults (a null pointer).
 func (i *Instance) writeLimits(ctx context.Context, limits *Limits) (uint32, func(), error) {
-	free := i.module.ExportedFunction("active_infinity_free")
 	if limits == nil {
 		return 0, func() {}, nil
 	}
-	pointer, err := i.alloc(ctx, limitsSize)
+	pointer, generation, err := i.alloc(ctx, limitsSize)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -366,7 +401,7 @@ func (i *Instance) writeLimits(ctx context.Context, limits *Limits) (uint32, fun
 		}
 	}
 	return pointer, func() {
-		_, _ = free.Call(ctx, uint64(pointer), uint64(limitsSize))
+		i.freeGen(ctx, pointer, uint64(limitsSize), generation)
 	}, nil
 }
 
@@ -374,12 +409,12 @@ func (i *Instance) writeLimits(ctx context.Context, limits *Limits) (uint32, fun
 func (i *Instance) DefaultLimits(ctx context.Context) (Limits, error) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
-	pointer, err := i.alloc(ctx, limitsSize)
+	pointer, generation, err := i.alloc(ctx, limitsSize)
 	if err != nil {
 		return Limits{}, err
 	}
 	defer func() {
-		_, _ = i.module.ExportedFunction("active_infinity_free").Call(ctx, uint64(pointer), uint64(limitsSize))
+		i.freeGen(ctx, pointer, uint64(limitsSize), generation)
 	}()
 	values, err := i.module.ExportedFunction("active_infinity_limits_default").Call(ctx, uint64(pointer))
 	if err != nil {
@@ -470,12 +505,12 @@ func (i *Instance) ContentHash(ctx context.Context, image []byte) ([]byte, error
 		return nil, err
 	}
 	defer release()
-	hashPointer, err := i.alloc(ctx, 32)
+	hashPointer, hashGeneration, err := i.alloc(ctx, 32)
 	if err != nil {
 		return nil, err
 	}
 	defer func() {
-		_, _ = i.module.ExportedFunction("active_infinity_free").Call(ctx, uint64(hashPointer), 32)
+		i.freeGen(ctx, hashPointer, 32, hashGeneration)
 	}()
 	values, err := i.module.ExportedFunction("active_infinity_content_hash").Call(
 		ctx, uint64(pointer), uint64(len(image)), uint64(hashPointer))
@@ -503,12 +538,12 @@ func (i *Instance) output(ctx context.Context, name string, prefix []uint64, pay
 		return nil, err
 	}
 	defer release()
-	lengthPointer, err := i.alloc(ctx, 4)
+	lengthPointer, lengthGeneration, err := i.alloc(ctx, 4)
 	if err != nil {
 		return nil, err
 	}
 	defer func() {
-		_, _ = i.module.ExportedFunction("active_infinity_free").Call(ctx, uint64(lengthPointer), 4)
+		i.freeGen(ctx, lengthPointer, 4, lengthGeneration)
 	}()
 	if !i.module.Memory().WriteUint32Le(lengthPointer, 0) {
 		return nil, fmt.Errorf("wasm memory write failed")
@@ -531,12 +566,12 @@ func (i *Instance) output(ctx context.Context, name string, prefix []uint64, pay
 		}
 		return []byte{}, nil
 	}
-	outputPointer, err := i.alloc(ctx, uint64(required))
+	outputPointer, outputGeneration, err := i.alloc(ctx, uint64(required))
 	if err != nil {
 		return nil, err
 	}
 	defer func() {
-		_, _ = i.module.ExportedFunction("active_infinity_free").Call(ctx, uint64(outputPointer), uint64(required))
+		i.freeGen(ctx, outputPointer, uint64(required), outputGeneration)
 	}()
 	if !i.module.Memory().WriteUint32Le(lengthPointer, required) {
 		return nil, fmt.Errorf("wasm memory write failed")

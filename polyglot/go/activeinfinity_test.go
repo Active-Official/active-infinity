@@ -259,7 +259,7 @@ func TestAllocationRefusalIsInfinityLimit(t *testing.T) {
 		t.Fatalf("instantiate: %v", err)
 	}
 	defer func() { _ = instance.Close(ctx) }()
-	if _, err := instance.alloc(ctx, (1<<30)+1); err == nil {
+	if _, _, err := instance.alloc(ctx, (1<<30)+1); err == nil {
 		t.Fatal("an allocation over the FFI cap must fail")
 	} else if failure, ok := err.(*Error); !ok || failure.Code != "infinity/limit" {
 		t.Fatalf("code: %v", err)

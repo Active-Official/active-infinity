@@ -34,8 +34,8 @@ use std::os::raw::c_char;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr;
 use std::slice;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 
 use active_infinity::{
     content_hash, decode, decode_with, encode, validate, validate_canonical, DecodeOpts, Limits,
@@ -301,7 +301,10 @@ pub extern "C" fn active_infinity_alloc(len: usize) -> *mut u8 {
 /// # Safety
 /// `generation_out` must be a writable `u64` (or null, which is refused).
 #[no_mangle]
-pub unsafe extern "C" fn active_infinity_alloc_gen(len: usize, generation_out: *mut u64) -> *mut u8 {
+pub unsafe extern "C" fn active_infinity_alloc_gen(
+    len: usize,
+    generation_out: *mut u64,
+) -> *mut u8 {
     if generation_out.is_null() {
         return ptr::null_mut();
     }

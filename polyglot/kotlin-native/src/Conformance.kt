@@ -22,6 +22,10 @@ private class Abi {
     val lastError: CPointer<CFunction<() -> CPointer<ByteVar>?>> = symbol("active_infinity_last_error")
     val alloc: CPointer<CFunction<(ULong) -> CPointer<UByteVar>?>> = symbol("active_infinity_alloc")
     val free: CPointer<CFunction<(CPointer<UByteVar>?, ULong) -> Unit>> = symbol("active_infinity_free")
+    val allocGen: CPointer<CFunction<(ULong, CPointer<ULongVar>?) -> CPointer<UByteVar>?>> =
+        symbol("active_infinity_alloc_gen")
+    val freeGen: CPointer<CFunction<(CPointer<UByteVar>?, ULong, ULong) -> Int>> =
+        symbol("active_infinity_free_gen")
     val validate: CPointer<CFunction<(CPointer<UByteVar>?, ULong) -> Int>> =
         symbol("active_infinity_validate")
     // INF-POLY-03: `validate` already proves the canonical form (INF-02);
@@ -89,21 +93,41 @@ private fun lastError(abi: Abi): String {
 private fun failure(abi: Abi, status: Int): Nothing =
     throw ActiveInfinityException(lastError(abi), status)
 
+// INF-FFI-01: allocates generationally and returns the pointer with the
+// generation the FFI handed out with it. The generation out-pointer is a
+// memScoped ULongVar (not an FFI allocation), so the legacy pair is not
+// involved. Free it with freeGen, never with the legacy free. A refused
+// free_gen (stale handle) is a binding bug; it is ignored in the finally
+// blocks rather than thrown, where it would mask the operation's own error.
+@OptIn(ExperimentalForeignApi::class)
+private fun allocGen(abi: Abi, length: ULong): Pair<CPointer<UByteVar>?, ULong> = memScoped {
+    val generation = alloc<ULongVar>()
+    generation.value = 0u
+    val pointer = abi.allocGen(length, generation.ptr)
+        ?: throw ActiveInfinityException("infinity/limit", -1)
+    pointer to generation.value
+}
+
+@OptIn(ExperimentalForeignApi::class)
+private fun freeGen(abi: Abi, allocation: Pair<CPointer<UByteVar>?, ULong>, length: ULong) {
+    abi.freeGen(allocation.first, length, allocation.second)
+}
+
 @OptIn(ExperimentalForeignApi::class)
 private fun withInput(abi: Abi, bytes: ByteArray, action: (CPointer<UByteVar>?, ULong) -> Unit) {
     if (bytes.isEmpty()) {
         action(null, 0u)
         return
     }
-    val pointer = abi.alloc(bytes.size.toULong())
-        ?: throw ActiveInfinityException("infinity/limit", -1)
+    val allocation = allocGen(abi, bytes.size.toULong())
+    val pointer = allocation.first
     try {
         bytes.usePinned { pinned ->
             memcpy(pointer, pinned.addressOf(0), bytes.size.toULong())
         }
         action(pointer, bytes.size.toULong())
     } finally {
-        abi.free(pointer, bytes.size.toULong())
+        freeGen(abi, allocation, bytes.size.toULong())
     }
 }
 
@@ -122,17 +146,17 @@ private fun output(
         if (status != -2) failure(abi, status)
         val required = size.value.toInt()
         if (required > 0) {
-            val buffer = abi.alloc(required.toULong())
-                ?: throw ActiveInfinityException("infinity/limit", -1)
+            val allocation = allocGen(abi, required.toULong())
+            val buffer = allocation.first
             try {
                 size.value = required.toULong()
                 status = call(input, length, buffer, size.ptr)
                 if (status != 0) failure(abi, status)
                 val written = size.value.toInt()
                 result = ByteArray(written)
-                result = buffer.reinterpret<ByteVar>().readBytes(written)
+                result = buffer!!.reinterpret<ByteVar>().readBytes(written)
             } finally {
-                abi.free(buffer, required.toULong())
+                freeGen(abi, allocation, required.toULong())
             }
         }
     }
@@ -150,17 +174,17 @@ private fun fromActive(abi: Abi, source: ByteArray, name: String): ByteArray = m
         if (status != -2) failure(abi, status)
         val required = size.value.toInt()
         if (required > 0) {
-            val buffer = abi.alloc(required.toULong())
-                ?: throw ActiveInfinityException("infinity/limit", -1)
+            val allocation = allocGen(abi, required.toULong())
+            val buffer = allocation.first
             try {
                 size.value = required.toULong()
                 status = abi.fromActive(input, length, name.cstr.ptr, buffer, size.ptr)
                 if (status != 0) failure(abi, status)
                 val written = size.value.toInt()
                 result = ByteArray(written)
-                result = buffer.reinterpret<ByteVar>().readBytes(written)
+                result = buffer!!.reinterpret<ByteVar>().readBytes(written)
             } finally {
-                abi.free(buffer, required.toULong())
+                freeGen(abi, allocation, required.toULong())
             }
         }
     }
@@ -279,7 +303,8 @@ fun main() {
                 // The limits struct is 112 bytes in native memory, allocated
                 // with the FFI's own allocator (withInput is not in a
                 // memScoped, so allocArray is unavailable).
-                val limits = abi.alloc(112u) ?: error("$invalidName: cannot allocate limits")
+                val limitsAllocation = allocGen(abi, 112u)
+                val limits = limitsAllocation.first ?: error("$invalidName: cannot allocate limits")
                 try {
                     check(abi.limitsDefault(limits.reinterpret<ByteVar>()) == 0) { "$invalidName: limitsDefault failed" }
                     val offset = when (parts[0]) {
@@ -292,7 +317,7 @@ fun main() {
                     slot.pointed.value = parts[1].toUInt()
                     abi.validateWithLimits(pointer, length, limits.reinterpret())
                 } finally {
-                    abi.free(limits, 112u)
+                    freeGen(abi, limitsAllocation, 112u)
                 }
             } else {
                 abi.validateCanonical(pointer, length)

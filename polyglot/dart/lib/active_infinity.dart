@@ -47,6 +47,10 @@ typedef _AllocNative = Pointer<Uint8> Function(IntPtr);
 typedef _AllocDart = Pointer<Uint8> Function(int);
 typedef _FreeNative = Void Function(Pointer<Uint8>, IntPtr);
 typedef _FreeDart = void Function(Pointer<Uint8>, int);
+typedef _AllocGenNative = Pointer<Uint8> Function(IntPtr, Pointer<Uint64>);
+typedef _AllocGenDart = Pointer<Uint8> Function(int, Pointer<Uint64>);
+typedef _FreeGenNative = Int32 Function(Pointer<Uint8>, IntPtr, Uint64);
+typedef _FreeGenDart = int Function(Pointer<Uint8>, int, int);
 typedef _U32Native = Uint32 Function();
 typedef _U32Dart = int Function();
 typedef _ErrorNative = Pointer<Uint8> Function();
@@ -80,6 +84,10 @@ class _Native {
             .lookupFunction<_AllocNative, _AllocDart>('active_infinity_alloc'),
         free = library
             .lookupFunction<_FreeNative, _FreeDart>('active_infinity_free'),
+        allocGen = library.lookupFunction<_AllocGenNative, _AllocGenDart>(
+            'active_infinity_alloc_gen'),
+        freeGen = library.lookupFunction<_FreeGenNative, _FreeGenDart>(
+            'active_infinity_free_gen'),
         abi = library.lookupFunction<_U32Native, _U32Dart>(
             'active_infinity_abi_version'),
         lastError = library
@@ -99,6 +107,8 @@ class _Native {
   final _FromActiveDart fromActive;
   final _AllocDart alloc;
   final _FreeDart free;
+  final _AllocGenDart allocGen;
+  final _FreeGenDart freeGen;
   final _U32Dart abi;
   final _ErrorDart lastError;
 }
@@ -313,10 +323,8 @@ class Image {
 
   Uint8List contentHash() {
     final native = _open();
-    final out = native.alloc(32);
-    if (out == nullptr) {
-      throw ActiveInfinityException('infinity/limit', -1);
-    }
+    final allocation = _allocGen(native, 32);
+    final out = allocation.pointer;
     try {
       _withInput(bytes, (pointer, length) {
         final status = native.hash(pointer, length, out);
@@ -326,7 +334,7 @@ class Image {
       });
       return Uint8List.fromList(out.asTypedList(32));
     } finally {
-      native.free(out, 32);
+      _freeGen(native, allocation, 32);
     }
   }
 
@@ -345,17 +353,49 @@ class Image {
     final native = _open();
     final payload = Uint8List.fromList(utf8.encode(source));
     final nameBytes = Uint8List.fromList(utf8.encode('$name\u0000'));
-    final namePointer = native.alloc(nameBytes.length);
-    if (namePointer == nullptr) {
-      throw ActiveInfinityException('infinity/limit', -1);
-    }
+    final nameAllocation = _allocGen(native, nameBytes.length);
+    final namePointer = nameAllocation.pointer;
     namePointer.asTypedList(nameBytes.length).setAll(0, nameBytes);
     try {
       return _output(payload, (native, input, length, out, size) =>
           native.fromActive(input, length, namePointer, out, size));
     } finally {
-      native.free(namePointer, nameBytes.length);
+      _freeGen(native, nameAllocation, nameBytes.length);
     }
+  }
+}
+
+/// A generational allocation (INF-FFI-01): the pointer and the generation
+/// the FFI handed out with it. Free it with `_freeGen`, never with the
+/// legacy `free`.
+final class _Allocation {
+  _Allocation(this.pointer, this.generation);
+  final Pointer<Uint8> pointer;
+  final int generation;
+}
+
+/// Allocate generationally. The generation out-pointer is a `calloc`'d
+/// `Uint64`, freed after the call — it is not an FFI allocation, so the
+/// legacy pair is not involved.
+_Allocation _allocGen(_Native native, int length) {
+  final out = calloc<Uint64>();
+  try {
+    final pointer = native.allocGen(length, out);
+    if (pointer == nullptr) {
+      throw ActiveInfinityException('infinity/limit', -1);
+    }
+    return _Allocation(pointer, out.value);
+  } finally {
+    calloc.free(out);
+  }
+}
+
+/// Free generationally. A refused free (stale handle) is a binding bug; it
+/// is ignored rather than thrown from a `finally`, where it would mask the
+/// operation's own error.
+void _freeGen(_Native native, _Allocation allocation, int length) {
+  if (allocation.pointer != nullptr) {
+    native.freeGen(allocation.pointer, length, allocation.generation);
   }
 }
 
@@ -365,15 +405,13 @@ void _withInput(Uint8List payload, void Function(Pointer<Uint8>, int) action) {
     action(Pointer<Uint8>.fromAddress(0), 0);
     return;
   }
-  final pointer = native.alloc(payload.length);
-  if (pointer == nullptr) {
-    throw ActiveInfinityException('infinity/limit', -1);
-  }
+  final allocation = _allocGen(native, payload.length);
+  final pointer = allocation.pointer;
   pointer.asTypedList(payload.length).setAll(0, payload);
   try {
     action(pointer, payload.length);
   } finally {
-    native.free(pointer, payload.length);
+    _freeGen(native, allocation, payload.length);
   }
 }
 
@@ -386,9 +424,10 @@ Uint8List _output(Uint8List payload, _OutputInvoker invoke) {
   late Uint8List result;
   _withInput(payload, (pointer, length) {
     final lengthPointer = _allocateSize(native);
+    final lengthPtr = lengthPointer.pointer.cast<IntPtr>();
     try {
-      lengthPointer.value = 0;
-      var status = invoke(native, pointer, length, Pointer<Uint8>.fromAddress(0), lengthPointer);
+      lengthPtr.value = 0;
+      var status = invoke(native, pointer, length, Pointer<Uint8>.fromAddress(0), lengthPtr);
       if (status != -2) {
         if (status != 0) {
           throw ActiveInfinityException(_lastError(native), status);
@@ -396,24 +435,22 @@ Uint8List _output(Uint8List payload, _OutputInvoker invoke) {
         result = Uint8List(0);
         return;
       }
-      final required = lengthPointer.value;
+      final required = lengthPtr.value;
       if (required == 0) {
         result = Uint8List(0);
         return;
       }
-      final out = native.alloc(required);
-    if (out == nullptr) {
-      throw ActiveInfinityException('infinity/limit', -1);
-    }
+      final allocation = _allocGen(native, required);
+      final out = allocation.pointer;
       try {
-        lengthPointer.value = required;
-        status = invoke(native, pointer, length, out, lengthPointer);
+        lengthPtr.value = required;
+        status = invoke(native, pointer, length, out, lengthPtr);
         if (status != 0) {
           throw ActiveInfinityException(_lastError(native), status);
         }
-        result = Uint8List.fromList(out.asTypedList(lengthPointer.value));
+        result = Uint8List.fromList(out.asTypedList(lengthPtr.value));
       } finally {
-        native.free(out, required);
+        _freeGen(native, allocation, required);
       }
     } finally {
       _freeSize(native, lengthPointer);
@@ -422,15 +459,12 @@ Uint8List _output(Uint8List payload, _OutputInvoker invoke) {
   return result;
 }
 
-Pointer<IntPtr> _allocateSize(_Native native) {
+_Allocation _allocateSize(_Native native) {
   // `size_t` is `IntPtr`-sized; the C ABI only needs 4 or 8 bytes.
-  final pointer = native.alloc(sizeOf<IntPtr>()).cast<IntPtr>();
-  if (pointer == nullptr) {
-    throw ActiveInfinityException('infinity/limit', -1);
-  }
-  return pointer;
+  final allocation = _allocGen(native, sizeOf<IntPtr>());
+  return allocation;
 }
 
-void _freeSize(_Native native, Pointer<IntPtr> pointer) {
-  native.free(pointer.cast<Uint8>(), sizeOf<IntPtr>());
+void _freeSize(_Native native, _Allocation allocation) {
+  _freeGen(native, allocation, sizeOf<IntPtr>());
 }

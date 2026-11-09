@@ -160,6 +160,8 @@ async function main() {
 			active_infinity_abi_version: () => 1,
 			active_infinity_alloc: () => 0,
 			active_infinity_free: () => {},
+			active_infinity_alloc_gen: () => 0,
+			active_infinity_free_gen: () => 0,
 		},
 	});
 	assert.throws(

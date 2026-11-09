@@ -53,19 +53,20 @@ const LIMITS_FIELDS = {
 };
 
 class Limits {
-	constructor(ai, pointer) {
+	constructor(ai, allocation) {
 		this.ai = ai;
-		this.pointer = pointer;
+		this.allocation = allocation;
+		this.pointer = allocation.pointer;
 	}
 
 	static defaults(ai) {
-		const pointer = ai._alloc(LIMITS_SIZE);
-		const status = ai.exports.active_infinity_limits_default(pointer);
+		const allocation = ai._alloc(LIMITS_SIZE);
+		const status = ai.exports.active_infinity_limits_default(allocation.pointer);
 		if (status !== 0) {
-			ai.exports.active_infinity_free(pointer, LIMITS_SIZE);
+			ai._free(allocation, LIMITS_SIZE);
 			ai._fail(status);
 		}
-		return new Limits(ai, pointer);
+		return new Limits(ai, allocation);
 	}
 
 	set(field, value) {
@@ -80,7 +81,7 @@ class Limits {
 
 	free() {
 		if (this.pointer !== 0) {
-			this.ai.exports.active_infinity_free(this.pointer, LIMITS_SIZE);
+			this.ai._free(this.allocation, LIMITS_SIZE);
 			this.pointer = 0;
 		}
 	}
@@ -149,26 +150,50 @@ class ActiveInfinity {
 		throw new ActiveInfinityError(this._lastError(), status);
 	}
 
+	// INF-FFI-01: allocate generationally. The generation out-pointer is an
+	// 8-byte scratch in WASM memory, allocated (and freed, exactly once)
+	// through the legacy pair — a single free of a fresh allocation is
+	// always safe, so the scratch does not need the generational path.
+	// Returns {pointer, generation}; the generation is a BigInt (u64).
 	_alloc(length) {
-		const pointer = this.exports.active_infinity_alloc(length);
-		// A null pointer is the FFI's refusal (1 GiB cap), not address zero.
-		if (pointer === 0 && length > 0) {
+		const scratch = this.exports.active_infinity_alloc(8);
+		if (scratch === 0) {
 			throw new ActiveInfinityError("infinity/limit", -1);
 		}
-		return pointer;
+		try {
+			const pointer = this.exports.active_infinity_alloc_gen(length, scratch);
+			// A null pointer is the FFI's refusal (1 GiB cap), not address zero.
+			if (pointer === 0 && length > 0) {
+				throw new ActiveInfinityError("infinity/limit", -1);
+			}
+			const generation = new DataView(this.memory.buffer, scratch, 8).getBigUint64(0, true);
+			return { pointer, generation };
+		} finally {
+			this.exports.active_infinity_free(scratch, 8);
+		}
+	}
+
+	// INF-FFI-01: free generationally. A refused free (stale handle) returns
+	// -1; the binding's allocations are always valid, so a refusal here is a
+	// binding bug — it is ignored rather than thrown from a `finally`, where
+	// it would mask the operation's own error.
+	_free(allocation, length) {
+		if (allocation.pointer !== 0) {
+			this.exports.active_infinity_free_gen(allocation.pointer, length, allocation.generation);
+		}
 	}
 
 	_withInput(bytes, op) {
 		const input = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
-		const pointer = input.length === 0 ? 0 : this._alloc(input.length);
+		const allocation = input.length === 0 ? null : this._alloc(input.length);
+		const pointer = allocation === null ? 0 : allocation.pointer;
 		try {
 			if (input.length > 0) {
 				new Uint8Array(this.memory.buffer, pointer, input.length).set(input);
 			}
 			return op(pointer, input.length);
 		} finally {
-			if (pointer !== 0)
-				this.exports.active_infinity_free(pointer, input.length);
+			if (allocation !== null) this._free(allocation, input.length);
 		}
 	}
 
@@ -233,15 +258,15 @@ class ActiveInfinity {
 
 	/** 32-byte Blake3 content hash of a valid image. */
 	contentHash(bytes) {
-		const hashPointer = this._alloc(32);
+		const hash = this._alloc(32);
 		try {
 			const status = this._withInput(bytes, (pointer, length) =>
-				this.exports.active_infinity_content_hash(pointer, length, hashPointer),
+				this.exports.active_infinity_content_hash(pointer, length, hash.pointer),
 			);
 			if (status !== 0) this._fail(status);
-			return this._output(hashPointer, 32);
+			return this._output(hash.pointer, 32);
 		} finally {
-			this.exports.active_infinity_free(hashPointer, 32);
+			this._free(hash, 32);
 		}
 	}
 
@@ -259,8 +284,8 @@ class ActiveInfinity {
 		const text =
 			typeof source === "string" ? new TextEncoder().encode(source) : source;
 		const nameBytes = new TextEncoder().encode(`${name}\0`);
-		const namePointer = this._alloc(nameBytes.length);
-		new Uint8Array(this.memory.buffer, namePointer, nameBytes.length).set(
+		const nameAlloc = this._alloc(nameBytes.length);
+		new Uint8Array(this.memory.buffer, nameAlloc.pointer, nameBytes.length).set(
 			nameBytes,
 		);
 		try {
@@ -269,14 +294,14 @@ class ActiveInfinity {
 					this.exports.active_infinity_from_active(
 						pointer,
 						length,
-						namePointer,
+						nameAlloc.pointer,
 						out,
 						outLen,
 					),
 				),
 			);
 		} finally {
-			this.exports.active_infinity_free(namePointer, nameBytes.length);
+			this._free(nameAlloc, nameBytes.length);
 		}
 	}
 
@@ -297,7 +322,8 @@ class ActiveInfinity {
 
 	_callOutput(invoke) {
 		// Size query: a null output reports the required length.
-		const lengthPointer = this._alloc(8);
+		const lengthAlloc = this._alloc(8);
+		const lengthPointer = lengthAlloc.pointer;
 		try {
 			new DataView(this.memory.buffer, lengthPointer, 8).setUint32(0, 0, true);
 			let status = invoke(0, lengthPointer);
@@ -310,7 +336,8 @@ class ActiveInfinity {
 				if (status !== 0) this._fail(status);
 				return new Uint8Array(0);
 			}
-			const outputPointer = this._alloc(required);
+			const outputAlloc = this._alloc(required);
+			const outputPointer = outputAlloc.pointer;
 			try {
 				new DataView(this.memory.buffer, lengthPointer, 8).setUint32(
 					0,
@@ -326,10 +353,10 @@ class ActiveInfinity {
 				).getUint32(0, true);
 				return this._output(outputPointer, written);
 			} finally {
-				this.exports.active_infinity_free(outputPointer, required);
+				this._free(outputAlloc, required);
 			}
 		} finally {
-			this.exports.active_infinity_free(lengthPointer, 8);
+			this._free(lengthAlloc, 8);
 		}
 	}
 }

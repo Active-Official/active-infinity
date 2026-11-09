@@ -40,6 +40,8 @@ module ActiveInfinity
   attach_function :active_infinity_last_error, [], :string
   attach_function :active_infinity_alloc, [:size_t], :pointer
   attach_function :active_infinity_free, %i[pointer size_t], :void
+  attach_function :active_infinity_alloc_gen, %i[size_t pointer], :pointer
+  attach_function :active_infinity_free_gen, %i[pointer size_t uint64], :int32
   attach_function :active_infinity_validate, %i[pointer size_t], :int32
   attach_function :active_infinity_validate_canonical, %i[pointer size_t], :int32
   attach_function :active_infinity_limits_default, [:pointer], :int32
@@ -97,19 +99,26 @@ module ActiveInfinity
     end
   end
 
+  # INF-FFI-01: allocates generationally. The generation out-pointer is
+  # an FFI::MemoryPointer (not an FFI allocation), so the legacy pair is
+  # not involved. A refused free_gen (stale handle) is a binding bug; it
+  # is ignored in `ensure` rather than raised, where it would mask the
+  # operation's own error.
   def with_buffer(bytes)
     return yield(nil, 0) if bytes.empty?
 
-    pointer = active_infinity_alloc(bytes.bytesize)
+    generation_out = FFI::MemoryPointer.new(:uint64)
+    pointer = active_infinity_alloc_gen(bytes.bytesize, generation_out)
     # The FFI caps one allocation at 1 GiB; a null pointer is a refusal, not an
     # address to write to.
     raise Error.new("infinity/limit", -1) if pointer.null?
+    generation = generation_out.read_uint64
 
     pointer.put_bytes(0, bytes)
     begin
       yield(pointer, bytes.bytesize)
     ensure
-      active_infinity_free(pointer, bytes.bytesize)
+      active_infinity_free_gen(pointer, bytes.bytesize, generation)
     end
   end
 

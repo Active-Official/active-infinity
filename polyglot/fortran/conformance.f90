@@ -27,7 +27,9 @@ program conformance
   character(len=:), allocatable :: path
   character(len=:), allocatable :: name
   character(len=64) :: expected
-  integer :: position, kind_at, path_at, name_at, hash_at, quote_at
+  character(len=64) :: expected_code
+  integer :: position, kind_at, path_at, name_at, hash_at, quote_at, code_at
+  integer :: invalid_checked, invalid_skipped, invalid_total
   integer(c_int8_t), allocatable, target :: image(:)
   integer(c_int32_t) :: status
 
@@ -77,6 +79,53 @@ program conformance
   ! INF-POLY-03: pin the exact count -- the manifest lists 5 valid
   ! vectors. A slack `< 4` let a dropped vector pass silently.
   if (checked /= 5) call fail("the manifest must list exactly five valid cases")
+
+  ! INF-POLY-02: every invalid vector except the two limits-dependent
+  ! ones (limit, too_deep) must be refused by validate_canonical with
+  ! exactly the manifest's expected_code. The FFI exposes no limits
+  ! parameter, so those two need narrowed limits (max_nodes:1,
+  ! max_depth:8) and are covered by the CLI's `conformance run` and the
+  ! Rust suite instead. invalid_stream vectors are CLI-only: no stream
+  ! decode exists in the FFI. The scan finds `"kind": "invalid"` with
+  ! the closing quote, so `"kind": "invalid_stream"` never matches.
+  invalid_checked = 0
+  invalid_skipped = 0
+  invalid_total = 0
+  position = 1
+  do
+    call find_after(manifest, '"kind": "invalid"', position, kind_at)
+    if (kind_at == 0) exit
+    call find_after(manifest, '"name": "', kind_at, name_at)
+    if (name_at == 0) exit
+    name_at = name_at + len('"name": "')
+    quote_at = index(manifest(name_at:), '"') + name_at - 1
+    name = manifest(name_at:quote_at - 1)
+
+    call find_after(manifest, '"path": "', quote_at, path_at)
+    if (path_at == 0) exit
+    path_at = path_at + len('"path": "')
+    quote_at = index(manifest(path_at:), '"') + path_at - 1
+    path = manifest(path_at:quote_at - 1)
+
+    call find_after(manifest, '"expected_code": "', quote_at, code_at)
+    if (code_at == 0) exit
+    code_at = code_at + len('"expected_code": "')
+    quote_at = index(manifest(code_at:), '"') + code_at - 1
+    expected_code = manifest(code_at:quote_at - 1)
+    position = quote_at + 1
+
+    invalid_total = invalid_total + 1
+    if (trim(name) == "limit" .or. trim(name) == "too_deep") then
+      invalid_skipped = invalid_skipped + 1
+      cycle
+    end if
+    call read_bytes(path, image)
+    call expect_invalid_refusal(image, trim(expected_code))
+    invalid_checked = invalid_checked + 1
+  end do
+  if (invalid_checked + invalid_skipped /= invalid_total) &
+    call fail("the manifest invalid vectors were not exercised")
+  if (invalid_skipped /= 2) call fail("the limits-dependent skips changed")
 
   call check_from_active()
   call check_redaction()
@@ -173,6 +222,19 @@ contains
     if (status /= ai_invalid) call fail("non-canonical image passed validate_canonical")
     call last_error_text(code)
     if (code /= "infinity/not-canonical") call fail("wrong code for validate_canonical: " // code)
+  end subroutine
+
+  ! INF-POLY-02: an invalid vector must be refused by validate_canonical
+  ! with exactly the manifest's expected_code.
+  subroutine expect_invalid_refusal(data, expected)
+    integer(c_int8_t), allocatable, target, intent(in) :: data(:)
+    character(len=*), intent(in) :: expected
+    integer(c_int32_t) :: status
+    character(len=:), allocatable :: code
+    status = ai_validate_canonical(c_loc(data), int(size(data), c_size_t))
+    if (status /= ai_invalid) call fail("invalid image was accepted: " // expected)
+    call last_error_text(code)
+    if (code /= expected) call fail("wrong code for validate_canonical: " // code)
   end subroutine
 
   subroutine expect_hash_refusal(data)

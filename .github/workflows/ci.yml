@@ -158,7 +158,22 @@ jobs:
           gcc -I ffi/active-infinity-ffi/include polyglot/c/consumer.c \
             ffi/active-infinity-ffi/target/release/libactive_infinity_ffi.a \
             -lpthread -ldl -lm -o /tmp/active-infinity-c
-          /tmp/active-infinity-c tests/vectors/valid/full.ainf
+          # INF-POLY-02: pass the manifest hash so the consumer compares
+          # it instead of only printing it.
+          HASH=$(python3 -c "import json; print([c['content_hash'] for c in json.load(open('conformance/manifest.json'))['cases'] if c['path']=='tests/vectors/valid/full.ainf'][0])")
+          /tmp/active-infinity-c tests/vectors/valid/full.ainf "$HASH"
+      - name: C consumer on the invalid vectors (INF-POLY-02)
+        run: |
+          # Every invalid vector except the two limits-dependent ones
+          # (limit, too_deep) must be refused with its declared code. The
+          # FFI exposes no limits parameter, so those two need narrowed
+          # limits and are covered by the CLI's `conformance run` and the
+          # Rust suite instead.
+          python3 -c "import json; [print(c['path'], c['expected_code']) for c in json.load(open('conformance/manifest.json'))['cases'] if c['kind']=='invalid' and c['name'] not in ('limit','too_deep')]" > invalid-vectors.txt
+          while read -r path code; do
+            code="${code%$'\r'}"
+            /tmp/active-infinity-c "$path" --expect-code "$code" || exit 1
+          done < invalid-vectors.txt
 
   abi-windows-macos:
     # XPL-INF-06: the FFI crate is the shared library every binding loads,
@@ -186,18 +201,39 @@ jobs:
       - name: Compile and run the C consumer
         shell: bash
         run: |
+          # INF-POLY-02: pass the manifest hash so the consumer compares
+          # it instead of only printing it.
+          HASH=$(python3 -c "import json; print([c['content_hash'] for c in json.load(open('conformance/manifest.json'))['cases'] if c['path']=='tests/vectors/valid/full.ainf'][0])")
           if [ "$RUNNER_OS" = "Windows" ]; then
             gcc -I ffi/active-infinity-ffi/include polyglot/c/consumer.c \
               ffi/active-infinity-ffi/target/release/active_infinity_ffi.dll.lib \
               -lpthread -lm -o active-infinity-c.exe
             cp ffi/active-infinity-ffi/target/release/active_infinity_ffi.dll .
-            ./active-infinity-c.exe tests/vectors/valid/full.ainf
+            ./active-infinity-c.exe tests/vectors/valid/full.ainf "$HASH"
           else
             cc -I ffi/active-infinity-ffi/include polyglot/c/consumer.c \
               ffi/active-infinity-ffi/target/release/libactive_infinity_ffi.a \
               -lpthread -lm -o active-infinity-c
-            ./active-infinity-c tests/vectors/valid/full.ainf
+            ./active-infinity-c tests/vectors/valid/full.ainf "$HASH"
           fi
+      - name: C consumer on the invalid vectors (INF-POLY-02)
+        shell: bash
+        run: |
+          # Every invalid vector except the two limits-dependent ones
+          # (limit, too_deep) must be refused with its declared code. The
+          # FFI exposes no limits parameter, so those two need narrowed
+          # limits and are covered by the CLI's `conformance run` and the
+          # Rust suite instead.
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            CONSUMER=./active-infinity-c.exe
+          else
+            CONSUMER=./active-infinity-c
+          fi
+          python3 -c "import json; [print(c['path'], c['expected_code']) for c in json.load(open('conformance/manifest.json'))['cases'] if c['kind']=='invalid' and c['name'] not in ('limit','too_deep')]" > invalid-vectors.txt
+          while read -r path code; do
+            code="${code%$'\r'}"
+            "$CONSUMER" "$path" --expect-code "$code" || exit 1
+          done < invalid-vectors.txt
 
   wasm:
     runs-on: ubuntu-latest
@@ -231,7 +267,22 @@ jobs:
             polyglot/cpp/test.cpp \
             ffi/active-infinity-ffi/target/release/libactive_infinity_ffi.a \
             -lpthread -ldl -lm -o /tmp/active-infinity-cpp
-          /tmp/active-infinity-cpp tests/vectors/valid/full.ainf
+          # INF-POLY-02: pass the manifest hash so the consumer compares
+          # it instead of only printing it.
+          HASH=$(python3 -c "import json; print([c['content_hash'] for c in json.load(open('conformance/manifest.json'))['cases'] if c['path']=='tests/vectors/valid/full.ainf'][0])")
+          /tmp/active-infinity-cpp tests/vectors/valid/full.ainf "$HASH"
+      - name: C++ consumer on the invalid vectors (INF-POLY-02)
+        run: |
+          # Every invalid vector except the two limits-dependent ones
+          # (limit, too_deep) must be refused with its declared code. The
+          # FFI exposes no limits parameter, so those two need narrowed
+          # limits and are covered by the CLI's `conformance run` and the
+          # Rust suite instead.
+          python3 -c "import json; [print(c['path'], c['expected_code']) for c in json.load(open('conformance/manifest.json'))['cases'] if c['kind']=='invalid' and c['name'] not in ('limit','too_deep')]" > invalid-vectors.txt
+          while read -r path code; do
+            code="${code%$'\r'}"
+            /tmp/active-infinity-cpp "$path" --expect-code "$code" || exit 1
+          done < invalid-vectors.txt
       - name: Python conformance
         env:
           ACTIVE_INFINITY_LIB: ${{ github.workspace }}/ffi/active-infinity-ffi/target/release/libactive_infinity_ffi.so
@@ -244,8 +295,25 @@ jobs:
         working-directory: polyglot/zig
         run: |
           zig build
+          # INF-POLY-02: pass the manifest hash so the consumer compares
+          # it instead of only printing it.
+          HASH=$(python3 -c "import json; print([c['content_hash'] for c in json.load(open('../../conformance/manifest.json'))['cases'] if c['path']=='tests/vectors/valid/full.ainf'][0])")
           LD_LIBRARY_PATH=${{ github.workspace }}/ffi/active-infinity-ffi/target/release \
-            ./zig-out/bin/active-infinity-zig ../../tests/vectors/valid/full.ainf
+            ./zig-out/bin/active-infinity-zig ../../tests/vectors/valid/full.ainf "$HASH"
+      - name: Zig consumer on the invalid vectors (INF-POLY-02)
+        working-directory: polyglot/zig
+        run: |
+          # Every invalid vector except the two limits-dependent ones
+          # (limit, too_deep) must be refused with its declared code. The
+          # FFI exposes no limits parameter, so those two need narrowed
+          # limits and are covered by the CLI's `conformance run` and the
+          # Rust suite instead.
+          python3 -c "import json; [print('../../' + c['path'], c['expected_code']) for c in json.load(open('../../conformance/manifest.json'))['cases'] if c['kind']=='invalid' and c['name'] not in ('limit','too_deep')]" > ../../invalid-vectors.txt
+          while read -r path code; do
+            LD_LIBRARY_PATH=${{ github.workspace }}/ffi/active-infinity-ffi/target/release \
+              code="${code%$'\r'}"
+              ./zig-out/bin/active-infinity-zig "$path" --expect-code "$code" || exit 1
+          done < ../../invalid-vectors.txt
 
   polyglot-go:
     runs-on: ubuntu-latest

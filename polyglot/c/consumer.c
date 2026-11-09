@@ -9,6 +9,15 @@
  *
  * Run:
  *   polyglot/c/consumer.exe tests/vectors/valid/full.ainf
+ *   polyglot/c/consumer.exe tests/vectors/valid/full.ainf <content_hash>
+ *   polyglot/c/consumer.exe tests/vectors/invalid/bad_magic.ainf --expect-code infinity/magic
+ *
+ * INF-POLY-02: the consumer used to print the content hash without
+ * comparing it to the manifest, and it never ran on a hostile vector, so
+ * a wrong hash or a wrong refusal code passed silently. The optional
+ * expected-hash argument and the --expect-code hostile mode close both
+ * gaps; CI passes the manifest hash for full.ainf and loops the 33
+ * checkable invalid vectors through this binary.
  */
 
 #include <stdint.h>
@@ -60,9 +69,25 @@ static int expect(int32_t status, const char *what) {
 }
 
 int main(int argc, char **argv) {
-  if (argc != 2) {
-    fprintf(stderr, "usage: %s <image.ainf>\n", argv[0]);
+  const char *expected_hash = NULL;
+  const char *expected_code = NULL;
+  if (argc < 2 || argc > 4) {
+    fprintf(stderr, "usage: %s <image.ainf> [expected-hash-hex] [--expect-code <code>]\n", argv[0]);
     return 2;
+  }
+  for (int index = 2; index < argc; index++) {
+    if (strcmp(argv[index], "--expect-code") == 0) {
+      if (index + 1 >= argc) {
+        fprintf(stderr, "--expect-code needs a code\n");
+        return 2;
+      }
+      expected_code = argv[++index];
+    } else if (expected_hash == NULL) {
+      expected_hash = argv[index];
+    } else {
+      fprintf(stderr, "unexpected argument: %s\n", argv[index]);
+      return 2;
+    }
   }
   if (active_infinity_abi_version() != ACTIVE_INFINITY_ABI_VERSION) {
     fprintf(stderr, "ABI mismatch: library %u, header %u\n",
@@ -74,6 +99,27 @@ int main(int argc, char **argv) {
   uint8_t *image = read_file(argv[1], &len);
   if (image == NULL) {
     return 2;
+  }
+
+  /* INF-POLY-02: hostile mode -- the image must be refused by
+     validate_canonical with exactly the expected code. */
+  if (expected_code != NULL) {
+    int32_t status = active_infinity_validate_canonical(image, len);
+    if (status == ACTIVE_INFINITY_OK) {
+      fprintf(stderr, "invalid image was accepted\n");
+      free(image);
+      return 1;
+    }
+    const char *code = active_infinity_last_error();
+    if (code == NULL || strcmp(code, expected_code) != 0) {
+      fprintf(stderr, "wrong code: %s, want %s\n",
+              code != NULL ? code : "infinity/unknown", expected_code);
+      free(image);
+      return 1;
+    }
+    printf("PASS (refused with %s)\n", expected_code);
+    free(image);
+    return 0;
   }
 
   if (!expect(active_infinity_validate(image, len), "validate")) {
@@ -94,11 +140,21 @@ int main(int argc, char **argv) {
     free(image);
     return 1;
   }
-  printf("hash=");
+  char hex[65];
+  static const char digits[] = "0123456789abcdef";
   for (size_t index = 0; index < sizeof hash; index++) {
-    printf("%02x", hash[index]);
+    hex[2 * index] = digits[hash[index] >> 4];
+    hex[2 * index + 1] = digits[hash[index] & 0x0f];
   }
-  printf("\n");
+  hex[64] = '\0';
+  printf("hash=%s\n", hex);
+  /* INF-POLY-02: the consumer used to print the hash without comparing it
+     to the manifest, so a wrong hash passed silently. */
+  if (expected_hash != NULL && strcmp(hex, expected_hash) != 0) {
+    fprintf(stderr, "hash mismatch: %s, want %s\n", hex, expected_hash);
+    free(image);
+    return 1;
+  }
 
   size_t out_len = 0;
   int32_t status = active_infinity_reencode(image, len, NULL, &out_len);

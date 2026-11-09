@@ -66,6 +66,35 @@ def main() -> int:
         [case for case in manifest["cases"] if case["kind"] == "valid"]
     )
 
+    # INF-POLY-02: every invalid vector except the two limits-dependent
+    # ones (limit, too_deep) must be refused by validate_canonical with
+    # exactly the manifest's expected_code. The FFI exposes no limits
+    # parameter, so those two need narrowed limits (max_nodes:1,
+    # max_depth:8) and are covered by the CLI's `conformance run` and the
+    # Rust suite instead. invalid_stream vectors are CLI-only: no stream
+    # decode exists in the FFI.
+    invalid_checked = 0
+    invalid_skipped = 0
+    for case in manifest["cases"]:
+        if case["kind"] != "invalid":
+            continue
+        if case["name"] in ("limit", "too_deep"):
+            invalid_skipped += 1
+            continue
+        image = ai.Image((ROOT / case["path"]).read_bytes())
+        try:
+            image.validate_canonical()
+        except ai.ActiveInfinityError as error:
+            assert error.code == case["expected_code"], case["name"]
+        else:  # pragma: no cover
+            raise AssertionError(f"{case['name']}: invalid image was accepted")
+        invalid_checked += 1
+    invalid_total = len(
+        [case for case in manifest["cases"] if case["kind"] == "invalid"]
+    )
+    assert invalid_checked + invalid_skipped == invalid_total
+    assert invalid_skipped == 2
+
     source = b'port = 8080\nname = "py"\n'
     first = ai.Image.from_active(source, "py.active")
     second = ai.Image.from_active(source, "py.active")

@@ -10,10 +10,11 @@ import (
 )
 
 type manifestCase struct {
-	Kind        string `json:"kind"`
-	Name        string `json:"name"`
-	Path        string `json:"path"`
-	ContentHash string `json:"content_hash"`
+	Kind         string `json:"kind"`
+	Name         string `json:"name"`
+	Path         string `json:"path"`
+	ContentHash  string `json:"content_hash"`
+	ExpectedCode string `json:"expected_code"`
 }
 
 type manifest struct {
@@ -129,6 +130,47 @@ func TestConformance(t *testing.T) {
 	}
 	if checked != valid {
 		t.Fatalf("checked %d vectors, want %d", checked, valid)
+	}
+
+	// INF-POLY-02: every invalid vector except the two limits-dependent
+	// ones (limit, too_deep) must be refused by ValidateCanonical with
+	// exactly the manifest's expected_code. The WASM binding exposes no
+	// limits parameter, so those two need narrowed limits (max_nodes:1,
+	// max_depth:8) and are covered by the CLI's `conformance run` and the
+	// Rust suite instead. invalid_stream vectors are CLI-only: no stream
+	// decode exists in the FFI.
+	invalidChecked := 0
+	invalidSkipped := 0
+	for _, entry := range cases.Cases {
+		if entry.Kind != "invalid" {
+			continue
+		}
+		if entry.Name == "limit" || entry.Name == "too_deep" {
+			invalidSkipped++
+			continue
+		}
+		image, err := os.ReadFile(filepath.Join(root, entry.Path))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := instance.ValidateCanonical(ctx, image); err == nil {
+			t.Fatalf("%s: invalid image was accepted", entry.Name)
+		} else if failure, ok := err.(*Error); !ok || failure.Code != entry.ExpectedCode {
+			t.Fatalf("%s: wrong code %v", entry.Name, err)
+		}
+		invalidChecked++
+	}
+	invalidTotal := 0
+	for _, entry := range cases.Cases {
+		if entry.Kind == "invalid" {
+			invalidTotal++
+		}
+	}
+	if invalidChecked+invalidSkipped != invalidTotal {
+		t.Fatalf("checked %d + skipped %d invalid vectors, want %d", invalidChecked, invalidSkipped, invalidTotal)
+	}
+	if invalidSkipped != 2 {
+		t.Fatalf("limits-dependent skips changed: %d", invalidSkipped)
 	}
 
 	first, err := instance.FromActive(ctx, []byte("port = 8080\nname = \"go\"\n"), "go.active")

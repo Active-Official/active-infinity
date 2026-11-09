@@ -61,6 +61,34 @@ end
 local _, valid = manifest:gsub('"kind": "valid"', "")
 assert(checked == valid, "manifest vectors exercised: " .. checked .. " of " .. valid)
 
+-- INF-POLY-02: every invalid vector except the two limits-dependent ones
+-- (limit, too_deep) must be refused by validate_canonical with exactly the
+-- manifest's expected_code. The FFI exposes no limits parameter, so those
+-- two need narrowed limits (max_nodes:1, max_depth:8) and are covered by
+-- the CLI's `conformance run` and the Rust suite instead. invalid_stream
+-- vectors are CLI-only: no stream decode exists in the FFI. The scan below
+-- matches `"kind": "invalid"` (with the closing quote, so it never matches
+-- `"kind": "invalid_stream"`) followed by the case's name, path and
+-- expected_code.
+local invalid_checked = 0
+local invalid_skipped = 0
+for name, path, expected in manifest:gmatch('"kind": "invalid".-"name"%s*:%s*"([^"]+)".-"path"%s*:%s*"([^"]+)".-"expected_code"%s*:%s*"([^"]+)"') do
+  local image = read(path)
+  if name == "limit" or name == "too_deep" then
+    invalid_skipped = invalid_skipped + 1
+  else
+    local ok, message = pcall(function() ai.validate_canonical(image) end)
+    assert(not ok, name .. ": invalid image was accepted")
+    assert(type(message) == "table" and message.code == expected,
+           name .. ": wrong code: " .. tostring(message.code) .. ", want " .. expected)
+    invalid_checked = invalid_checked + 1
+  end
+end
+local _, invalid_total = manifest:gsub('"kind": "invalid"', "")
+assert(invalid_checked + invalid_skipped == invalid_total,
+       "invalid vectors exercised: " .. invalid_checked .. " + " .. invalid_skipped .. " of " .. invalid_total)
+assert(invalid_skipped == 2, "limits-dependent skips changed: " .. invalid_skipped)
+
 local source = 'port = 8080\nname = "lua"\n'
 local first = ai.from_active(source, "lua.active")
 local second = ai.from_active(source, "lua.active")

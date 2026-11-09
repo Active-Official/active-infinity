@@ -94,6 +94,51 @@ size_t ai_cobol_case_count(const char *manifest, size_t length) {
   return count;
 }
 
+/* Number of `"kind": "invalid"` cases in the manifest text. The closing
+ * quote keeps `"kind": "invalid_stream"` out of the count. */
+size_t ai_cobol_invalid_count(const char *manifest, size_t length) {
+  const char *end = manifest + length;
+  const char *cursor = manifest;
+  size_t count = 0;
+  while (1) {
+    const char *at = find_text(cursor, end, "\"kind\": \"invalid\"");
+    if (at == NULL) {
+      break;
+    }
+    count++;
+    cursor = at + 1;
+  }
+  return count;
+}
+
+/* Fetch the name, path and expected error code of the index-th invalid
+ * case. */
+int ai_cobol_invalid_case(const char *manifest, size_t length, size_t index,
+                          char *path, size_t path_capacity, char *name,
+                          size_t name_capacity, char *code,
+                          size_t code_capacity) {
+  const char *end = manifest + length;
+  const char *cursor = manifest;
+  for (size_t at = 0; at <= index; at++) {
+    const char *found = find_text(cursor, end, "\"kind\": \"invalid\"");
+    if (found == NULL) {
+      return 0;
+    }
+    cursor = found + 1;
+  }
+  if (!quoted_after(&cursor, end, "\"name\": \"", name, name_capacity)) {
+    return 0;
+  }
+  if (!quoted_after(&cursor, end, "\"path\": \"", path, path_capacity)) {
+    return 0;
+  }
+  if (!quoted_after(&cursor, end, "\"expected_code\": \"", code,
+                     code_capacity)) {
+    return 0;
+  }
+  return 1;
+}
+
 /* Fetch the name, path and content hash of the index-th valid case. */
 int ai_cobol_case(const char *manifest, size_t length, size_t index, char *path,
                   size_t path_capacity, char *name, size_t name_capacity,

@@ -15,6 +15,15 @@ public final class Conformance {
             "\"path\"\\s*:\\s*\"([^\"]+)\".*?\"content_hash\"\\s*:\\s*\"([^\"]+)\"",
             Pattern.DOTALL);
 
+    // INF-POLY-02: the invalid-case pattern. It anchors on
+    // `"kind": "invalid"` with the closing quote, so it never matches
+    // `"kind": "invalid_stream"`; the `.*?` spans the options object,
+    // which sits between path and expected_code and never contains an
+    // expected_code of its own.
+    private static final Pattern INVALID_CASE = Pattern.compile(
+            "\"kind\"\\s*:\\s*\"invalid\".*?\"name\"\\s*:\\s*\"([^\"]+)\".*?\"path\"\\s*:\\s*\"([^\"]+)\".*?\"expected_code\"\\s*:\\s*\"([^\"]+)\"",
+            Pattern.DOTALL);
+
     public static void main(String[] args) throws IOException {
         Path root = Paths.get("").toAbsolutePath();
         String manifest = Files.readString(root.resolve("conformance/manifest.json"));
@@ -82,6 +91,43 @@ public final class Conformance {
         int valid = manifest.split("\"kind\": \"valid\"", -1).length - 1;
         if (checked != valid) {
             throw new IllegalStateException("manifest vectors were not exercised: " + checked + " of " + valid);
+        }
+
+        // INF-POLY-02: every invalid vector except the two limits-dependent
+        // ones (limit, too_deep) must be refused by validateCanonical with
+        // exactly the manifest's expected_code. The FFI exposes no limits
+        // parameter, so those two need narrowed limits (max_nodes:1,
+        // max_depth:8) and are covered by the CLI's `conformance run` and
+        // the Rust suite instead. invalid_stream vectors are CLI-only: no
+        // stream decode exists in the FFI.
+        int invalidChecked = 0;
+        int invalidSkipped = 0;
+        Matcher invalidMatcher = INVALID_CASE.matcher(manifest);
+        while (invalidMatcher.find()) {
+            String invalidName = invalidMatcher.group(1);
+            String invalidPath = invalidMatcher.group(2);
+            String expectedCode = invalidMatcher.group(3);
+            if (invalidName.equals("limit") || invalidName.equals("too_deep")) {
+                invalidSkipped++;
+                continue;
+            }
+            byte[] invalidImage = Files.readAllBytes(root.resolve(invalidPath));
+            try {
+                ActiveInfinity.validateCanonical(invalidImage);
+                throw new IllegalStateException(invalidName + ": invalid image was accepted");
+            } catch (ActiveInfinity.Error error) {
+                if (!error.code().equals(expectedCode)) {
+                    throw new IllegalStateException(invalidName + ": wrong code " + error.code());
+                }
+            }
+            invalidChecked++;
+        }
+        int invalidTotal = manifest.split("\"kind\": \"invalid\"", -1).length - 1;
+        if (invalidChecked + invalidSkipped != invalidTotal) {
+            throw new IllegalStateException("manifest invalid vectors were not exercised: " + invalidChecked + " + " + invalidSkipped + " of " + invalidTotal);
+        }
+        if (invalidSkipped != 2) {
+            throw new IllegalStateException("limits-dependent skips changed: " + invalidSkipped);
         }
 
         String source = "port = 8080\nname = \"java\"\n";

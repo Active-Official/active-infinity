@@ -13,6 +13,14 @@ object Conformance {
   private val Case: Regex =
     """(?s)"path"\s*:\s*"([^"]+)".*?"content_hash"\s*:\s*"([^"]+)"""".r
 
+  // INF-POLY-02: the invalid-case pattern. It anchors on
+  // `"kind": "invalid"` with the closing quote, so it never matches
+  // `"kind": "invalid_stream"`; the `.*?` spans the options object,
+  // which sits between path and expected_code and never contains an
+  // expected_code of its own.
+  private val InvalidCase: Regex =
+    """(?s)"kind": "invalid".*?"name": "([^"]+)".*?"path": "([^"]+)".*?"expected_code": "([^"]+)"""".r
+
   def main(args: Array[String]): Unit = {
     val root = new File(".").getAbsoluteFile
     val manifest = scala.io.Source.fromFile(new File(root, "conformance/manifest.json")).mkString
@@ -70,6 +78,37 @@ object Conformance {
     // a slack `>=` let a dropped vector pass silently.
     val valid = "\"kind\": \"valid\"".r.findAllIn(manifest).length
     require(checked == valid, s"manifest vectors were not exercised: $checked of $valid")
+
+    // INF-POLY-02: every invalid vector except the two limits-dependent
+    // ones (limit, too_deep) must be refused by validateCanonical with
+    // exactly the manifest's expected_code. The FFI exposes no limits
+    // parameter, so those two need narrowed limits (max_nodes:1,
+    // max_depth:8) and are covered by the CLI's `conformance run` and
+    // the Rust suite instead. invalid_stream vectors are CLI-only: no
+    // stream decode exists in the FFI.
+    var invalidChecked = 0
+    var invalidSkipped = 0
+    for (m <- InvalidCase.findAllMatchIn(manifest)) {
+      val invalidName = m.group(1)
+      val invalidPath = m.group(2)
+      val expectedCode = m.group(3)
+      if (invalidName == "limit" || invalidName == "too_deep") {
+        invalidSkipped += 1
+      } else {
+        val invalidImage = java.nio.file.Files.readAllBytes(root.toPath.resolve(invalidPath))
+        try {
+          ActiveInfinity.validateCanonical(invalidImage)
+          throw new IllegalStateException(invalidName + ": invalid image was accepted")
+        } catch {
+          case error: ActiveInfinity.Error =>
+            require(error.code() == expectedCode, s"$invalidName: wrong code ${error.code()}")
+        }
+        invalidChecked += 1
+      }
+    }
+    val invalidTotal = "\"kind\": \"invalid\"".r.findAllIn(manifest).length
+    require(invalidChecked + invalidSkipped == invalidTotal, s"manifest invalid vectors were not exercised: $invalidChecked + $invalidSkipped of $invalidTotal")
+    require(invalidSkipped == 2, s"limits-dependent skips changed: $invalidSkipped")
 
     val source = "port = 8080\nname = \"scala\"\n"
     val first = ActiveInfinity.fromActive(source, "scala.active")

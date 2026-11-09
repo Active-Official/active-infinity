@@ -68,6 +68,39 @@ void main() {
     throw StateError('valid vectors were not exercised: $checked of $valid');
   }
 
+  // INF-POLY-02: every invalid vector except the two limits-dependent ones
+  // (limit, too_deep) must be refused by validateCanonical with exactly the
+  // manifest's expected_code. The FFI exposes no limits parameter, so those
+  // two need narrowed limits (max_nodes:1, max_depth:8) and are covered by
+  // the CLI's `conformance run` and the Rust suite instead. invalid_stream
+  // vectors are CLI-only: no stream decode exists in the FFI.
+  var invalidChecked = 0;
+  var invalidSkipped = 0;
+  for (final entry in cases) {
+    if (entry['kind'] != 'invalid') continue;
+    if (entry['name'] == 'limit' || entry['name'] == 'too_deep') {
+      invalidSkipped++;
+      continue;
+    }
+    final image = Image.fromFile('$root/${entry['path']}');
+    try {
+      image.validateCanonical();
+      throw StateError('${entry['name']}: invalid image was accepted');
+    } on ActiveInfinityException catch (error) {
+      if (error.code != entry['expected_code']) {
+        throw StateError('${entry['name']}: wrong code ${error.code}');
+      }
+    }
+    invalidChecked++;
+  }
+  final invalidTotal = cases.where((entry) => entry['kind'] == 'invalid').length;
+  if (invalidChecked + invalidSkipped != invalidTotal) {
+    throw StateError('invalid vectors were not exercised: $invalidChecked + $invalidSkipped of $invalidTotal');
+  }
+  if (invalidSkipped != 2) {
+    throw StateError('limits-dependent skips changed: $invalidSkipped');
+  }
+
   const source = 'port = 8080\nname = "dart"\n';
   final first = Image.fromActive(source, name: 'dart.active');
   final second = Image.fromActive(source, name: 'dart.active');

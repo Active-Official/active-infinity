@@ -20,6 +20,15 @@ function manifest_cases()
             for m in eachmatch(pattern, text)]
 end
 
+function manifest_invalid_cases()
+    text = read(joinpath(ROOT, "conformance", "manifest.json"), String)
+    # kind "invalid" (with the closing quote, so "invalid_stream" never
+    # matches) is followed by this case's name, path and expected_code.
+    pattern = r"\"kind\": \"invalid\"[\s\S]*?\"name\": \"([^\"]+)\"[\s\S]*?\"path\": \"([^\"]+)\"[\s\S]*?\"expected_code\": \"([^\"]+)\""
+    return [(String(m.captures[1]), String(m.captures[2]), String(m.captures[3]))
+            for m in eachmatch(pattern, text)]
+end
+
 function main()
     cases = manifest_cases()
     # INF-POLY-03: pin the exact count -- the manifest lists 5 valid
@@ -76,6 +85,37 @@ function main()
         end
         checked += 1
     end
+
+    # INF-POLY-02: every invalid vector except the two limits-dependent
+    # ones (limit, too_deep) must be refused by validate_canonical with
+    # exactly the manifest's expected_code. The FFI exposes no limits
+    # parameter, so those two need narrowed limits (max_nodes:1,
+    # max_depth:8) and are covered by the CLI's `conformance run` and the
+    # Rust suite instead. invalid_stream vectors are CLI-only: no stream
+    # decode exists in the FFI.
+    invalid_cases = manifest_invalid_cases()
+    length(invalid_cases) == 35 || error("the manifest must list exactly 35 invalid cases")
+    invalid_checked = 0
+    invalid_skipped = 0
+    for (name, path, expected) in invalid_cases
+        if name == "limit" || name == "too_deep"
+            invalid_skipped += 1
+            continue
+        end
+        data = read(joinpath(ROOT, path))
+        refused = false
+        try
+            validate_canonical(data)
+        catch failure
+            failure isa ActiveInfinityError || rethrow()
+            failure.code == expected || error("$name: wrong code $(failure.code)")
+            refused = true
+        end
+        refused || error("$name: invalid image was accepted")
+        invalid_checked += 1
+    end
+    invalid_checked + invalid_skipped == 35 || error("the manifest invalid vectors were not exercised")
+    invalid_skipped == 2 || error("the limits-dependent skips changed")
 
     source = "port = 8080\nname = \"julia\"\n"
     first = from_active(source, "julia.active")

@@ -212,6 +212,45 @@ func main() throws {
         throw ActiveInfinityError.failure(code: "infinity/manifest", status: -1)
     }
 
+    // INF-POLY-02: every invalid vector except the two limits-dependent
+    // ones (limit, too_deep) must be refused by validateCanonical with
+    // exactly the manifest's expected_code. The FFI exposes no limits
+    // parameter, so those two need narrowed limits (max_nodes:1,
+    // max_depth:8) and are covered by the CLI's `conformance run` and the
+    // Rust suite instead. invalid_stream vectors are CLI-only: no stream
+    // decode exists in the FFI.
+    var invalidChecked = 0
+    var invalidSkipped = 0
+    for entry in cases {
+        guard entry["kind"] as? String == "invalid" else { continue }
+        guard let invalidName = entry["name"] as? String,
+              let invalidPath = entry["path"] as? String,
+              let expectedCode = entry["expected_code"] as? String else {
+            throw ActiveInfinityError.failure(code: "infinity/manifest", status: -1)
+        }
+        if invalidName == "limit" || invalidName == "too_deep" {
+            invalidSkipped += 1
+            continue
+        }
+        let invalidImage = try Image.fromFile("\(root)/\(invalidPath)")
+        do {
+            try invalidImage.validateCanonical()
+            throw ActiveInfinityError.failure(code: "infinity/accepted", status: -1)
+        } catch let error as ActiveInfinityError {
+            if case let .failure(code, _) = error, code != expectedCode {
+                throw ActiveInfinityError.failure(code: "infinity/wrong-code", status: -1)
+            }
+        }
+        invalidChecked += 1
+    }
+    let invalidTotal = cases.filter { $0["kind"] as? String == "invalid" }.count
+    guard invalidChecked + invalidSkipped == invalidTotal else {
+        throw ActiveInfinityError.failure(code: "infinity/manifest", status: -1)
+    }
+    guard invalidSkipped == 2 else {
+        throw ActiveInfinityError.failure(code: "infinity/manifest", status: -1)
+    }
+
     let source = "port = 8080\nname = \"swift\"\n"
     let first = try Image.fromActive(source, name: "swift.active")
     let second = try Image.fromActive(source, name: "swift.active")

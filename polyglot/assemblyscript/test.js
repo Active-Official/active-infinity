@@ -103,6 +103,36 @@ async function main() {
 	const valid = manifest.cases.filter((entry) => entry.kind === "valid").length;
 	assert.strictEqual(checked, valid, "the manifest exercised valid vectors");
 
+	// INF-POLY-02: every invalid vector except the two limits-dependent
+	// ones (limit, too_deep) must be refused by validateCanonical with
+	// exactly the manifest's expected_code. The WASM binding exposes no
+	// limits parameter, so those two need narrowed limits (max_nodes:1,
+	// max_depth:8) and are covered by the CLI's `conformance run` and the
+	// Rust suite instead. invalid_stream vectors are CLI-only: no stream
+	// decode exists in the FFI. validateCanonical returns -1 on refusal
+	// and the code is read back through the reference lastError.
+	let invalidChecked = 0;
+	let invalidSkipped = 0;
+	for (const entry of manifest.cases) {
+		if (entry.kind !== "invalid") continue;
+		if (entry.name === "limit" || entry.name === "too_deep") {
+			invalidSkipped += 1;
+			continue;
+		}
+		const image = new Uint8Array(fs.readFileSync(path.join(ROOT, entry.path)));
+		const pointer = alloc(image);
+		assert.strictEqual(exports.validateCanonical(pointer, image.length), -1, entry.name);
+		assert.strictEqual(reference.lastError(), entry.expected_code, entry.name);
+		invalidChecked += 1;
+	}
+	const invalidTotal = manifest.cases.filter((entry) => entry.kind === "invalid").length;
+	assert.strictEqual(
+		invalidChecked + invalidSkipped,
+		invalidTotal,
+		"the manifest exercised invalid vectors",
+	);
+	assert.strictEqual(invalidSkipped, 2, "limits-dependent skips changed");
+
 	// A capacity smaller than the result must return -2 with the required size
 	// and must not write into the caller's buffer.
 	{

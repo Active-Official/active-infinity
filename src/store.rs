@@ -38,10 +38,18 @@ const STALE_SCRATCH: Duration = Duration::from_secs(24 * 60 * 60);
 #[derive(Debug, Clone)]
 pub struct Store {
     root: PathBuf,
-    /// Device/inode (or volume/file index) captured when the store was opened.
-    /// Every write re-checks it: a root swapped for a symlink or another
-    /// directory after validation must not receive objects.
+    /// Device/inode captured when the store was opened (Unix only; see
+    /// [`root_identity`]). Every write re-checks it: a root swapped for a
+    /// symlink or another directory after validation must not receive objects.
+    /// On non-Unix the root pin ([`Store::pin`]) does the same job.
     root_id: Option<(u64, u64)>,
+    /// Blake3 digest of the root pin token (non-Unix only). Windows has no
+    /// stable file identity on stable Rust, so the store pins its root with
+    /// a per-directory token file instead (see `read_pin` below). The digest,
+    /// not the token, is held: a debug dump of the store must not print the
+    /// token.
+    #[cfg(not(unix))]
+    pin: Option<[u8; 32]>,
     /// Scratch slot counter, seeded from the clock so a planted run of slot
     /// names cannot exhaust the attempt budget. The names are not a secret:
     /// they are only ever opened with `create_new`, so an occupied name costs a
@@ -54,7 +62,12 @@ impl Store {
     ///
     /// A root that is a symbolic link or not a directory is refused: following
     /// a link would let whoever controls the link choose where objects land.
-    /// The directory is created owner-only on Unix.
+    /// The directory is created owner-only on Unix. On non-Unix the store
+    /// also pins its root with a token file (`.active-store-pin`) created at
+    /// open: every write re-checks it, so a directory swapped in at the same
+    /// path after open is refused. The token is a tripwire, not a kernel
+    /// identity — a whole-directory copy carries it along, so a copied root
+    /// is not detected; see `read_pin` below.
     pub fn open(root: impl Into<PathBuf>) -> Result<Self> {
         let root = root.into();
         let identity = match fs::symlink_metadata(&root) {
@@ -80,9 +93,16 @@ impl Store {
             }
             Err(_) => return Err(Error::Store("cannot inspect store directory")),
         };
+        #[cfg(not(unix))]
+        let pin = {
+            ensure_pin_file(&root);
+            read_pin(&root)
+        };
         let store = Self {
             root,
             root_id: identity,
+            #[cfg(not(unix))]
+            pin,
             scratch: Arc::new(AtomicU64::new(scratch_seed())),
         };
         store.sweep_stale_scratch();
@@ -266,6 +286,16 @@ impl Store {
         }
         if let (Some(expected), Some(actual)) = (self.root_id, root_identity(&meta)) {
             if expected != actual {
+                return Err(Error::Store("store root changed since it was opened"));
+            }
+        }
+        #[cfg(not(unix))]
+        if let Some(expected) = self.pin {
+            // The pin file is gone, torn or different: the directory at the
+            // path is not the one this store was opened on. Fail closed —
+            // "no pin file" and "a swapped-in fresh directory" look the
+            // same, and only the first could be repaired by re-pinning.
+            if read_pin(&self.root) != Some(expected) {
                 return Err(Error::Store("store root changed since it was opened"));
             }
         }
@@ -464,17 +494,133 @@ fn root_identity(meta: &fs::Metadata) -> Option<(u64, u64)> {
 
 #[cfg(windows)]
 fn root_identity(_meta: &fs::Metadata) -> Option<(u64, u64)> {
-    // The Windows file index/volume serial metadata is still unstable
-    // (`windows_by_handle`). The per-write re-check still refuses a root
-    // replaced by a symbolic link or a non-directory; a directory swapped for
-    // another directory at the same path is caught by the OS ACL model, not by
-    // an inode pin.
+    // There is no file-index identity on stable Rust:
+    // `MetadataExt::file_index` and `volume_serial_number` are nightly-only
+    // (`windows_by_handle`, rust-lang/rust#63010), and this crate forbids
+    // `unsafe` code, so the Win32 `GetFileInformationByHandle` route is
+    // closed too. The store pins its root with a per-directory token file
+    // instead (see `read_pin`); a directory swapped for another directory
+    // at the same path is NOT caught by the OS ACL model — the verifier's
+    // `w6_swap` reproduction proved an open store split its objects across
+    // two directories with no error. The object-level `read_bounded`
+    // identity check below is Unix-only for the same reason; there it is
+    // mitigated by the bounded read plus the content-hash re-validation in
+    // `get`.
     None
 }
 
 #[cfg(not(any(unix, windows)))]
 fn root_identity(_meta: &fs::Metadata) -> Option<(u64, u64)> {
+    // Same position as Windows: no stable file identity, so the root pin
+    // (`read_pin`) does the job instead.
     None
+}
+
+/// Name of the root pin file (non-Unix only). It is not an object, a
+/// signature or a scratch file, so `len`, `sweep_stale_scratch` and `get`
+/// never touch it.
+#[cfg(not(unix))]
+const PIN_NAME: &str = ".active-store-pin";
+/// Length of a root pin token, in bytes.
+#[cfg(not(unix))]
+const PIN_LEN: usize = 32;
+/// Re-reads of a pin file that is being written by a concurrent open.
+#[cfg(not(unix))]
+const PIN_READ_RETRIES: usize = 8;
+
+/// Path of the root pin file.
+#[cfg(not(unix))]
+fn pin_path(root: &Path) -> PathBuf {
+    root.join(PIN_NAME)
+}
+
+/// A fresh root pin token: 32 unpredictable bytes.
+///
+/// The token is a tripwire, not a key — anyone who can read the store
+/// directory can read the token, and a whole-directory copy carries it
+/// along. Its only job is that a fresh directory at the same path does not
+/// hold the same bytes. Time, process id and a per-open sequence (the same
+/// entropy the scratch slots use) mixed under Blake3 are enough for that;
+/// no new randomness dependency is needed.
+#[cfg(not(unix))]
+fn pin_token() -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"active-infinity store root pin v1");
+    for _ in 0..4 {
+        hasher.update(&scratch_seed().to_le_bytes());
+    }
+    *hasher.finalize().as_bytes()
+}
+
+/// Read the root pin token's Blake3 digest, if the pin file is a complete
+/// regular file holding exactly [`PIN_LEN`] bytes.
+///
+/// Any fault — absent, a link or directory, too long, too short, unreadable —
+/// is `None`, never an error: a malformed pin file means "no usable pin",
+/// and the caller decides what that means. A short file is re-read a few
+/// times first: a concurrent open may still be writing it, and a single
+/// 32-byte write lands within microseconds.
+#[cfg(not(unix))]
+fn read_pin(root: &Path) -> Option<[u8; 32]> {
+    let path = pin_path(root);
+    for _ in 0..PIN_READ_RETRIES {
+        match read_bounded(&path, PIN_LEN as u64) {
+            Ok(bytes) if bytes.len() == PIN_LEN => {
+                return Some(*blake3::hash(&bytes).as_bytes());
+            }
+            Ok(_) => continue,
+            Err(_) => return None,
+        }
+    }
+    None
+}
+
+/// Write a fresh pin token into a file created with `create_new`.
+/// Returns true when the pin file is complete; a failed write removes the
+/// torn file so a later open can try again.
+#[cfg(not(unix))]
+fn write_pin_file(path: &Path) -> bool {
+    match create_new_file(path) {
+        Ok(mut file) => {
+            let token = pin_token();
+            if file
+                .write_all(&token)
+                .and_then(|()| file.sync_all())
+                .is_err()
+            {
+                drop(file);
+                let _ = fs::remove_file(path);
+                false
+            } else {
+                true
+            }
+        }
+        Err(_) => false,
+    }
+}
+
+/// Create the root pin file if the root has none, best-effort.
+///
+/// `Store::open` calls this before adopting the pin, so every handle that
+/// opens a writable root carries a pin from birth. A read-only root simply
+/// stays unpinned — its writes would fail at the filesystem anyway — and
+/// `open` never fails because the pin could not be created.
+///
+/// A torn create (a process that died between `create_new` and the write)
+/// leaves a short file that would block pinning forever: when the exclusive
+/// create loses the race to a short file, the short file is removed and the
+/// create retried once. A complete pin file is never touched.
+#[cfg(not(unix))]
+fn ensure_pin_file(root: &Path) {
+    let path = pin_path(root);
+    if write_pin_file(&path) {
+        return;
+    }
+    let short = read_bounded(&path, PIN_LEN as u64).is_ok_and(|bytes| bytes.len() != PIN_LEN);
+    if short {
+        let _ = fs::remove_file(&path);
+        let _ = write_pin_file(&path);
+    }
 }
 
 #[cfg(unix)]

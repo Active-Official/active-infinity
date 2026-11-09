@@ -68,3 +68,59 @@ fn signed_store_object_verifies_and_rejects_tampering() {
     tampered[last] ^= 0x01;
     assert!(SignedImage::from_bytes(&tampered).is_err());
 }
+
+fn module2() -> InfinityModule {
+    let mut module = InfinityModule::new();
+    let name = module.push(Inode::Str("stored-2".into()));
+    let secret = module.push(Inode::Secret(active_infinity::SecretBytes::from(
+        "store-canary-2",
+    )));
+    let root = module.push(Inode::Table {
+        fields: vec![("name".into(), name), ("secret".into(), secret)],
+    });
+    module.set_root(Some(root));
+    module
+}
+
+/// XPL-INF-03: a store opened on one directory must refuse to write into
+/// another directory swapped in at the same path. On Unix the (dev, ino) pin
+/// catches the swap; on Windows the root pin file must catch it. The
+/// verifier's `w6_swap` reproduction (an open store split its objects across
+/// two directories with no error) is the fail-before shape.
+#[test]
+fn store_refuses_writes_after_its_root_is_swapped() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let root = directory.path().join("store");
+    let store = Store::open(&root).expect("store");
+    let image = encode(&module()).expect("encode");
+    let image2 = encode(&module2()).expect("encode 2");
+    let hash = store.put(&image).expect("put 1");
+    assert!(store.contains(&hash));
+    // A second handle opened on the same root adopts the same pin.
+    let store2 = Store::open(&root).expect("store 2");
+    // Swap the root for a fresh directory at the same path.
+    let moved = directory.path().join("store-old");
+    std::fs::rename(&root, &moved).expect("rename old root away");
+    std::fs::create_dir(&root).expect("fresh root");
+    let error = store
+        .put(&image2)
+        .expect_err("a swapped root must refuse writes");
+    assert_eq!(error.code(), "infinity/store");
+    assert!(
+        error.to_string().contains("store root changed"),
+        "error: {error}"
+    );
+    let error = store2
+        .put(&image2)
+        .expect_err("an adopted pin must also refuse");
+    assert_eq!(error.code(), "infinity/store");
+    assert!(
+        error.to_string().contains("store root changed"),
+        "error: {error}"
+    );
+    // Nothing landed in the fresh directory.
+    assert_eq!(store.len(), 0);
+    // The first object is still intact in the moved directory.
+    let reopened = Store::open(&moved).expect("reopen moved root");
+    assert_eq!(reopened.get(&hash).expect("get from moved root"), image);
+}

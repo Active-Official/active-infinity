@@ -45,6 +45,18 @@
 
 ### Fixed
 
+- **A swapped store root is refused on Windows (XPL-INF-03).** `Store::open`
+  pinned the root directory by (device, inode) only on Unix; on Windows the
+  check was skipped, so an open store silently split its objects across two
+  directories when the root was replaced. A Windows file-index identity is
+  not available on stable Rust (`MetadataExt::file_index` /
+  `volume_serial_number` are nightly-only behind `windows_by_handle`, and
+  the crate forbids `unsafe` code), so the store now pins its root with a
+  per-directory token file (`.active-store-pin`) created at open and
+  re-checked on every write. A whole-directory copy carries the token along,
+  so a copied root is still not detected — a real file-index pin needs a
+  minimal `unsafe` carve-out or the stabilization of `windows_by_handle`.
+
 - **`--sign-file` refuses unverifiable seed files on non-Unix (INF-CLI-02 / XPL-INF-04).**
   The seed-file permission check (`mode & 0o077`) was `#[cfg(unix)]`-only,
   so on Windows a world-readable signing seed was silently accepted and

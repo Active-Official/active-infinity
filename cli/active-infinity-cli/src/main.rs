@@ -200,7 +200,7 @@ fn store_root(flags: &BTreeMap<String, String>) -> Result<String, String> {
 }
 
 fn store_command(args: &[String]) -> Result<(), String> {
-    let usage = "usage: store put <image> [--root DIR] [--sign SEED_HEX --i-accept-argv-key-leak | --sign-file PATH]\n       store get <hash> [--root DIR] [--output PATH] [--verify] [--key PUBLIC_HEX]\n       store signature <hash> [--root DIR]";
+    let usage = "usage: store put <image> [--root DIR] [--sign SEED_HEX --i-accept-argv-key-leak | --sign-file PATH [--allow-insecure-seed]]\n       store get <hash> [--root DIR] [--output PATH] [--verify] [--key PUBLIC_HEX]\n       store signature <hash> [--root DIR]";
     let (positional, flags) = split_args(&args[1..])?;
     let action = positional.first().ok_or_else(|| usage.to_string())?;
     match action.as_str() {
@@ -212,6 +212,7 @@ fn store_command(args: &[String]) -> Result<(), String> {
                     "--sign",
                     "--sign-file",
                     "--i-accept-argv-key-leak",
+                    "--allow-insecure-seed",
                 ],
                 usage,
             )?;
@@ -327,7 +328,8 @@ fn split_args(args: &[String]) -> Result<(Vec<String>, BTreeMap<String, String>)
             }
             let boolean = key == "--decompress"
                 || key == "--verify"
-                || key == "--i-accept-argv-key-leak";
+                || key == "--i-accept-argv-key-leak"
+                || key == "--allow-insecure-seed";
             if !boolean {
                 match args.get(index + 1) {
                     Some(value) if !value.starts_with("--") => {
@@ -1118,16 +1120,36 @@ fn signing_seed(flags: &BTreeMap<String, String>) -> Result<Option<[u8; 32]>, St
         }
         // A seed file readable by other users is a leaked seed. Refuse it
         // rather than sign and warn (audit AI-02).
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mode = std::fs::metadata(path)
-                .map_err(|error| format!("usage: --sign-file: {error}"))?
-                .permissions()
-                .mode();
-            if mode & 0o077 != 0 {
+        if flags.contains_key("--allow-insecure-seed") {
+            // The caller accepts the exposure explicitly (the same shape
+            // as --i-accept-argv-key-leak): say so on stderr, or the
+            // signed object hides that its seed was exposed.
+            eprintln!("warning: --allow-insecure-seed was passed; the seed file may be readable by other users");
+        } else {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mode = std::fs::metadata(path)
+                    .map_err(|error| format!("usage: --sign-file: {error}"))?
+                    .permissions()
+                    .mode();
+                if mode & 0o077 != 0 {
+                    return Err(
+                        "usage: --sign-file must not be readable by group or other (chmod 600)"
+                            .to_string(),
+                    );
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                // No permission check exists on this platform: Rust's std
+                // exposes no ACL API, and this codebase forbids unsafe
+                // code (AGENTS.md), so a Windows DACL check cannot be
+                // written here. Refuse rather than sign from a file whose
+                // permissions cannot be verified (INF-CLI-02 / XPL-INF-04);
+                // the flag above is the explicit escape hatch.
                 return Err(
-                    "usage: --sign-file must not be readable by group or other (chmod 600)"
+                    "usage: --sign-file cannot verify the seed file is private on this platform; pass --allow-insecure-seed when you accept that the seed may be readable by other users"
                         .to_string(),
                 );
             }
@@ -1224,13 +1246,16 @@ usage: active-infinity-cli <command> [options]
       Print the Blake3 content hash over canonical bytes.
   stream <stream.ains>
       Reassemble an AINS stream and print its hash.
-  store put <image.ainf> [--root DIR] [--sign SEED_HEX --i-accept-argv-key-leak | --sign-file PATH]
+  store put <image.ainf> [--root DIR] [--sign SEED_HEX --i-accept-argv-key-leak | --sign-file PATH [--allow-insecure-seed]]
   store get <hash> [--root DIR] [--output PATH] [--verify] [--key PUBLIC_HEX]
   store signature <hash> [--root DIR]
       Content-addressed local store (default root .active-store). --sign keeps a
       detached Ed25519 envelope next to the object; prefer --sign-file or
       ACTIVE_INFINITY_SIGN_SEED because a seed on argv is visible to other
-      processes. --verify requires an envelope and --key pins the signer.
+      processes. --sign-file refuses a seed file other users can read;
+      where the platform cannot check that, --allow-insecure-seed accepts
+      the exposure explicitly. --verify requires an envelope and --key pins
+      the signer.
       `signature` prints the stored key and hash.
   dict train --output <dict> [--size N] <sample>...
   dict apply --dictionary <dict> [--decompress] [--level N] [--max-bytes N] [--output PATH] <input>

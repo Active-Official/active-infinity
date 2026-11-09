@@ -45,6 +45,18 @@
 
 ### Fixed
 
+- **`--sign-file` refuses unverifiable seed files on non-Unix (INF-CLI-02 / XPL-INF-04).**
+  The seed-file permission check (`mode & 0o077`) was `#[cfg(unix)]`-only,
+  so on Windows a world-readable signing seed was silently accepted and
+  used to sign — and a default-created file on Windows is already readable
+  by every local user. The CLI now refuses `--sign-file` on platforms
+  where the check cannot be performed unless `--allow-insecure-seed` is
+  passed, which warns on stderr that the seed may be readable by other
+  users. A Windows DACL check was considered and rejected: Rust's std
+  exposes no ACL API, and this codebase forbids unsafe code, so no safe
+  in-process check exists. The Unix mode check is unchanged. Not
+  hash-affecting.
+
 - **Stream Delta `PutNode` fragments are charged for their decoded payload bytes (INF-05).**
   The decoder's decoded-bytes charge for a fragment was `node_count x
   (size_of::<Inode>() + 32) + table_entries x 40`, which counts nodes and

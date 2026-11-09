@@ -46,6 +46,24 @@ fn write(path: &Path, bytes: &[u8]) {
     fs::write(path, bytes).expect("write");
 }
 
+/// Grant Everyone read on a seed file (Windows only). Uses the SID form
+/// (`*S-1-1-0`), which is locale-independent — the account name
+/// "Everyone" is localized (e.g. "Todos" on a Spanish install).
+#[cfg(windows)]
+fn grant_everyone_read(path: &Path) {
+    let output = Command::new("icacls")
+        .arg(path)
+        .arg("/grant")
+        .arg("*S-1-1-0:R")
+        .output()
+        .expect("spawn icacls");
+    assert!(
+        output.status.success(),
+        "icacls grant failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 #[test]
 fn help_lists_every_command_with_examples() {
     let output = run(&["help"]);
@@ -581,7 +599,11 @@ fn a_signing_seed_can_come_from_a_file() {
         fs::set_permissions(&seed_path, fs::Permissions::from_mode(0o600)).expect("mode");
     }
 
-    let put = run(&[
+    // On Windows the CLI cannot verify a seed file's permissions, so
+    // signing from a file needs the explicit --allow-insecure-seed flag
+    // (INF-CLI-02). The refusal itself is covered by
+    // `a_world_readable_seed_file_is_refused_on_windows`.
+    let mut argv: Vec<&str> = vec![
         "store",
         "put",
         image_path.to_str().expect("utf8"),
@@ -589,7 +611,10 @@ fn a_signing_seed_can_come_from_a_file() {
         store.to_str().expect("utf8"),
         "--sign-file",
         seed_path.to_str().expect("utf8"),
-    ]);
+    ];
+    #[cfg(windows)]
+    argv.push("--allow-insecure-seed");
+    let put = run(&argv);
     assert!(put.status.success(), "{}", stderr(&put));
     let hash = stdout(&put).trim().to_string();
 
@@ -1326,6 +1351,75 @@ fn a_world_readable_seed_file_is_refused() {
         seed_path.to_str().expect("utf8"),
     ]);
     assert!(output.status.success(), "{}", stderr(&output));
+}
+
+/// A signing seed file readable by other users is refused on Windows too
+/// (INF-CLI-02 / XPL-INF-04). The Unix mode check has no Windows
+/// equivalent — Rust's std exposes no ACL API and this codebase forbids
+/// unsafe code — so the CLI refuses `--sign-file` unless
+/// `--allow-insecure-seed` is passed.
+#[cfg(windows)]
+#[test]
+fn a_world_readable_seed_file_is_refused_on_windows() {
+    let dir = sandbox("seed-acl");
+    let path = dir.join("image.ainf");
+    write(&path, &image(10));
+    let seed_path = dir.join("seed.txt");
+    write(&seed_path, &("02".repeat(32).into_bytes()));
+    grant_everyone_read(&seed_path);
+    let root = dir.join("store");
+    let output = run(&[
+        "store",
+        "put",
+        path.to_str().expect("utf8"),
+        "--root",
+        root.to_str().expect("utf8"),
+        "--sign-file",
+        seed_path.to_str().expect("utf8"),
+    ]);
+    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+    assert!(stderr(&output).contains("readable"), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("--allow-insecure-seed"),
+        "the refusal must name the escape hatch: {}",
+        stderr(&output)
+    );
+    assert!(!root.exists(), "the refusal created the store root");
+}
+
+/// `--allow-insecure-seed` is the explicit escape hatch: a world-readable
+/// seed file signs when the caller accepts the exposure (INF-CLI-02).
+#[test]
+fn an_insecure_seed_flag_allows_a_world_readable_seed() {
+    let dir = sandbox("seed-flag");
+    let path = dir.join("image.ainf");
+    write(&path, &image(11));
+    let seed_path = dir.join("seed.txt");
+    write(&seed_path, &("03".repeat(32).into_bytes()));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&seed_path, fs::Permissions::from_mode(0o644)).expect("mode");
+    }
+    #[cfg(windows)]
+    grant_everyone_read(&seed_path);
+    let root = dir.join("store");
+    let output = run(&[
+        "store",
+        "put",
+        path.to_str().expect("utf8"),
+        "--root",
+        root.to_str().expect("utf8"),
+        "--sign-file",
+        seed_path.to_str().expect("utf8"),
+        "--allow-insecure-seed",
+    ]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("allow-insecure-seed"),
+        "the escape hatch must be announced on stderr: {}",
+        stderr(&output)
+    );
 }
 
 /// A hash is hex only: `from_str_radix` accepts a leading `+`.

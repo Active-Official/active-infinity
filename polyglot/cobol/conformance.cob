@@ -75,8 +75,8 @@ main-paragraph.
         by reference ws-manifest
         by value ws-manifest-length
         returning ws-total
-    if ws-total < 4
-        move "the manifest listed fewer than four valid cases" to ws-reason
+    if ws-total not = 5
+        move "the manifest must list exactly five valid cases" to ws-reason
         perform fail-now
     end-if
 
@@ -133,6 +133,16 @@ check-case.
             returning ws-status
         if ws-status not = 0
             move "validate refused a valid vector" to ws-reason
+            perform fail-now
+        end-if
+
+        *> INF-POLY-03: the binding surfaces validate_canonical.
+        call static "active_infinity_validate_canonical" using
+            by reference ws-image
+            by value ws-image-length
+            returning ws-status
+        if ws-status not = 0
+            move "validate_canonical refused a valid vector" to ws-reason
             perform fail-now
         end-if
 
@@ -232,6 +242,22 @@ check-non-canonical-refusals.
         by value ws-error-cap
     if ws-error(1:22) not = "infinity/not-canonical"
         move "content_hash refused with the wrong code" to ws-reason
+        perform fail-now
+    end-if
+    *> INF-POLY-03: the binding surfaces validate_canonical.
+    call static "active_infinity_validate_canonical" using
+        by reference ws-image
+        by value ws-image-length
+        returning ws-status
+    if ws-status = 0
+        move "non-canonical image passed validate_canonical" to ws-reason
+        perform fail-now
+    end-if
+    call static "ai_cobol_last_error" using
+        by reference ws-error
+        by value ws-error-cap
+    if ws-error(1:22) not = "infinity/not-canonical"
+        move "validate_canonical refused with the wrong code" to ws-reason
         perform fail-now
     end-if.
 

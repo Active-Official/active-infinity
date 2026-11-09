@@ -14,8 +14,10 @@ root <- normalizePath(file.path(here, "..", ".."))
 
 manifest <- paste(readLines(file.path(root, "conformance", "manifest.json"), warn = FALSE), collapse = "\n")
 blocks <- strsplit(manifest, '"kind": "valid"', fixed = TRUE)[[1]][-1]
-if (length(blocks) < 4) {
-  stop("the manifest must list at least four valid cases", call. = FALSE)
+# INF-POLY-03: pin the exact count -- the manifest lists 5 valid
+# vectors. A slack `< 4` let a dropped vector pass silently.
+if (length(blocks) != 5) {
+  stop("the manifest must list exactly five valid cases", call. = FALSE)
 }
 
 checked <- 0L
@@ -57,8 +59,21 @@ for (block in blocks) {
       }
     )
     if (!isTRUE(refused)) stop("a non-canonical image was hashed", call. = FALSE)
+    # INF-POLY-03: the binding surfaces ai_validate_canonical; it must
+    # refuse the non-canonical image with the same code.
+    refused <- tryCatch(
+      {
+        ai_validate_canonical(image)
+        FALSE
+      },
+      error = function(condition) {
+        grepl("infinity/not-canonical", condition$message, fixed = TRUE)
+      }
+    )
+    if (!isTRUE(refused)) stop("a non-canonical image passed validate_canonical", call. = FALSE)
   } else {
     ai_validate(image)
+    ai_validate_canonical(image)
     actual <- ai_content_hash_hex(image)
     if (!identical(actual, expected)) {
       stop(sprintf("%s: content hash %s, expected %s", name, actual, expected), call. = FALSE)

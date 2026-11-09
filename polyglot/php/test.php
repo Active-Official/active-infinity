@@ -53,8 +53,19 @@ foreach ($manifest['cases'] as $entry) {
                 throw new RuntimeException($entry['name'] . ': wrong code ' . $error->errorCode);
             }
         }
+        // INF-POLY-03: the binding surfaces validateCanonical; it must
+        // refuse the non-canonical image with the same code.
+        try {
+            $binding->validateCanonical($image);
+            throw new RuntimeException($entry['name'] . ': non-canonical image passed validateCanonical');
+        } catch (ActiveInfinityError $error) {
+            if ($error->errorCode !== 'infinity/not-canonical') {
+                throw new RuntimeException($entry['name'] . ': wrong code ' . $error->errorCode);
+            }
+        }
     } else {
         $binding->validate($image);
+        $binding->validateCanonical($image);
         if ($binding->contentHashHex($image) !== $entry['content_hash']) {
             throw new RuntimeException($entry['name'] . ': content hash mismatch');
         }
@@ -69,6 +80,13 @@ foreach ($manifest['cases'] as $entry) {
         throw new RuntimeException($entry['name'] . ': canonical bytes changed');
     }
     $checked++;
+}
+
+// INF-POLY-03: pin the exact count, derived from the manifest -- the test
+// used to have no floor at all, so an empty run could PASS.
+$valid = count(array_filter($manifest['cases'], fn ($entry) => $entry['kind'] === 'valid'));
+if ($checked !== $valid) {
+    throw new RuntimeException("valid vectors were not exercised: $checked of $valid");
 }
 
 $source = "port = 8080\nname = \"php\"\n";

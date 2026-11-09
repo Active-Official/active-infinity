@@ -24,6 +24,7 @@ const char *active_infinity_last_error(void);
 uint8_t *active_infinity_alloc(size_t len);
 void active_infinity_free(uint8_t *ptr, size_t len);
 int32_t active_infinity_validate(const uint8_t *ptr, size_t len);
+int32_t active_infinity_validate_canonical(const uint8_t *ptr, size_t len);
 int32_t active_infinity_content_hash(const uint8_t *ptr, size_t len, uint8_t *out32);
 int32_t active_infinity_reencode(const uint8_t *ptr, size_t len, uint8_t *out, size_t *out_len);
 int32_t active_infinity_from_active(const uint8_t *source, size_t source_len, const char *name, uint8_t *out, size_t *out_len);
@@ -51,6 +52,14 @@ C;
     {
         $this->checkWithInput($image, fn ($pointer, int $length) =>
             $this->ffi->active_infinity_validate($pointer, $length));
+    }
+
+    // INF-POLY-03: `validate` already proves the canonical form (INF-02);
+    // this states the requirement explicitly.
+    public function validateCanonical(string $image): void
+    {
+        $this->checkWithInput($image, fn ($pointer, int $length) =>
+            $this->ffi->active_infinity_validate_canonical($pointer, $length));
     }
 
     public function contentHash(string $image): string

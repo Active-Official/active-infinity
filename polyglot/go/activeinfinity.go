@@ -208,6 +208,24 @@ func (i *Instance) Validate(ctx context.Context, image []byte) error {
 	return i.check(ctx, int32(uint32(values[0])))
 }
 
+// ValidateCanonical proves the image is the canonical encoding of its
+// own content. Validate already proves this (INF-02); this states the
+// requirement explicitly. (INF-POLY-03)
+func (i *Instance) ValidateCanonical(ctx context.Context, image []byte) error {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	pointer, release, err := i.writeInput(ctx, image)
+	if err != nil {
+		return err
+	}
+	defer release()
+	values, err := i.module.ExportedFunction("active_infinity_validate_canonical").Call(ctx, uint64(pointer), uint64(len(image)))
+	if err != nil {
+		return err
+	}
+	return i.check(ctx, int32(uint32(values[0])))
+}
+
 // ContentHash returns the 32-byte Blake3 content hash.
 func (i *Instance) ContentHash(ctx context.Context, image []byte) ([]byte, error) {
 	i.mu.Lock()

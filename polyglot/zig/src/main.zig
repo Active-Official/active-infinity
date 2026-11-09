@@ -52,6 +52,9 @@ pub fn main(init: std.process.Init) !void {
     if (c.fread(image.ptr, 1, image.len, file) != image.len) std.process.exit(2);
 
     check(c.active_infinity_validate(image.ptr, image.len), "validate");
+    // INF-POLY-03: `validate` already proves the canonical form (INF-02);
+    // this states the requirement explicitly.
+    check(c.active_infinity_validate_canonical(image.ptr, image.len), "validate canonical");
 
     var hash: [32]u8 = undefined;
     check(c.active_infinity_content_hash(image.ptr, image.len, &hash), "content hash");

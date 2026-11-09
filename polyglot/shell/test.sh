@@ -70,8 +70,19 @@ while IFS=$'\t' read -r path expected_hash; do
       *infinity/not-canonical*) ;;
       *) echo "hash refused $path with the wrong code: $out" >&2; exit 1 ;;
     esac
+    # INF-POLY-03: the CLI surfaces validate-canonical; it must refuse
+    # the non-canonical image with the same code.
+    if out=$("$CLI" validate-canonical "$path" 2>&1); then
+      echo "non-canonical image passed validate-canonical: $path" >&2
+      exit 1
+    fi
+    case "$out" in
+      *infinity/not-canonical*) ;;
+      *) echo "validate-canonical refused $path with the wrong code: $out" >&2; exit 1 ;;
+    esac
   else
     "$CLI" validate "$path" >/dev/null
+    "$CLI" validate-canonical "$path" >/dev/null
     actual_hash=$("$CLI" hash "$path" | tr -d '\r')
     if [ "$actual_hash" != "$expected_hash" ]; then
       echo "content hash mismatch for $path: expected $expected_hash, got $actual_hash" >&2
@@ -81,8 +92,18 @@ while IFS=$'\t' read -r path expected_hash; do
   checked=$((checked + 1))
 done <<<"$rows"
 
-if [ "$checked" -lt 5 ]; then
-  echo "expected at least 5 valid vectors, saw $checked" >&2
+# INF-POLY-03: pin the exact count, derived from the manifest -- a
+# slack floor let a dropped vector pass silently.
+valid_count=$("$PY" - <<'PY'
+import json
+
+with open("conformance/manifest.json", encoding="utf-8") as handle:
+    manifest = json.load(handle)
+print(sum(1 for case in manifest["cases"] if case["kind"] == "valid"))
+PY
+)
+if [ "$checked" -ne "$valid_count" ]; then
+  echo "expected $valid_count valid vectors, saw $checked" >&2
   exit 1
 fi
 

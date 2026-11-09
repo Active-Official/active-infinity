@@ -49,8 +49,16 @@ async function main() {
 				(error) => error.code === "infinity/not-canonical",
 				`${entry.name}: contentHash must refuse a non-canonical image`,
 			);
+			// INF-POLY-03: the binding surfaces validateCanonical; it must
+			// refuse the non-canonical image with the same code.
+			assert.throws(
+				() => module.validateCanonical(image),
+				(error) => error.code === "infinity/not-canonical",
+				`${entry.name}: validateCanonical must refuse a non-canonical image`,
+			);
 		} else {
 			module.validate(image);
+			module.validateCanonical(image);
 			const hash = Buffer.from(module.contentHash(image)).toString("hex");
 			assert.strictEqual(hash, entry.content_hash, `${entry.name}: content hash`);
 		}
@@ -72,7 +80,10 @@ async function main() {
 		}
 		checked += 1;
 	}
-	assert.ok(checked >= 4, "the manifest exercised valid vectors");
+	// INF-POLY-03: pin the exact count, derived from the manifest -- a
+	// slack `>=` let a dropped vector pass silently.
+	const valid = manifest.cases.filter((entry) => entry.kind === "valid").length;
+	assert.strictEqual(checked, valid, "the manifest exercised valid vectors");
 
 	const source = 'port = 8080\nname = "js"\n';
 	const first = Buffer.from(module.fromActive(source, "js.active"));

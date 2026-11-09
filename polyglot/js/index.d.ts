@@ -10,6 +10,7 @@ export declare class ActiveInfinityError extends Error {
 export declare class ActiveInfinity {
 	static instantiate(bytes: Uint8Array | ArrayBuffer): Promise<ActiveInfinity>;
 	validate(bytes: Uint8Array | ArrayBuffer): true;
+	validateCanonical(bytes: Uint8Array | ArrayBuffer): true;
 	contentHash(bytes: Uint8Array | ArrayBuffer): Uint8Array;
 	reencode(bytes: Uint8Array | ArrayBuffer): Uint8Array;
 	fromActive(source: string | Uint8Array, name?: string): Uint8Array;

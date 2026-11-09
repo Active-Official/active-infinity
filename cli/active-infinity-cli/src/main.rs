@@ -64,6 +64,20 @@ fn run(args: Vec<String>) -> Result<(), String> {
             println!("ok nodes={} bytes={}", meta.nodes, bytes.len());
             Ok(())
         }
+        // INF-POLY-03: the shell binding surfaces `validate_canonical`
+        // explicitly, matching the FFI export. `validate` already proves
+        // the canonical form (INF-02); this states the requirement, so a
+        // script can ask "is this image canonical?" without re-encoding.
+        "validate-canonical" => {
+            let (positional, flags) = split_args(&args[1..])?;
+            check_flags(&flags, &[], "usage: validate-canonical <image.ainf>")?;
+            check_positional(&positional, 1, "usage: validate-canonical <image.ainf>")?;
+            let bytes = read(&positional[0])?;
+            let meta = validate_canonical(&bytes, Limits::default())
+                .map_err(|error| format!("{}: {}", error.code(), error))?;
+            println!("ok canonical nodes={} bytes={}", meta.nodes, bytes.len());
+            Ok(())
+        }
         "hash" => {
             let (positional, flags) = split_args(&args[1..])?;
             check_flags(&flags, &[], "usage: hash <image.ainf>")?;
@@ -1255,6 +1269,9 @@ usage: active-infinity-cli <command> [options]
       Validate, then print the redacted JSON projection (never secrets).
   validate <image.ainf>
       Fail-closed validation; prints node and byte counts.
+  validate-canonical <image.ainf>
+      Prove the image is the canonical encoding of its own content;
+      `validate` already proves this, this states it explicitly.
   hash <image.ainf>
       Print the Blake3 content hash over canonical bytes.
   stream <stream.ains>

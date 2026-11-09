@@ -177,6 +177,19 @@ function bind(reference, getAssemblyMemory) {
 					reference.free(input.pointer, input.length);
 				}
 			},
+			// INF-POLY-03: `validate` already proves the canonical form
+			// (INF-02); this states the requirement explicitly.
+			validate_canonical: (pointer, length) => {
+				const input = copyFromAs(pointer, length);
+				try {
+					return reference.exports.active_infinity_validate_canonical(
+						input.pointer,
+						input.length,
+					);
+				} finally {
+					reference.free(input.pointer, input.length);
+				}
+			},
 			content_hash: (pointer, length, output) => {
 				const input = copyFromAs(pointer, length);
 				try {

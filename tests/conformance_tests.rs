@@ -298,8 +298,11 @@ fn valid_vectors_validate_and_reencode_identically() {
 #[test]
 fn invalid_vectors_are_rejected_with_their_declared_code() {
     let entries = parse_index("invalid");
-    assert!(
-        entries.len() >= 33,
+    // INF-POLY-03: pin the exact count -- the manifest lists 35 invalid
+    // vectors. A slack `>=` let a dropped vector pass silently.
+    assert_eq!(
+        entries.len(),
+        35,
         "the invalid set must cover every byte-reachable validation class"
     );
     for entry in entries {
@@ -336,8 +339,11 @@ fn invalid_vectors_are_rejected_with_their_declared_code() {
 #[test]
 fn stream_vectors_are_rejected_with_their_declared_code() {
     let entries = parse_index("invalid_stream");
-    assert!(
-        entries.len() >= 9,
+    // INF-POLY-03: pin the exact count -- the manifest lists 10
+    // invalid_stream vectors. A slack `>=` let a dropped vector pass silently.
+    assert_eq!(
+        entries.len(),
+        10,
         "the stream set must cover every frame-layer class"
     );
     for entry in entries {

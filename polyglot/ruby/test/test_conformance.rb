@@ -29,8 +29,17 @@ manifest["cases"].each do |entry|
     rescue ActiveInfinity::Error => e
       raise "#{entry['name']}: wrong code #{e.code}" unless e.code == "infinity/not-canonical"
     end
+    # INF-POLY-03: the binding surfaces validate_canonical; it must refuse
+    # the non-canonical image with the same code.
+    begin
+      image.validate_canonical
+      raise "#{entry['name']}: non-canonical image passed validate_canonical"
+    rescue ActiveInfinity::Error => e
+      raise "#{entry['name']}: wrong code #{e.code}" unless e.code == "infinity/not-canonical"
+    end
   else
     image.validate
+    image.validate_canonical
     raise "#{entry['name']}: hash mismatch" unless image.content_hash_hex == entry["content_hash"]
   end
 
@@ -43,6 +52,11 @@ manifest["cases"].each do |entry|
   end
   checked += 1
 end
+
+# INF-POLY-03: pin the exact count, derived from the manifest -- the test
+# used to have no floor at all, so an empty run could PASS.
+valid = manifest["cases"].count { |entry| entry["kind"] == "valid" }
+raise "valid vectors were not exercised: #{checked} of #{valid}" unless checked == valid
 
 source = "port = 8080\nname = \"ruby\"\n"
 first = ActiveInfinity::Image.from_active(source, "ruby.active")

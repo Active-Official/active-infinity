@@ -9,6 +9,11 @@
 @external("active_infinity", "validate")
 declare function hostValidate(pointer: usize, length: usize): i32;
 
+// INF-POLY-03: `validate` already proves the canonical form (INF-02);
+// this states the requirement explicitly.
+@external("active_infinity", "validate_canonical")
+declare function hostValidateCanonical(pointer: usize, length: usize): i32;
+
 @external("active_infinity", "content_hash")
 declare function hostHash(pointer: usize, length: usize, output: usize): i32;
 
@@ -61,6 +66,10 @@ export function releaseAll(): void {
 
 export function validate(pointer: usize, length: i32): i32 {
   return hostValidate(pointer, length);
+}
+
+export function validateCanonical(pointer: usize, length: i32): i32 {
+  return hostValidateCanonical(pointer, length);
 }
 
 export function contentHash(pointer: usize, length: i32, output: usize): i32 {

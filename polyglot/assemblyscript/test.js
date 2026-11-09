@@ -60,8 +60,13 @@ async function main() {
 			assert.strictEqual(reference.lastError(), "infinity/not-canonical", entry.name);
 			assert.strictEqual(exports.contentHash(pointer, image.length, hash), -1, entry.name);
 			assert.strictEqual(reference.lastError(), "infinity/not-canonical", entry.name);
+			// INF-POLY-03: the shim surfaces validateCanonical; it must
+			// refuse the non-canonical image with the same code.
+			assert.strictEqual(exports.validateCanonical(pointer, image.length), -1, entry.name);
+			assert.strictEqual(reference.lastError(), "infinity/not-canonical", entry.name);
 		} else {
 			assert.strictEqual(exports.validate(pointer, image.length), 0, entry.name);
+			assert.strictEqual(exports.validateCanonical(pointer, image.length), 0, entry.name);
 			assert.strictEqual(exports.contentHash(pointer, image.length, hash), 0);
 			const hex = Buffer.from(memory().slice(hash, hash + 32)).toString("hex");
 			assert.strictEqual(hex, entry.content_hash, entry.name);
@@ -92,6 +97,11 @@ async function main() {
 		}
 		checked += 1;
 	}
+
+	// INF-POLY-03: pin the exact count, derived from the manifest -- the test
+	// used to have no floor at all, so an empty run could PASS.
+	const valid = manifest.cases.filter((entry) => entry.kind === "valid").length;
+	assert.strictEqual(checked, valid, "the manifest exercised valid vectors");
 
 	// A capacity smaller than the result must return -2 with the required size
 	// and must not write into the caller's buffer.

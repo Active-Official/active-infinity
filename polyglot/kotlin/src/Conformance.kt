@@ -43,8 +43,17 @@ fun main() {
             } catch (e: ActiveInfinity.Error) {
                 check(e.code() == "infinity/not-canonical") { "$path: wrong code ${e.code()}" }
             }
+            // INF-POLY-03: the binding surfaces validateCanonical; it must
+            // refuse the non-canonical image with the same code.
+            try {
+                ActiveInfinity.validateCanonical(image)
+                error("$path: non-canonical image passed validateCanonical")
+            } catch (e: ActiveInfinity.Error) {
+                check(e.code() == "infinity/not-canonical") { "$path: wrong code ${e.code()}" }
+            }
         } else {
             ActiveInfinity.validate(image)
+            ActiveInfinity.validateCanonical(image)
             val actual = ActiveInfinity.contentHashHex(image)
             check(actual == expected) { "$path: hash $actual, want $expected" }
         }
@@ -57,7 +66,10 @@ fun main() {
         }
         checked++
     }
-    check(checked >= 4) { "manifest vectors were not exercised" }
+    // INF-POLY-03: pin the exact count, derived from the manifest --
+    // a slack `>=` let a dropped vector pass silently.
+    val valid = Regex("\"kind\": \"valid\"").findAll(manifest).count()
+    check(checked == valid) { "manifest vectors were not exercised: $checked of $valid" }
 
     val source = "port = 8080\nname = \"kotlin\"\n"
     val first = ActiveInfinity.fromActive(source, "kotlin.active")

@@ -41,8 +41,17 @@ def main() -> int:
                 assert error.code == "infinity/not-canonical", case["name"]
             else:  # pragma: no cover
                 raise AssertionError("non-canonical image was hashed")
+            # INF-POLY-03: the binding surfaces validate_canonical; it must
+            # refuse the non-canonical image with the same code.
+            try:
+                image.validate_canonical()
+            except ai.ActiveInfinityError as error:
+                assert error.code == "infinity/not-canonical", case["name"]
+            else:  # pragma: no cover
+                raise AssertionError("non-canonical image passed validate_canonical")
         else:
             image.validate()
+            image.validate_canonical()
             assert image.content_hash_hex() == case["content_hash"], case["name"]
         canonical = image.reencode()
         if case["name"] == "non_canonical":
@@ -51,7 +60,11 @@ def main() -> int:
         else:
             assert canonical == image.data, case["name"]
         checked += 1
-    assert checked >= 4
+    # INF-POLY-03: pin the exact count, derived from the manifest --
+    # a slack `>=` let a dropped vector pass silently.
+    assert checked == len(
+        [case for case in manifest["cases"] if case["kind"] == "valid"]
+    )
 
     source = b'port = 8080\nname = "py"\n'
     first = ai.Image.from_active(source, "py.active")

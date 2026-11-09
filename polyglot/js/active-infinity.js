@@ -117,6 +117,19 @@ class ActiveInfinity {
 		return true;
 	}
 
+	/**
+	 * True when the image is the canonical encoding of its own content;
+	 * otherwise throws. `validate` already proves this (INF-02); this
+	 * states the requirement explicitly. (INF-POLY-03)
+	 */
+	validateCanonical(bytes) {
+		const status = this._withInput(bytes, (pointer, length) =>
+			this.exports.active_infinity_validate_canonical(pointer, length),
+		);
+		if (status !== 0) this._fail(status);
+		return true;
+	}
+
 	/** 32-byte Blake3 content hash of a valid image. */
 	contentHash(bytes) {
 		const hashPointer = this._alloc(32);

@@ -65,6 +65,8 @@ _lib.active_infinity_abi_version.restype = ctypes.c_uint32
 _lib.active_infinity_last_error.restype = ctypes.c_char_p
 _lib.active_infinity_validate.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
 _lib.active_infinity_validate.restype = ctypes.c_int32
+_lib.active_infinity_validate_canonical.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+_lib.active_infinity_validate_canonical.restype = ctypes.c_int32
 _lib.active_infinity_content_hash.argtypes = [
     ctypes.c_void_p,
     ctypes.c_size_t,
@@ -136,6 +138,14 @@ class Image:
     def validate(self) -> Image:
         buffer, length = _buffer(self.data)
         _check(_lib.active_infinity_validate(_pointer(buffer), length))
+        return self
+
+    def validate_canonical(self) -> Image:
+        # INF-POLY-03: `validate` already proves the canonical form
+        # (INF-02); this states the requirement explicitly, matching
+        # `active_infinity_validate_canonical` in the C ABI.
+        buffer, length = _buffer(self.data)
+        _check(_lib.active_infinity_validate_canonical(_pointer(buffer), length))
         return self
 
     def content_hash(self) -> bytes:

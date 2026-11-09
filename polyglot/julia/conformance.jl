@@ -22,7 +22,9 @@ end
 
 function main()
     cases = manifest_cases()
-    length(cases) >= 4 || error("the manifest must list at least four valid cases")
+    # INF-POLY-03: pin the exact count -- the manifest lists 5 valid
+    # vectors. A slack `>= 4` let a dropped vector pass silently.
+    length(cases) == 5 || error("the manifest must list exactly five valid cases")
     checked = 0
     for (name, path, expected) in cases
         data = read(joinpath(ROOT, path))
@@ -48,8 +50,20 @@ function main()
                 refused = true
             end
             refused || error("$name: non-canonical image was hashed")
+            # INF-POLY-03: the binding surfaces validate_canonical; it must
+            # refuse the non-canonical image with the same code.
+            refused = false
+            try
+                validate_canonical(data)
+            catch failure
+                failure isa ActiveInfinityError || rethrow()
+                failure.code == "infinity/not-canonical" || error("$name: wrong code $(failure.code)")
+                refused = true
+            end
+            refused || error("$name: non-canonical image passed validate_canonical")
         else
             validate(data)
+            validate_canonical(data)
             actual = content_hash_hex(data)
             actual == expected || error("$name: content hash $actual, expected $expected")
         end

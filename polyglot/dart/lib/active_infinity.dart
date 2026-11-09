@@ -47,6 +47,9 @@ class _Native {
       : validate = library
             .lookupFunction<_ValidateNative, _ValidateDart>(
                 'active_infinity_validate'),
+        validateCanonical = library
+            .lookupFunction<_ValidateNative, _ValidateDart>(
+                'active_infinity_validate_canonical'),
         hash = library.lookupFunction<_HashNative, _HashDart>(
             'active_infinity_content_hash'),
         reencode = library.lookupFunction<_OutputNative, _OutputDart>(
@@ -67,6 +70,9 @@ class _Native {
 
   final DynamicLibrary library;
   final _ValidateDart validate;
+  // INF-POLY-03: `validate` already proves the canonical form (INF-02);
+  // this states the requirement explicitly.
+  final _ValidateDart validateCanonical;
   final _HashDart hash;
   final _OutputDart reencode;
   final _OutputDart redactedJson;
@@ -123,6 +129,17 @@ class Image {
     final native = _open();
     _withInput(bytes, (pointer, length) {
       final status = native.validate(pointer, length);
+      if (status != 0) {
+        throw ActiveInfinityException(_lastError(native), status);
+      }
+    });
+    return this;
+  }
+
+  Image validateCanonical() {
+    final native = _open();
+    _withInput(bytes, (pointer, length) {
+      final status = native.validateCanonical(pointer, length);
       if (status != 0) {
         throw ActiveInfinityException(_lastError(native), status);
       }

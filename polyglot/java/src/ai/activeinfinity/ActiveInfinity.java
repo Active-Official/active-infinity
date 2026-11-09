@@ -53,6 +53,13 @@ public final class ActiveInfinity {
         check(Native.validate(image));
     }
 
+    // INF-POLY-03: `validate` already proves the canonical form (INF-02);
+    // this states the requirement explicitly.
+    public static void validateCanonical(byte[] image) {
+        checkAbi();
+        check(Native.validateCanonical(image));
+    }
+
     public static byte[] contentHash(byte[] image) {
         checkAbi();
         byte[] hash = new byte[32];

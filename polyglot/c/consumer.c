@@ -81,6 +81,14 @@ int main(int argc, char **argv) {
     return 1;
   }
 
+  /* INF-POLY-03: `validate` already proves the canonical form (INF-02);
+     this states the requirement explicitly. */
+  if (!expect(active_infinity_validate_canonical(image, len),
+              "validate canonical")) {
+    free(image);
+    return 1;
+  }
+
   uint8_t hash[32];
   if (!expect(active_infinity_content_hash(image, len, hash), "content hash")) {
     free(image);

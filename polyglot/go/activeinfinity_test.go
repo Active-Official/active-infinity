@@ -81,8 +81,18 @@ func TestConformance(t *testing.T) {
 			} else if failure, ok := err.(*Error); !ok || failure.Code != "infinity/not-canonical" {
 				t.Fatalf("%s: wrong code %v", entry.Name, err)
 			}
+			// INF-POLY-03: the binding surfaces ValidateCanonical; it must
+			// refuse the non-canonical image with the same code.
+			if err := instance.ValidateCanonical(ctx, image); err == nil {
+				t.Fatalf("%s: non-canonical image passed ValidateCanonical", entry.Name)
+			} else if failure, ok := err.(*Error); !ok || failure.Code != "infinity/not-canonical" {
+				t.Fatalf("%s: wrong code %v", entry.Name, err)
+			}
 		} else {
 			if err := instance.Validate(ctx, image); err != nil {
+				t.Fatalf("%s: %v", entry.Name, err)
+			}
+			if err := instance.ValidateCanonical(ctx, image); err != nil {
 				t.Fatalf("%s: %v", entry.Name, err)
 			}
 			hash, err := instance.ContentHashHex(ctx, image)
@@ -109,8 +119,16 @@ func TestConformance(t *testing.T) {
 		}
 		checked++
 	}
-	if checked < 4 {
-		t.Fatalf("checked %d vectors", checked)
+	// INF-POLY-03: pin the exact count, derived from the manifest -- a
+	// slack `>=` let a dropped vector pass silently.
+	valid := 0
+	for _, entry := range cases.Cases {
+		if entry.Kind == "valid" {
+			valid++
+		}
+	}
+	if checked != valid {
+		t.Fatalf("checked %d vectors, want %d", checked, valid)
 	}
 
 	first, err := instance.FromActive(ctx, []byte("port = 8080\nname = \"go\"\n"), "go.active")

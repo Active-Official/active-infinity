@@ -29,8 +29,15 @@ for path, expected in manifest:gmatch('"path"%s*:%s*"([^"]+)".-"content_hash"%s*
       assert(not ok_hash, "non-canonical image was hashed")
       assert(type(message_hash) == "table" and message_hash.code == "infinity/not-canonical",
              "wrong code: " .. tostring(message_hash.code))
+      -- INF-POLY-03: the binding surfaces validate_canonical; it must
+      -- refuse the non-canonical image with the same code.
+      local ok_canon, message_canon = pcall(function() ai.validate_canonical(image) end)
+      assert(not ok_canon, "non-canonical image passed validate_canonical")
+      assert(type(message_canon) == "table" and message_canon.code == "infinity/not-canonical",
+             "wrong code: " .. tostring(message_canon.code))
     else
       ai.validate(image)
+      ai.validate_canonical(image)
       local actual = ai.content_hash_hex(image)
       if actual ~= expected then
         error(string.format("%s: hash %s, want %s", path, actual, expected))
@@ -49,7 +56,10 @@ for path, expected in manifest:gmatch('"path"%s*:%s*"([^"]+)".-"content_hash"%s*
   end
 end
 
-assert(checked >= 4, "manifest vectors exercised")
+-- INF-POLY-03: pin the exact count, derived from the manifest -- a
+-- slack `>=` let a dropped vector pass silently.
+local _, valid = manifest:gsub('"kind": "valid"', "")
+assert(checked == valid, "manifest vectors exercised: " .. checked .. " of " .. valid)
 
 local source = 'port = 8080\nname = "lua"\n'
 local first = ai.from_active(source, "lua.active")

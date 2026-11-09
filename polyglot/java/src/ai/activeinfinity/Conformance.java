@@ -48,8 +48,19 @@ public final class Conformance {
                         throw new IllegalStateException(path + ": wrong code " + error.code());
                     }
                 }
+                // INF-POLY-03: the binding surfaces validateCanonical; it
+                // must refuse the non-canonical image with the same code.
+                try {
+                    ActiveInfinity.validateCanonical(image);
+                    throw new IllegalStateException(path + ": non-canonical image passed validateCanonical");
+                } catch (ActiveInfinity.Error error) {
+                    if (!error.code().equals("infinity/not-canonical")) {
+                        throw new IllegalStateException(path + ": wrong code " + error.code());
+                    }
+                }
             } else {
                 ActiveInfinity.validate(image);
+                ActiveInfinity.validateCanonical(image);
                 String actual = ActiveInfinity.contentHashHex(image);
                 if (!actual.equals(expected)) {
                     throw new IllegalStateException(path + ": hash " + actual + ", want " + expected);
@@ -66,8 +77,11 @@ public final class Conformance {
             }
             checked++;
         }
-        if (checked < 4) {
-            throw new IllegalStateException("manifest vectors were not exercised");
+        // INF-POLY-03: pin the exact count, derived from the manifest
+        // -- a slack `>=` let a dropped vector pass silently.
+        int valid = manifest.split("\"kind\": \"valid\"", -1).length - 1;
+        if (checked != valid) {
+            throw new IllegalStateException("manifest vectors were not exercised: " + checked + " of " + valid);
         }
 
         String source = "port = 8080\nname = \"java\"\n";

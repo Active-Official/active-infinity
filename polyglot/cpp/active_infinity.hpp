@@ -98,6 +98,15 @@ public:
     return *this;
   }
 
+  // INF-POLY-03: `validate` already proves the canonical form (INF-02);
+  // this states the requirement explicitly.
+  Image &validate_canonical() {
+    detail::check(
+        active_infinity_validate_canonical(bytes_.data(), bytes_.size()),
+        "validate canonical");
+    return *this;
+  }
+
   std::vector<uint8_t> content_hash() const {
     std::vector<uint8_t> hash(32);
     detail::check(

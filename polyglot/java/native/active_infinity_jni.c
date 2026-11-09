@@ -48,6 +48,23 @@ JNIEXPORT jint JNICALL Java_ai_activeinfinity_Native_validate(
   return (jint)status;
 }
 
+JNIEXPORT jint JNICALL Java_ai_activeinfinity_Native_validateCanonical(
+    JNIEnv *env, jclass clazz, jbyteArray image) {
+  (void)clazz;
+  if (image == NULL) {
+    return -1;
+  }
+  jsize length = (*env)->GetArrayLength(env, image);
+  jbyte *bytes = (*env)->GetByteArrayElements(env, image, NULL);
+  if (bytes == NULL) {
+    return -3;
+  }
+  int32_t status = active_infinity_validate_canonical((const uint8_t *)bytes,
+                                                      (size_t)length);
+  (*env)->ReleaseByteArrayElements(env, image, bytes, JNI_ABORT);
+  return (jint)status;
+}
+
 JNIEXPORT jint JNICALL Java_ai_activeinfinity_Native_hash(JNIEnv *env,
                                                           jclass clazz,
                                                           jbyteArray image,

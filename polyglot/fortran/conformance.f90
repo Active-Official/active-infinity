@@ -61,15 +61,22 @@ program conformance
       ! (INF-02), so a non-canonical image is refused; reencode repairs it.
       call expect_validate_refusal(image)
       call expect_hash_refusal(image)
+      ! INF-POLY-03: the binding surfaces validate_canonical; it must
+      ! refuse the non-canonical image with the same code.
+      call expect_canonical_refusal(image)
     else
       status = ai_validate(c_loc(image), int(size(image), c_size_t))
       if (status /= ai_ok) call fail("validate " // path)
+      status = ai_validate_canonical(c_loc(image), int(size(image), c_size_t))
+      if (status /= ai_ok) call fail("validate_canonical " // path)
       if (hash_hex(image) /= expected) call fail("content hash " // path)
     end if
     call check_reencode(image, trim(name))
     checked = checked + 1
   end do
-  if (checked < 4) call fail("the manifest listed fewer than four valid cases")
+  ! INF-POLY-03: pin the exact count -- the manifest lists 5 valid
+  ! vectors. A slack `< 4` let a dropped vector pass silently.
+  if (checked /= 5) call fail("the manifest must list exactly five valid cases")
 
   call check_from_active()
   call check_redaction()
@@ -156,6 +163,16 @@ contains
     if (status /= ai_invalid) call fail("non-canonical image was validated")
     call last_error_text(code)
     if (code /= "infinity/not-canonical") call fail("wrong code for validate: " // code)
+  end subroutine
+
+  subroutine expect_canonical_refusal(data)
+    integer(c_int8_t), allocatable, target, intent(in) :: data(:)
+    integer(c_int32_t) :: status
+    character(len=:), allocatable :: code
+    status = ai_validate_canonical(c_loc(data), int(size(data), c_size_t))
+    if (status /= ai_invalid) call fail("non-canonical image passed validate_canonical")
+    call last_error_text(code)
+    if (code /= "infinity/not-canonical") call fail("wrong code for validate_canonical: " // code)
   end subroutine
 
   subroutine expect_hash_refusal(data)

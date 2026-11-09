@@ -34,8 +34,17 @@ void main() {
       } on ActiveInfinityException catch (error) {
         if (error.code != 'infinity/not-canonical') rethrow;
       }
+      // INF-POLY-03: the binding surfaces validateCanonical; it must refuse
+      // the non-canonical image with the same code.
+      try {
+        image.validateCanonical();
+        throw StateError('${entry['name']}: non-canonical image passed validateCanonical');
+      } on ActiveInfinityException catch (error) {
+        if (error.code != 'infinity/not-canonical') rethrow;
+      }
     } else {
       image.validate();
+      image.validateCanonical();
       if (image.contentHashHex() != entry['content_hash']) {
         throw StateError('${entry['name']}: content hash mismatch');
       }
@@ -50,6 +59,13 @@ void main() {
       throw StateError('${entry['name']}: canonical bytes changed');
     }
     checked++;
+  }
+
+  // INF-POLY-03: pin the exact count, derived from the manifest -- the test
+  // used to have no floor at all, so an empty run could PASS.
+  final valid = cases.where((entry) => entry['kind'] == 'valid').length;
+  if (checked != valid) {
+    throw StateError('valid vectors were not exercised: $checked of $valid');
   }
 
   const source = 'port = 8080\nname = "dart"\n';

@@ -36,6 +36,9 @@ internal static class Native
     internal static extern int active_infinity_validate(IntPtr pointer, nuint length);
 
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int active_infinity_validate_canonical(IntPtr pointer, nuint length);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
     internal static extern int active_infinity_content_hash(IntPtr pointer, nuint length, IntPtr output);
 
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
@@ -84,6 +87,17 @@ public sealed class Image
     public Image Validate()
     {
         WithInput(pointer => Native.active_infinity_validate(pointer, (nuint)Bytes.Length));
+        return this;
+    }
+
+    /// <summary>
+    /// Prove the image is the canonical encoding of its own content.
+    /// <see cref="Validate"/> already proves this (INF-02); this states
+    /// the requirement explicitly. (INF-POLY-03)
+    /// </summary>
+    public Image ValidateCanonical()
+    {
+        WithInput(pointer => Native.active_infinity_validate_canonical(pointer, (nuint)Bytes.Length));
         return this;
     }
 

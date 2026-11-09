@@ -41,8 +41,18 @@ object Conformance {
             case error: ActiveInfinity.Error =>
               require(error.code() == "infinity/not-canonical", s"$path: wrong code ${error.code()}")
           }
+          // INF-POLY-03: the binding surfaces validateCanonical; it must
+          // refuse the non-canonical image with the same code.
+          try {
+            ActiveInfinity.validateCanonical(image)
+            throw new IllegalStateException(path + ": non-canonical image passed validateCanonical")
+          } catch {
+            case error: ActiveInfinity.Error =>
+              require(error.code() == "infinity/not-canonical", s"$path: wrong code ${error.code()}")
+          }
         } else {
           ActiveInfinity.validate(image)
+          ActiveInfinity.validateCanonical(image)
           val actual = ActiveInfinity.contentHashHex(image)
           require(actual == expected, s"$path: hash $actual, want $expected")
         }
@@ -56,7 +66,10 @@ object Conformance {
         checked += 1
       }
     }
-    require(checked >= 4, "manifest vectors were not exercised")
+    // INF-POLY-03: pin the exact count, derived from the manifest --
+    // a slack `>=` let a dropped vector pass silently.
+    val valid = "\"kind\": \"valid\"".r.findAllIn(manifest).length
+    require(checked == valid, s"manifest vectors were not exercised: $checked of $valid")
 
     val source = "port = 8080\nname = \"scala\"\n"
     val first = ActiveInfinity.fromActive(source, "scala.active")

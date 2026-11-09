@@ -61,6 +61,14 @@ struct Image {
         }
     }
 
+    // INF-POLY-03: `validate` already proves the canonical form (INF-02);
+    // this states the requirement explicitly.
+    func validateCanonical() throws {
+        try withInput { pointer, length in
+            try Image.check(active_infinity_validate_canonical(pointer, length))
+        }
+    }
+
     func contentHash() throws -> [UInt8] {
         var hash = [UInt8](repeating: 0, count: 32)
         try withInput { pointer, length in
@@ -168,8 +176,19 @@ func main() throws {
                     throw error
                 }
             }
+            // INF-POLY-03: the binding surfaces validateCanonical; it must
+            // refuse the non-canonical image with the same code.
+            do {
+                try image.validateCanonical()
+                throw ActiveInfinityError.failure(code: "infinity/accepted", status: -1)
+            } catch let error as ActiveInfinityError {
+                if case let .failure(code, _) = error, code != "infinity/not-canonical" {
+                    throw error
+                }
+            }
         } else {
             try image.validate()
+            try image.validateCanonical()
             if try image.contentHashHex() != expected {
                 throw ActiveInfinityError.failure(code: "infinity/\(name)-hash", status: -1)
             }
@@ -184,6 +203,13 @@ func main() throws {
             throw ActiveInfinityError.failure(code: "infinity/\(name)-bytes", status: -1)
         }
         checked += 1
+    }
+
+    // INF-POLY-03: pin the exact count, derived from the manifest -- the
+    // test used to have no floor at all, so an empty run could PASS.
+    let valid = cases.filter { $0["kind"] as? String == "valid" }.count
+    guard checked == valid else {
+        throw ActiveInfinityError.failure(code: "infinity/manifest", status: -1)
     }
 
     let source = "port = 8080\nname = \"swift\"\n"

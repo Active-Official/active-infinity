@@ -24,6 +24,10 @@ private class Abi {
     val free: CPointer<CFunction<(CPointer<UByteVar>?, ULong) -> Unit>> = symbol("active_infinity_free")
     val validate: CPointer<CFunction<(CPointer<UByteVar>?, ULong) -> Int>> =
         symbol("active_infinity_validate")
+    // INF-POLY-03: `validate` already proves the canonical form (INF-02);
+    // this states the requirement explicitly.
+    val validateCanonical: CPointer<CFunction<(CPointer<UByteVar>?, ULong) -> Int>> =
+        symbol("active_infinity_validate_canonical")
     val hash: CPointer<CFunction<(CPointer<UByteVar>?, ULong, CPointer<UByteVar>?) -> Int>> =
         symbol("active_infinity_content_hash")
     val reencode: CPointer<CFunction<(CPointer<UByteVar>?, ULong, CPointer<UByteVar>?, CPointer<ULongVar>?) -> Int>> =
@@ -189,9 +193,20 @@ fun main() {
                     check(lastError(abi) == "infinity/not-canonical") { "$path: wrong code ${lastError(abi)}" }
                 }
             }
+            // INF-POLY-03: the binding surfaces validateCanonical; it must
+            // refuse the non-canonical image with the same code.
+            withInput(abi, image) { pointer, length ->
+                val status = abi.validateCanonical(pointer, length)
+                if (status == 0) error("$path: non-canonical image passed validateCanonical")
+                check(lastError(abi) == "infinity/not-canonical") { "$path: wrong code ${lastError(abi)}" }
+            }
         } else {
             withInput(abi, image) { pointer, length ->
                 val status = abi.validate(pointer, length)
+                if (status != 0) failure(abi, status)
+            }
+            withInput(abi, image) { pointer, length ->
+                val status = abi.validateCanonical(pointer, length)
                 if (status != 0) failure(abi, status)
             }
 
@@ -222,7 +237,10 @@ fun main() {
         }
         checked++
     }
-    check(checked >= 4) { "manifest vectors not exercised" }
+    // INF-POLY-03: pin the exact count, derived from the manifest --
+    // a slack `>=` let a dropped vector pass silently.
+    val valid = Regex("\"kind\": \"valid\"").findAll(manifest).count()
+    check(checked == valid) { "manifest vectors not exercised: $checked of $valid" }
 
     val source = "port = 8080\nname = \"kotlin-native\"\n".encodeToByteArray()
     val first = fromActive(abi, source, "kn.active")

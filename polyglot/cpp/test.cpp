@@ -17,6 +17,9 @@ int main(int argc, char **argv) {
   try {
     auto image = active_infinity::Image::from_file(argv[1]);
     image.validate();
+    // INF-POLY-03: `validate` already proves the canonical form (INF-02);
+    // this states the requirement explicitly.
+    image.validate_canonical();
     auto hash = image.content_hash_hex();
     std::printf("hash=%s\n", hash.c_str());
     auto canonical = image.reencode();

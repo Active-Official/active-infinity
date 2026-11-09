@@ -41,6 +41,7 @@ module ActiveInfinity
   attach_function :active_infinity_alloc, [:size_t], :pointer
   attach_function :active_infinity_free, %i[pointer size_t], :void
   attach_function :active_infinity_validate, %i[pointer size_t], :int32
+  attach_function :active_infinity_validate_canonical, %i[pointer size_t], :int32
   attach_function :active_infinity_content_hash, %i[pointer size_t pointer], :int32
   attach_function :active_infinity_reencode, %i[pointer size_t pointer pointer], :int32
   attach_function :active_infinity_from_active,
@@ -112,6 +113,15 @@ module ActiveInfinity
     def validate
       ActiveInfinity.with_buffer(@bytes) do |input, length|
         ActiveInfinity.check(ActiveInfinity.active_infinity_validate(input, length))
+      end
+      self
+    end
+
+    # INF-POLY-03: `validate` already proves the canonical form (INF-02);
+    # this states the requirement explicitly.
+    def validate_canonical
+      ActiveInfinity.with_buffer(@bytes) do |input, length|
+        ActiveInfinity.check(ActiveInfinity.active_infinity_validate_canonical(input, length))
       end
       self
     end

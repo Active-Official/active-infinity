@@ -64,8 +64,17 @@ async function main(): Promise<void> {
 					error instanceof ActiveInfinityError &&
 					error.code === "infinity/not-canonical",
 			);
+			// INF-POLY-03: the binding surfaces validateCanonical; it must
+			// refuse the non-canonical image with the same code.
+			assert.throws(
+				() => binding.validateCanonical(image),
+				(error: unknown) =>
+					error instanceof ActiveInfinityError &&
+					error.code === "infinity/not-canonical",
+			);
 		} else {
 			binding.validate(image);
+			binding.validateCanonical(image);
 			const hash = Buffer.from(binding.contentHash(image)).toString("hex");
 			assert.strictEqual(hash, entry.content_hash, entry.name);
 		}
@@ -81,6 +90,11 @@ async function main(): Promise<void> {
 		}
 		checked += 1;
 	}
+
+	// INF-POLY-03: pin the exact count, derived from the manifest -- the test
+	// used to have no floor at all, so an empty run could PASS.
+	const valid = manifest.cases.filter((entry) => entry.kind === "valid").length;
+	assert.strictEqual(checked, valid, "the manifest exercised valid vectors");
 
 	const source = 'port = 8080\nname = "ts"\n';
 	const first = binding.fromActive(source, "ts.active");

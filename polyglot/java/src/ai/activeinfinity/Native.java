@@ -14,6 +14,10 @@ final class Native {
 
     static native int validate(byte[] image);
 
+    // INF-POLY-03: `validate` already proves the canonical form (INF-02);
+    // this states the requirement explicitly.
+    static native int validateCanonical(byte[] image);
+
     static native int hash(byte[] image, byte[] output);
 
     static native int reencode(byte[] image, byte[] output, int[] outLength);

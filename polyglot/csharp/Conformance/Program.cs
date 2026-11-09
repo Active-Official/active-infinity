@@ -1,3 +1,4 @@
+using System.Linq;
 using System.Text.Json;
 using ActiveInfinity;
 
@@ -58,10 +59,25 @@ foreach (JsonElement entry in manifest.RootElement.GetProperty("cases").Enumerat
                 throw new Exception($"{name}: wrong code {error.Code}");
             }
         }
+        // INF-POLY-03: the binding surfaces ValidateCanonical; it must
+        // refuse the non-canonical image with the same code.
+        try
+        {
+            image.ValidateCanonical();
+            throw new Exception($"{name}: non-canonical image passed ValidateCanonical");
+        }
+        catch (ActiveInfinityException error)
+        {
+            if (error.Code != "infinity/not-canonical")
+            {
+                throw new Exception($"{name}: wrong code {error.Code}");
+            }
+        }
     }
     else
     {
         image.Validate();
+        image.ValidateCanonical();
 
         string expected = entry.GetProperty("content_hash").GetString()!;
         if (image.ContentHashHex() != expected)
@@ -84,6 +100,15 @@ foreach (JsonElement entry in manifest.RootElement.GetProperty("cases").Enumerat
         throw new Exception($"{name}: canonical bytes changed");
     }
     checkedCases += 1;
+}
+
+// INF-POLY-03: pin the exact count, derived from the manifest -- the test
+// used to have no floor at all, so an empty run could PASS.
+int validCases = manifest.RootElement.GetProperty("cases").EnumerateArray()
+    .Count(entry => entry.GetProperty("kind").GetString() == "valid");
+if (checkedCases != validCases)
+{
+    throw new Exception($"valid vectors were not exercised: {checkedCases} of {validCases}");
 }
 
 string source = "port = 8080\nname = \"csharp\"\n";

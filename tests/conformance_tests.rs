@@ -24,8 +24,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use active_infinity::{
-    decode, encode, validate_canonical, validate_with, DecodeOpts, InfinityView, Limits,
-    StreamDecoder,
+    decode, decode_with, encode, validate_canonical, validate_with, DecodeOpts, InfinityView,
+    Limits, StreamDecoder,
 };
 
 /// Failure classes that no input image can trigger, with the reason.
@@ -156,8 +156,13 @@ impl Entry {
     }
 
     fn decode_opts(&self) -> DecodeOpts {
+        // Non-canonical vectors deliberately exercise the lenient path: they
+        // must decode (the encoder drops their slack on re-encode), so they
+        // opt out of the canonical proof explicitly (INF-02). Canonical
+        // vectors use the strict default.
         DecodeOpts {
             limits: self.limits(),
+            verify_canonical: self.is_canonical(),
             ..DecodeOpts::default()
         }
     }
@@ -258,8 +263,8 @@ fn valid_vectors_validate_and_reencode_identically() {
         assert_eq!(meta.strings, expected_strings, "{name} string count");
         assert_eq!(meta.blobs, expected_blobs, "{name} blob count");
 
-        let module =
-            decode(&bytes).unwrap_or_else(|error| panic!("{name} must decode, got {error:?}"));
+        let module = decode_with(&bytes, entry.decode_opts())
+            .unwrap_or_else(|error| panic!("{name} must decode, got {error:?}"));
 
         let view = InfinityView::new(&bytes, limits).expect("view");
         assert_eq!(view.node_count(), meta.nodes, "{name} view nodes");

@@ -609,6 +609,17 @@ pub struct DecodeOpts {
     /// Prove that the image is exactly the canonical encoding of its own
     /// content. This is unconditional: an unflagged image fails, because the
     /// canonical encoding of its content carries the canonical flag.
+    /// On by default (INF-02): every untrusted-input entry point (`decode`,
+    /// `validate`, `decode_provenance`, `decode_annotations`,
+    /// `content_hash`) proves canonicality, so a structurally valid image
+    /// carrying slack (unreferenced strings/blobs/types) or a false
+    /// `FLAG_CANONICAL` is refused with `infinity/not-canonical` instead of
+    /// being silently accepted and re-addressed on re-encode. Trusted or
+    /// migration paths that must accept slack set this to `false`
+    /// explicitly (`DecodeOpts { verify_canonical: false, .. }`) — the
+    /// opt-out is deliberate and auditable. The proof re-encodes once inside
+    /// validation; its allocation is bounded by `Limits::max_decoded_bytes`
+    /// (INF-01), so the proof cannot itself become a decode bomb.
     pub verify_canonical: bool,
 }
 
@@ -617,13 +628,18 @@ impl Default for DecodeOpts {
         Self {
             limits: Limits::default(),
             verify_hash: true,
-            verify_canonical: false,
+            // Canonicality is proven by default (INF-02): the default path
+            // is the untrusted-input path. `paranoid()` differs only by
+            // using the strict limits.
+            verify_canonical: true,
         }
     }
 }
 
 impl DecodeOpts {
-    /// Everything on: the profile for untrusted network input.
+    /// Everything on, with strict limits: the profile for untrusted network
+    /// input. `DecodeOpts::default()` also proves canonicality (INF-02);
+    /// `paranoid()` adds the tight `Limits::strict()` ceilings.
     pub fn paranoid() -> Self {
         Self {
             limits: Limits::strict(),

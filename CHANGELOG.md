@@ -4,6 +4,18 @@
 
 ### Fixed
 
+- **Canonical form is proven by default (INF-02, INF-CLI-01, NF-W5-01).**
+  `DecodeOpts::default()` now sets `verify_canonical: true`, so `decode`,
+  `validate`, `decode_provenance`, `decode_annotations` and `content_hash`
+  refuse a structurally valid image that is not exactly the canonical encoding
+  of its own content (`infinity/not-canonical`) instead of silently accepting
+  it and re-addressing it on re-encode. This also fixes the CLI `validate`,
+  `decode` and `bench validate` commands, which use the default options.
+  Trusted or migration paths that must accept slack opt out explicitly with
+  `DecodeOpts { verify_canonical: false, .. }`; the conformance suite's
+  non-canonical vectors do exactly that. `DecodeOpts::paranoid()` is
+  unchanged (canonical proof plus strict limits).
+
 - **Decode amplification is bounded (INF-01, R2-INF-DEC-01).** `decode_validated`
   now refuses an image whose materialised form would exceed the new
   `Limits::max_decoded_bytes` (default 256 MiB, `Limits::strict()` 1 MiB),

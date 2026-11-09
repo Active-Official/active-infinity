@@ -7,9 +7,9 @@
 
 use active_infinity::{
     content_hash, decode, encode, error::Error, hash_image, stream, validate, validate_canonical,
-    AnnotationKind, Constraint, DecodeOpts, EncodeOpts, InfinityModule, InfinityView, Inode,
-    Limits, PatchOp, ProvEntry, ProvValue, Provenance, SchemaFieldSpec, SecretBytes, SemanticTag,
-    TypeSpec, UnitTag,
+    validate_with, AnnotationKind, Constraint, DecodeOpts, EncodeOpts, InfinityModule,
+    InfinityView, Inode, Limits, PatchOp, ProvEntry, ProvValue, Provenance, SchemaFieldSpec,
+    SecretBytes, SemanticTag, TypeSpec, UnitTag,
 };
 
 fn fixture() -> InfinityModule {
@@ -607,7 +607,20 @@ fn validator_rejects_cycles_and_unreachable_nodes() {
 fn encode_without_canonical_flag_still_validates() {
     let module = fixture();
     let bytes = encode_with_no_flags(&module);
-    let meta = validate(&bytes).expect("valid image");
+    // The unflagged image is structurally valid (lenient check), but the
+    // default `validate()` now also proves canonicality (INF-02), so it
+    // refuses the unflagged image; the old "still validates" premise was
+    // the INF-02 vulnerability itself.
+    let error = validate(&bytes).expect_err("default validate refuses an unflagged image");
+    assert_eq!(error.code(), "infinity/not-canonical");
+    let meta = validate_with(
+        &bytes,
+        DecodeOpts {
+            verify_canonical: false,
+            ..DecodeOpts::default()
+        },
+    )
+    .expect("valid image");
     assert_eq!(meta.flags & active_infinity::FLAG_CANONICAL, 0);
     assert!(meta.nodes > 0);
 }
@@ -651,7 +664,14 @@ fn canonical_proof_is_unconditional() {
     let hash = hash_image(&unflagged).unwrap();
     unflagged[16..48].copy_from_slice(&hash);
 
-    validate(&unflagged).expect("structure is still valid");
+    validate_with(
+        &unflagged,
+        DecodeOpts {
+            verify_canonical: false,
+            ..DecodeOpts::default()
+        },
+    )
+    .expect("structure is still valid");
     let error = validate_canonical(&unflagged, Limits::default())
         .expect_err("an unflagged image is not the canonical encoding");
     assert_eq!(error.code(), "infinity/not-canonical");

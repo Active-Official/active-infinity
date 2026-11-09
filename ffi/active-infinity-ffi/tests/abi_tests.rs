@@ -297,17 +297,28 @@ fn success_reports_ok_after_a_failure() {
 }
 
 #[test]
-fn validate_canonical_is_stricter_than_validate() {
+fn validate_and_validate_canonical_both_refuse_non_canonical() {
+    // INF-02: `validate()` now proves canonicality by default, so it no
+    // longer accepts a structurally valid but non-canonical image where
+    // `validate_canonical()` refused it; both entry points refuse the
+    // vector with `infinity/not-canonical`, and both accept a canonical one.
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../tests/vectors/invalid/not_canonical.ainf");
     let bytes = std::fs::read(path).expect("vector");
     // SAFETY: the vector is readable.
-    let structural = unsafe { active_infinity_validate(bytes.as_ptr(), bytes.len()) };
-    assert_eq!(structural, 0, "{}", last_error());
+    let plain = unsafe { active_infinity_validate(bytes.as_ptr(), bytes.len()) };
+    assert_eq!(plain, -1);
+    assert_eq!(last_error(), "infinity/not-canonical");
     // SAFETY: the vector is readable.
     let canonical = unsafe { active_infinity_validate_canonical(bytes.as_ptr(), bytes.len()) };
     assert_eq!(canonical, -1);
     assert_eq!(last_error(), "infinity/not-canonical");
+    // SAFETY: the canonical vector is readable.
+    let good = vector("empty.ainf");
+    let plain = unsafe { active_infinity_validate(good.as_ptr(), good.len()) };
+    assert_eq!(plain, 0, "{}", last_error());
+    let canonical = unsafe { active_infinity_validate_canonical(good.as_ptr(), good.len()) };
+    assert_eq!(canonical, 0, "{}", last_error());
 }
 
 #[test]
@@ -453,14 +464,15 @@ fn a_hostile_length_is_refused_before_the_slice() {
 }
 
 /// The FFI hash is the byte identity: it equals the stored header hash and the
-/// reference `content_hash`, for a canonical image and for a non-canonical one
-/// whose bytes are still valid. Every language in the matrix hashes the same
-/// bytes to the same value.
+/// reference `content_hash` for a canonical image. Every language in the matrix
+/// hashes the same bytes to the same value. A non-canonical image is refused
+/// by both (INF-02): the hash is the identity of canonical bytes, not of any
+/// structurally valid encoding.
 #[test]
 fn content_hash_matches_the_reference_for_any_valid_image() {
     use active_infinity_ffi::active_infinity_content_hash;
 
-    for name in ["full.ainf", "non_canonical.ainf"] {
+    for name in ["full.ainf"] {
         let bytes = vector(name);
         let mut hash = [0u8; 32];
         // SAFETY: the buffer is readable and `hash` is 32 writable bytes.
@@ -472,6 +484,17 @@ fn content_hash_matches_the_reference_for_any_valid_image() {
             active_infinity::content_hash(&bytes).expect("reference")
         );
     }
+    // The non-canonical vector is refused, not hashed: the FFI and the
+    // reference agree on the refusal as well as on the value.
+    let bytes = vector("non_canonical.ainf");
+    let mut hash = [0u8; 32];
+    // SAFETY: the buffer is readable and `hash` is 32 writable bytes.
+    let status =
+        unsafe { active_infinity_content_hash(bytes.as_ptr(), bytes.len(), hash.as_mut_ptr()) };
+    assert_eq!(status, -1);
+    assert_eq!(last_error(), "infinity/not-canonical");
+    let error = active_infinity::content_hash(&bytes).expect_err("reference refuses");
+    assert_eq!(error.code(), "infinity/not-canonical");
 }
 
 /// `alloc` and `free` are primitives: a binding may call them between a failed

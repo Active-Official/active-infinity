@@ -2822,11 +2822,16 @@ fn section_end(
 
 /// Validate a buffer with the default options.
 ///
-/// This proves structural validity and the stored hash. It does **not** prove
-/// the canonical form: an image can carry a sorted but unreferenced string,
-/// blob or type entry, which the decoder drops and `validate_canonical` (or
-/// `DecodeOpts::paranoid()`) rejects by re-encoding. Use the canonical proof
-/// whenever the bytes themselves are evidence (dedup, signatures, caching).
+/// This proves structural validity, the stored hash, and the canonical form
+/// (INF-02): the image must be exactly the canonical encoding of its own
+/// content, proved by decoding and re-encoding inside validation. A
+/// structurally valid image carrying slack (a sorted but unreferenced string,
+/// blob or type entry the decoder would drop) or a false `canonical` flag is
+/// refused with `infinity/not-canonical`, so content addressing, dedup,
+/// caching and signatures keyed on the hash are stable across a
+/// decode/encode round trip. Use `validate_with` with
+/// `DecodeOpts { verify_canonical: false, .. }` for the lenient
+/// structural-only check on trusted or migration input.
 pub fn validate(buf: &[u8]) -> Result<Meta> {
     Validated::new(buf, crate::layout::DecodeOpts::default()).map(|validated| validated.meta())
 }

@@ -12,8 +12,8 @@
 //! accounting ever regresses to counting direct references only.
 
 use active_infinity::{
-    decode, decode_with, encode, validate, DecodeOpts, InfinityModule, Inode, Limits, ProvEntry,
-    ProvValue, Provenance, SchemaFieldSpec, SecretBytes, TypeSpec, UnitTag,
+    decode, decode_with, encode, validate, validate_with, DecodeOpts, InfinityModule, Inode,
+    Limits, ProvEntry, ProvValue, Provenance, SchemaFieldSpec, SecretBytes, TypeSpec, UnitTag,
 };
 
 /// `DecodeOpts` identical to the default except for the decoded-bytes budget.
@@ -64,7 +64,20 @@ fn inf01_shared_string_refused_at_default_budget() {
         "image must stay small: {}",
         image.len()
     );
-    validate(&image).expect("the bomb image is structurally valid");
+    // The bomb image is structurally valid (lenient check). The default
+    // `validate()` now also runs the canonical proof (INF-02), and the proof
+    // is itself budget-bounded (INF-01): it refuses with the same Limit
+    // instead of materialising 327 MB to prove the image — the proof cannot
+    // become a decode bomb.
+    validate_with(
+        &image,
+        DecodeOpts {
+            verify_canonical: false,
+            ..DecodeOpts::default()
+        },
+    )
+    .expect("the bomb image is structurally valid");
+    assert_limit(&validate(&image).expect_err("default validate must refuse"));
     assert_limit(&decode(&image).expect_err("default decode must refuse"));
 }
 

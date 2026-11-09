@@ -477,17 +477,24 @@ Consequences, all tested:
 ### 6.1 Proving canonical form
 
 The `canonical` flag is a **claim by the writer**, not a fact a parser can take
-on trust. Structural validation never decodes and re-encodes, because that would
-double the work an attacker can force with a single request; canonicality is
-therefore an explicit, separate proof:
+on trust. Canonicality is proved by decoding and re-encoding and comparing
+bytes; the proof is on by default (INF-02), so the default entry points
+(`decode`, `validate`, `decode_provenance`, `decode_annotations`,
+`content_hash`) refuse a structurally valid image that is not exactly the
+canonical encoding of its own content (`infinity/not-canonical`). The proof's
+allocation is bounded by `Limits::max_decoded_bytes` (INF-01), so the extra
+work an attacker can force with a single request is capped instead of open.
 
-- `validate` / `validate_with` check structure, ranges, ordering, reachability,
-  acyclicity, depth and the content hash. They accept a structurally valid image
-  whose bytes are not the canonical encoding of their own content.
-- `validate_canonical` (or `DecodeOpts { verify_canonical: true, .. }`) decodes,
-  re-encodes and compares. A declared-canonical image that differs is
-  `infinity/not-canonical`. `DecodeOpts::paranoid()` enables this together with
-  the strict limits, and is the profile for untrusted network input.
+- `validate` proves structure, ranges, ordering, reachability, acyclicity,
+  depth, the content hash, and the canonical form.
+- `validate_with` with `DecodeOpts { verify_canonical: false, .. }` is the
+  lenient structural-only check, for trusted or migration input that must
+  accept slack. It accepts a structurally valid image whose bytes are not the
+  canonical encoding of their own content.
+- `validate_canonical` (or `DecodeOpts { verify_canonical: true, .. }`) is the
+  explicit form of the proof. A declared-canonical image that differs is
+  `infinity/not-canonical`. `DecodeOpts::paranoid()` enables the proof together
+  with the strict limits, and is the profile for untrusted network input.
 
 An image produced by this crate's encoder is always canonical, so a receiver
 that re-encodes before storing or forwarding never propagates a lie. A receiver

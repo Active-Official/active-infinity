@@ -438,7 +438,17 @@ fn the_store_refuses_a_non_canonical_image() {
     )
     .expect("encode without the canonical flag");
     assert_ne!(canonical, unmarked);
-    validate(&unmarked).expect("the unmarked image is structurally valid");
+    // The unmarked image is structurally valid (lenient check); the default
+    // `validate()` now also proves canonicality (INF-02), so it refuses the
+    // unmarked image with `infinity/not-canonical` before the store does.
+    validate_with(
+        &unmarked,
+        DecodeOpts {
+            verify_canonical: false,
+            ..DecodeOpts::default()
+        },
+    )
+    .expect("the unmarked image is structurally valid");
 
     let root = std::env::temp_dir().join(format!(
         "inf-store-{}-{}",

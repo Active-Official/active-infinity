@@ -52,7 +52,9 @@ of a real tagged release:
 ## Reproducible builds
 
 Inputs are pinned (`Cargo.lock`, `--locked`, `rust-version`, the stable
-toolchain action). Bit-identical binaries are not claimed: rustc embeds paths and
+toolchain action pinned to its commit SHA — every `uses:` in
+`.github/workflows/*.yml` is a full 40-hex SHA, enforced by the `pin-lint`
+job in `ci.yml`). Bit-identical binaries are not claimed: rustc embeds paths and
 the standard library build. A verifier checks out the tag, builds with
 `--locked`, and compares behavior; the release job's logs retain
 `cargo --version` and `rustc --version`.

@@ -1,4 +1,10 @@
 name: Fuzz nightly
+# Action pins (R2-CI-01): every `uses:` in this file is pinned to a full
+# 40-hex commit SHA, never a floating tag. SHAs for actions also used by
+# active-rpc are copied verbatim from that repo's workflows; the rest are
+# the upstream tag's commit at pin time (version in the trailing comment).
+# The `pin-lint` job in ci.yml fails CI if any pin drifts; pins are kept
+# current by Dependabot (`.github/dependabot.yml`, github-actions ecosystem).
 
 # Longer campaigns than the per-push job in CI. Failures upload the crashing
 # input and the grown corpus so the next run starts ahead.
@@ -12,12 +18,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 150
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@nightly
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: dtolnay/rust-toolchain@2c76c034f9e32a5d6e2c104dc4df23a22476db04 # nightly
       - name: Install clang (libFuzzer runtime)
         run: sudo apt-get update && sudo apt-get install -y clang
       - name: Install cargo-fuzz
-        run: cargo install cargo-fuzz --locked
+        run: cargo install cargo-fuzz --version 0.13.2 --locked
       - name: Campaign (ten minutes per target)
         env:
           FUZZ_SECONDS: "600"
@@ -46,7 +52,7 @@ jobs:
           exit "$status"
       - name: Upload artifacts and corpus
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4
         with:
           name: fuzz-nightly
           path: |

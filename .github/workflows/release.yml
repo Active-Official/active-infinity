@@ -1,4 +1,10 @@
 name: Release
+# Action pins (R2-CI-01): every `uses:` in this file is pinned to a full
+# 40-hex commit SHA, never a floating tag. SHAs for actions also used by
+# active-rpc are copied verbatim from that repo's workflows; the rest are
+# the upstream tag's commit at pin time (version in the trailing comment).
+# The `pin-lint` job in ci.yml fails CI if any pin drifts; pins are kept
+# current by Dependabot (`.github/dependabot.yml`, github-actions ecosystem).
 
 # A tag is the release trigger. This job re-runs the gates on the tagged commit,
 # generates the CycloneDX SBOM for the exact locked graph, and attaches it to the
@@ -21,10 +27,10 @@ jobs:
   release:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           components: rustfmt, clippy
       - name: Resolve the tag

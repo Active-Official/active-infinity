@@ -1,0 +1,12 @@
+# Dependabot (R2-CI-01): keeps the SHA-pinned GitHub Actions in
+# `.github/workflows/*.yml` current. A stale pin is worse than a floating
+# tag if nobody updates it, so the pin pass is paired with this updater
+# plus the `pin-lint` job in `ci.yml`, which fails CI if any `uses:`
+# drifts back to a floating tag. Dependabot opens PRs that bump the SHA
+# (keeping the trailing version comment); each PR re-runs CI.
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"

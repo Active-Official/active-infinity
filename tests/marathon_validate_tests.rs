@@ -495,10 +495,15 @@ fn provenance_cloning_is_bounded_before_it_allocates() {
     }));
     let bytes = encode(&module).expect("encode");
     // 400 entries over a 32 KiB value project to 12.8 MiB; the image itself is
-    // about 35 KiB, so the bound has to be the projection.
+    // about 35 KiB, so the bound has to be the projection — and the lever is
+    // the working budget (INF-06), not the total-bytes ceiling: the image is
+    // far under the default 1 GiB total, so only a 1 MiB working budget makes
+    // the 12.8 MiB projection refuse. (Before INF-06 the guard used
+    // `max_total_bytes`; a 1 MiB total was the lever then. The projection is
+    // a validation transient, so the working budget governs it now.)
     let opts = DecodeOpts {
         limits: Limits {
-            max_total_bytes: 1 << 20,
+            max_working_bytes: 1 << 20,
             ..Limits::default()
         },
         verify_hash: true,

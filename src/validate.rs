@@ -76,6 +76,7 @@ impl<'a> Validated<'a> {
             });
         }
         validate_counts(&header, limits)?;
+        validate_working_bytes(&header, limits)?;
         let ends = validate_layout(buf, &header)?;
         let validated = Validated {
             buf,
@@ -1974,8 +1975,11 @@ impl<'a> Validated<'a> {
         let count = self.header.span(Section::Edges).count;
         let node_count = self.node_count();
         let base = self.header.span(Section::Edges).offset as usize;
+        // Pass 1 — streaming order/range check, O(1) memory. The stored table
+        // is read back from the buffer for the comparison below, so no `edges`
+        // Vec is built at all (INF-06): the old code held the whole table
+        // (up to 16M x 8 B = 128 MiB) beside the derived set.
         let mut previous: Option<(u32, u32)> = None;
-        let mut edges = Vec::with_capacity(count.min(1 << 20) as usize);
         for index in 0..count {
             let from = read_u32(self.buf, base + index as usize * 8)?;
             let to = read_u32(self.buf, base + index as usize * 8 + 4)?;
@@ -1995,23 +1999,49 @@ impl<'a> Validated<'a> {
                 }
             }
             previous = Some((from, to));
-            edges.push((from, to));
         }
-        // The edge table must be exactly the derived graph: no extra edges,
-        // no missing edges. This is what makes the graph unforgeable.
-        let mut derived: Vec<(u32, u32)> = Vec::new();
+        // Pass 2 — the edge table must be exactly the derived graph: no extra
+        // edges, no missing edges. This is what makes the graph unforgeable.
+        // `derived` is the only Vec: one entry per distinct derived pair,
+        // pre-sized to the stored count and capped at it. A valid image has
+        // exactly `count` distinct derived pairs, and the per-node dedup
+        // below makes `derived` duplicate-free by construction, so any push
+        // past `count` proves the sets differ — fail fast with `EdgeSet`
+        // instead of growing toward the total-reference bound (~56M entries,
+        // ~448 MiB, plus a doubling realloc that holds ~800 MiB at once).
+        // The per-node dedup is what makes the cap exact rather than
+        // heuristic: two fields (or two array slots) of one node may name
+        // the same child, and the set comparison dedups globally, so dropping
+        // the per-node duplicates here changes the compared set not at all.
+        // The pre-size is bounded by `validate_working_bytes`: `count * 8`
+        // is one of its terms, so this allocation cannot exceed the budget.
+        let mut derived: Vec<(u32, u32)> = Vec::with_capacity(count as usize);
         let mut scratch: Vec<u32> = Vec::new();
         for index in 0..node_count {
             let rec = self.node(NodeId(index))?;
             self.node_children_into(&rec, &mut scratch)?;
+            scratch.sort_unstable();
+            scratch.dedup();
             for child in &scratch {
+                if derived.len() >= count as usize {
+                    return Err(Error::EdgeSet);
+                }
                 derived.push((*child, index));
             }
         }
         derived.sort_unstable();
-        derived.dedup();
-        if derived != edges {
+        // `derived` is duplicate-free by construction and the stored table is
+        // strictly increasing (pass 1), so equal length plus element-wise
+        // equality is set equality — compared against the table in the buffer.
+        if derived.len() != count as usize {
             return Err(Error::EdgeSet);
+        }
+        for (index, (from, to)) in derived.iter().enumerate() {
+            let stored_from = read_u32(self.buf, base + index * 8)?;
+            let stored_to = read_u32(self.buf, base + index * 8 + 4)?;
+            if *from != stored_from || *to != stored_to {
+                return Err(Error::EdgeSet);
+            }
         }
         Ok(())
     }
@@ -2251,10 +2281,16 @@ impl<'a> Validated<'a> {
             projected = projected
                 .saturating_add(key.len() as u64)
                 .saturating_add(value_len);
-            if projected > limits.max_total_bytes {
+            // The ceiling is the working budget, not the total-bytes ceiling
+            // (INF-06): this materialisation happens inside validation, so it
+            // is part of the validator's transient — a projection between the
+            // working budget and the total size used to allocate up to 1 GiB
+            // here while the budget claimed 512 MiB. A caller that needs a
+            // larger provenance projection raises `max_working_bytes`.
+            if projected > limits.max_working_bytes {
                 return Err(Error::Limit {
                     kind: "provenance projection bytes",
-                    limit: limits.max_total_bytes,
+                    limit: limits.max_working_bytes,
                 });
             }
         }
@@ -2620,6 +2656,89 @@ fn validate_counts(header: &Header, limits: Limits) -> Result<()> {
                 limit: limit as u64,
             });
         }
+    }
+    Ok(())
+}
+
+/// Bound the transient working set of structural validation (INF-06).
+///
+/// Every large allocation `Validated::new` performs below is summed here
+/// from the header counts — before any of it is allocated — and the image is
+/// refused with `infinity/limit` (`"working bytes"`) when the sum exceeds
+/// `Limits::max_working_bytes`. The phases run sequentially, so the sum
+/// overestimates the true peak (it counts every phase as if simultaneous);
+/// that is deliberate: the budget is a conservative admission policy, and a
+/// caller that needs an extreme-but-valid image raises the ceiling. The
+/// terms, each in bytes:
+///
+/// * `aux` — the aux-used bitmap (one byte per aux entry);
+/// * `aux * 8 * 2` — `check_types`: the previous plus the current type's
+///   entries, each a `(u32, u32)` pair;
+/// * `aux * 4` — `check_nodes`: one constraint/patch node's tag scratch;
+/// * `edges * 8` — `check_edges`: the derived set, capped at the stored
+///   edge count (the cap is what makes this term exact instead of the
+///   total-reference bound);
+/// * `max(children, fields, parts, aux) * 4 + 8` — one node's children
+///   scratch, reused by every traversal; a node draws from at most one
+///   table, so the largest single table bounds it;
+/// * `nodes` — `check_reachability`: the seen bitmap;
+/// * `nodes * 4` — `check_reachability`: the traversal stack;
+/// * `(1 + bindings + 2 * annotations) * 4` — `check_reachability`: the
+///   roots (root word, bindings, annotation subjects, constraint exprs);
+/// * `bindings * 24` — `bindings()`: one `(&str, NodeId)` per binding;
+/// * `nodes * 4 * 2` — `check_acyclic`: incoming counts plus the queue;
+/// * `nodes * 4 * 3` — `check_depth`: incoming counts, depths, queue;
+/// * `(prov_bytes / 16) * 64` — `check_provenance`: the entries `Vec`
+///   (one entry per 16 provenance bytes, ~64 bytes per `ProvEntry`);
+/// * `64 KiB` — fixed allowance for the hash state, `Meta`, and the small
+///   per-check locals (all O(1)).
+///
+/// Two allocations are NOT in this sum. The provenance key/value
+/// materialisation is bounded separately by the projection guard in
+/// `check_provenance`, whose ceiling is this same budget. The canonical
+/// proof decodes and re-encodes after the structural checks; its cost is
+/// bounded by `Limits::max_decoded_bytes` plus the node arena plus a second
+/// image of about the input size (see `Limits::max_working_bytes`).
+/// All arithmetic is `u64` saturating: counts are `u32` and every term is a
+/// small multiple of a count, so the sum cannot wrap — a hostile header can
+/// only make the bound larger, which fails closed.
+fn validate_working_bytes(header: &Header, limits: Limits) -> Result<()> {
+    let nodes = header.span(Section::Nodes).count as u64;
+    let children = header.span(Section::Children).count as u64;
+    let fields = header.span(Section::Fields).count as u64;
+    let parts = header.span(Section::Parts).count as u64;
+    let edges = header.span(Section::Edges).count as u64;
+    let aux = header.span(Section::Aux).count as u64;
+    let bindings = header.span(Section::Bindings).count as u64;
+    let annotations = header.span(Section::Annotations).count as u64;
+    // The provenance section count is a byte length, not an entry count.
+    let prov_bytes = header.span(Section::Provenance).count as u64;
+    let mut bound: u64 = 0;
+    // Each phase is added, not maxed: the sum is the conservative bound
+    // (see the doc comment above).
+    bound = bound.saturating_add(aux);
+    bound = bound.saturating_add(aux.saturating_mul(8).saturating_mul(2));
+    bound = bound.saturating_add(aux.saturating_mul(4));
+    bound = bound.saturating_add(edges.saturating_mul(8));
+    let widest_table = children.max(fields).max(parts).max(aux);
+    bound = bound.saturating_add(widest_table.saturating_mul(4).saturating_add(8));
+    bound = bound.saturating_add(nodes);
+    bound = bound.saturating_add(nodes.saturating_mul(4));
+    bound = bound.saturating_add(
+        1u64.saturating_add(bindings)
+            .saturating_add(annotations.saturating_mul(2))
+            .saturating_mul(4),
+    );
+    bound = bound.saturating_add(bindings.saturating_mul(24));
+    bound = bound.saturating_add(nodes.saturating_mul(4).saturating_mul(2));
+    bound = bound.saturating_add(nodes.saturating_mul(4).saturating_mul(3));
+    bound = bound.saturating_add(prov_bytes / 16 * 64);
+    bound = bound.saturating_add(64 << 10);
+    if bound > limits.max_working_bytes {
+        return Err(Error::Limit {
+            kind: "working bytes",
+            limit: limits.max_working_bytes,
+        });
     }
     Ok(())
 }

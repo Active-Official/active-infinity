@@ -72,6 +72,9 @@ fn to_rust_limits(ffi: &ActiveInfinityLimits) -> Limits {
         max_total_bytes: ffi.max_total_bytes,
         max_decoded_bytes: ffi.max_decoded_bytes,
         max_depth: ffi.max_depth,
+        // INF-06: the FFI table has no working-budget field (ABI unchanged),
+        // so the fuzzed Rust limits carry the default budget.
+        max_working_bytes: Limits::default().max_working_bytes,
     }
 }
 

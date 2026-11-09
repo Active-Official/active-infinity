@@ -499,6 +499,8 @@ bytes; the proof is on by default (INF-02), so the default entry points
 canonical encoding of its own content (`infinity/not-canonical`). The proof's
 allocation is bounded by `Limits::max_decoded_bytes` (INF-01), so the extra
 work an attacker can force with a single request is capped instead of open.
+The structural validation underneath the proof is bounded by
+`Limits::max_working_bytes` (INF-06).
 
 - `validate` proves structure, ranges, ordering, reachability, acyclicity,
   depth, the content hash, and the canonical form.
@@ -713,7 +715,21 @@ caps the bytes `decode_validated` may materialise as owned data, charged per
 use before any cloning — a string referenced by N nodes is charged N times,
 and a type-enum member is charged once per `SchemaField` that names the type
 (INF-01, R2-INF-DEC-01). `validate()` (no materialisation) and the zero-copy
-`view` path are unaffected. The total-byte and
+`view` path are unaffected. `Limits` additionally bounds the validator's own
+transient working set: `max_working_bytes` (default 512 MiB) caps the bytes
+structural validation may allocate — the aux-used bitmap, the type-table
+entries held for the canonical-order comparison, the per-node tag scratch,
+the derived edge set, one node's children scratch, the reachability
+bitmap/stack/roots, the bindings table, and the two Kahn passes — summed from
+the header counts before any of them is allocated, so an image whose worst-case
+working set exceeds the ceiling is refused with `infinity/limit` instead of
+allocating toward it (INF-06). The derived edge set is built streaming: the
+stored table is read back from the buffer and the derived set is capped at the
+stored count, so a hostile image whose node references outnumber its edge table
+cannot grow the comparison toward the total-reference bound. The provenance
+projection guard uses the same budget. The canonical proof's decode+encode is
+not in this budget: its decode leg is bounded by `max_decoded_bytes` and its
+encode leg builds a second image of about the input size. The total-byte and
 string-heap ceilings are checked before anything is decoded, and the depth
 ceiling applies to **every** root (module root, bindings, annotation subjects) —
 a second shallow root cannot hide a deep chain. Defaults accept

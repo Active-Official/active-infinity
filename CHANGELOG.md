@@ -147,6 +147,27 @@
   `infinity/limit`; `validate()` and the zero-copy `view` path are
   unaffected.
 
+- **Validate's transient allocation is bounded (INF-06).** `check_edges`
+  used to materialise two full edge Vecs (`edges` plus `derived`, the
+  latter up to ~56M entries / ~448 MiB when node references outnumber the
+  stored edge table, with a doubling realloc holding ~800 MiB at once),
+  and no single budget capped the validator's working set, so a max-shape
+  1 GiB image cost ~600-700 MiB transient in `validate()` alone. The edge
+  comparison is now streaming: the stored table is read back from the
+  buffer (no `edges` Vec) and `derived` is pre-sized to the stored count,
+  deduped per node, and capped at it - any push past the count proves the
+  sets differ and fails fast with `infinity/edge-set`. A new
+  `Limits::max_working_bytes` (default 512 MiB, `Limits::strict()` 8 MiB)
+  bounds the whole structural working set from the header counts before
+  any allocation, and the provenance projection guard that used to allow
+  up to `max_total_bytes` (1 GiB) of materialisation inside validation now
+  uses the same budget. A hostile max-shape image (37.7M references
+  against a 16.7M-row edge table) peaked at 1253 MiB RSS pre-fix and is
+  now refused at 644 MiB RSS; a valid max-shape image (4M nodes, 16M edges)
+  still validates, with peak RSS down from 580 MiB to 452 MiB. The canonical proof's decode+encode is not in this
+  budget (its decode leg is bounded by `max_decoded_bytes`, its encode
+  leg builds a second image of about the input size).
+
 - **`Any` and an open `Table` keep their whole cone on the value plane.** The
   schema walk accepted an array or table without looking inside, so an `Ident`
   (or any other program node) nested under an `Any` field passed validation even

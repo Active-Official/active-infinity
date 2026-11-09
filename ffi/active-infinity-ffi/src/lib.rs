@@ -649,6 +649,12 @@ fn limits_from_ffi(limits: &ActiveInfinityLimits) -> Limits {
         max_total_bytes: limits.max_total_bytes,
         max_decoded_bytes: limits.max_decoded_bytes,
         max_depth: limits.max_depth,
+        // INF-06: the FFI struct has no `max_working_bytes` field yet —
+        // the `#[repr(C)]` ABI is unchanged by this fix — so FFI callers
+        // get the default 512 MiB working budget. Wiring the field through
+        // the struct, the C header and every polyglot driver is INF-FFI-02
+        // follow-up work (the same split INF-01 used for max_decoded_bytes).
+        max_working_bytes: Limits::default().max_working_bytes,
     }
 }
 

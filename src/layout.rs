@@ -473,6 +473,29 @@ pub struct Limits {
     /// zero-copy `view` path are unaffected.
     pub max_decoded_bytes: u64,
     pub max_depth: u32,
+    /// Cap on the bytes `Validated::new` may transiently allocate while
+    /// structurally validating one image (INF-06): the aux-used bitmap, the
+    /// type-table entries held for the canonical-order comparison, the
+    /// per-node tag scratch, the derived edge set, one node's children
+    /// scratch, the reachability bitmap/stack/roots, the bindings table, and
+    /// the two Kahn passes (incoming counts, depths, queues). The bound is
+    /// computed from the header counts before any of them is allocated
+    /// (`validate::validate_working_bytes`) and the image is refused with
+    /// `infinity/limit` (`"working bytes"`) when the sum exceeds this
+    /// ceiling, so the validator's own transient is predictable: a max-shape
+    /// image at default ceilings (4M nodes, 16M edges) bounds near 292 MiB
+    /// against the 512 MiB default, and the strict profile's 8 MiB equals
+    /// its `max_total_bytes`. Two things are deliberately NOT in this
+    /// budget. The provenance materialisation inside validation is bounded
+    /// separately by the projection guard in `check_provenance`, whose
+    /// ceiling is this same budget, so it can never push the peak past it.
+    /// And the canonical proof (`verify_canonical`) decodes and re-encodes
+    /// after the structural checks: its decode leg is bounded by
+    /// `max_decoded_bytes` plus the node arena, and its encode leg builds a
+    /// second image of about the input size, so `validate_canonical` costs
+    /// more than this budget by design — the budget bounds the validator,
+    /// not the proof.
+    pub max_working_bytes: u64,
 }
 
 impl Default for Limits {
@@ -502,6 +525,7 @@ impl Default for Limits {
             max_total_bytes: 1 << 30,
             max_decoded_bytes: 256 << 20,
             max_depth: 4096,
+            max_working_bytes: 512 << 20,
         }
     }
 }
@@ -534,6 +558,7 @@ impl Limits {
             max_total_bytes: 8 << 20,
             max_decoded_bytes: 1 << 20,
             max_depth: 128,
+            max_working_bytes: 8 << 20,
         }
     }
 
@@ -543,7 +568,7 @@ impl Limits {
     /// "limit" the reader discovers later as `infinity/limit` on the first
     /// hostile input. The message names the field so a caller can fix it.
     pub fn check(&self) -> Result<()> {
-        let ceilings: [(&'static str, u64); 24] = [
+        let ceilings: [(&'static str, u64); 25] = [
             ("max_nodes", self.max_nodes as u64),
             ("max_edges", self.max_edges as u64),
             ("max_children", self.max_children as u64),
@@ -568,6 +593,7 @@ impl Limits {
             ("max_total_bytes", self.max_total_bytes),
             ("max_decoded_bytes", self.max_decoded_bytes),
             ("max_depth", self.max_depth as u64),
+            ("max_working_bytes", self.max_working_bytes),
         ];
         for (name, value) in ceilings {
             if value == 0 {
@@ -595,6 +621,7 @@ impl Limits {
                     "max_bindings" => "max_bindings must be non-zero",
                     "max_total_bytes" => "max_total_bytes must be non-zero",
                     "max_decoded_bytes" => "max_decoded_bytes must be non-zero",
+                    "max_working_bytes" => "max_working_bytes must be non-zero",
                     _ => "max_depth must be non-zero",
                 }));
             }

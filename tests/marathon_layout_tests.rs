@@ -108,8 +108,13 @@ fn every_zero_ceiling_is_refused() {
     ceiling!(max_hashes);
     ceiling!(max_bindings);
     ceiling!(max_total_bytes);
+    // INF-06: `max_decoded_bytes` was missing here since INF-01 added it
+    // (the count sat at 23 while `Limits` already had 24 fields); both
+    // it and the new `max_working_bytes` are covered now.
+    ceiling!(max_decoded_bytes);
     ceiling!(max_depth);
-    assert_eq!(cases.len(), 23, "every field of Limits is covered");
+    ceiling!(max_working_bytes);
+    assert_eq!(cases.len(), 25, "every field of Limits is covered");
 
     for (name, zero) in cases {
         let mut limits = Limits::default();

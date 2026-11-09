@@ -5,7 +5,12 @@
 ignore = ["RUSTSEC-2024-0449"]
 
 [licenses]
-allow = ["MIT", "Apache-2.0", "Apache-2.0 WITH LLVM-exception", "BSD-3-Clause", "ISC", "Unicode-3.0", "Zlib", "CC0-1.0"]
+allow = ["MIT", "Apache-2.0", "Apache-2.0 WITH LLVM-exception", "BSD-3-Clause", "ISC", "Unicode-3.0", "Zlib", "CC0-1.0", "NCSA"]
+# NCSA (University of Illinois/NCSA Open Source License) is allowed for
+# libfuzzer-sys 0.4.13, the fuzz harness's only NCSA-licensed dependency
+# (license "(MIT OR Apache-2.0) AND NCSA"). NCSA is OSI-approved and FSF
+# Free/Libre. R2-SUPPLY-02: a deliberate allow-list decision, not a silent
+# edit - the allowance list is deliberately wider than the current graph.
 # The allowance list is deliberately wider than the current graph (targets and
 # optional features pull different crates), so an unused entry is not a finding.
 unused-allowed-license = "allow"

@@ -1,6 +1,7 @@
 [package]
 name = "active-infinity-fuzz"
 version = "0.0.0"
+license = "MIT OR Apache-2.0"
 publish = false
 edition = "2021"
 
@@ -11,7 +12,7 @@ cargo-fuzz = true
 libfuzzer-sys = "0.4"
 # The fuzz build must be the shipped default set: a panic in the default
 # `active-core` bridge or in the signature envelope is otherwise unfuzzable.
-active-infinity = { path = "..", features = ["json", "zstd", "signatures"] }
+active-infinity = { path = "..", version = "2.3.0", features = ["json", "zstd", "signatures"] }
 
 [[bin]]
 name = "fuzz_decode_infinity"

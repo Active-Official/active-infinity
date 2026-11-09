@@ -12,12 +12,98 @@ fn cli() -> Command {
     Command::new(env!("CARGO_BIN_EXE_active-infinity-cli"))
 }
 
-fn sandbox(name: &str) -> PathBuf {
-    let dir =
-        std::env::temp_dir().join(format!("active-infinity-cli-{}-{name}", std::process::id()));
+/// A scratch directory under `%TEMP%` that deletes itself when the test
+/// ends, so a CLI suite run leaves no `active-infinity-cli-*` dirs behind
+/// (NF-POLY05-01: the old helper returned a bare `PathBuf` and never
+/// deleted the dir — ~2.2 GiB leaked per suite run, which drove C: to
+/// 376 MB free on 2026-11-09).
+///
+/// The path is unique per call, not just per name: two tests used the same
+/// name (`conformance-escape`) and shared one directory under the same
+/// process id, so in parallel runs one test's setup deleted the other's
+/// manifest mid-test (flaky `a_conformance_case_*` failures: 43 passed /
+/// 2 failed once, 45 passed / 0 failed the next run, each passing alone).
+/// A per-call counter makes a collision structurally impossible.
+/// Derefs to `Path`, so every call site keeps working unchanged.
+struct Sandbox {
+    path: PathBuf,
+}
+
+impl Sandbox {
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl AsRef<Path> for Sandbox {
+    fn as_ref(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl std::ops::Deref for Sandbox {
+    type Target = Path;
+
+    fn deref(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for Sandbox {
+    fn drop(&mut self) {
+        // Best effort: a test that already failed must not fail again here,
+        // and a sandbox on a locked path must not panic the run.
+        let _ = fs::remove_dir_all(&self.path);
+    }
+}
+
+fn sandbox(name: &str) -> Sandbox {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!(
+        "active-infinity-cli-{}-{name}-{n}",
+        std::process::id()
+    ));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).expect("sandbox");
-    dir
+    Sandbox { path: dir }
+}
+
+/// Mark a file sparse before it is extended with `set_len`, so a ceiling
+/// fixture costs holes instead of real disk.
+///
+/// On Windows a file is sparse only when explicitly marked: `File::set_len`
+/// alone extends with real zero-filled clusters, so the old ceiling tests
+/// paid ~1 GiB + 2 x 600 MiB of real disk per suite run (NF-POLY05-01).
+/// `fsutil` is a Windows built-in, like the `icacls` used for seed
+/// permissions below; no new dependency and no `unsafe` (this codebase
+/// forbids it). On Unix `set_len` (`ftruncate`) already creates holes,
+/// so there is nothing to mark.
+#[cfg(windows)]
+fn mark_sparse(path: &Path) {
+    let output = Command::new("fsutil")
+        .arg("sparse")
+        .arg("setflag")
+        .arg(path)
+        .output()
+        .expect("spawn fsutil");
+    assert!(
+        output.status.success(),
+        "fsutil sparse setflag failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// Extend a file to `len` bytes without paying real disk for the gap.
+/// The declared length is what the CLI's ceiling check reads
+/// (`read_capped` refuses on `metadata.len()` before reading), so the
+/// refusal under test is unchanged — only the disk cost goes away.
+fn extend_sparse(file: &fs::File, path: &Path, len: u64) {
+    #[cfg(windows)]
+    mark_sparse(path);
+    #[cfg(not(windows))]
+    let _ = path;
+    file.set_len(len).expect("set len");
 }
 
 fn run(args: &[&str]) -> Output {
@@ -541,8 +627,10 @@ fn dict_apply_refuses_an_impossible_level_and_ceiling() {
 fn an_input_above_the_ceiling_is_refused_before_it_is_read() {
     let dir = sandbox("input-ceiling");
     let huge = dir.join("huge.bin");
+    // Sparse (NF-POLY05-01): the declared length must exceed the 1 GiB
+    // ceiling, but the fixture must not cost 1 GiB of real disk.
     let file = fs::File::create(&huge).expect("create");
-    file.set_len((1u64 << 30) + 8192).expect("set len");
+    extend_sparse(&file, &huge, (1u64 << 30) + 8192);
     drop(file);
     let dictionary = dir.join("corpus.dict");
     write(&dictionary, &image(0));
@@ -850,12 +938,14 @@ fn dict_apply_accepts_a_negative_level_and_refuses_one_below_the_range() {
 fn dict_train_refuses_samples_over_the_input_ceiling_before_reading_them() {
     let dir = sandbox("dict-sample-total");
     let mut samples = Vec::new();
-    // Sparse files: the declared length is over the ceiling while the disk cost
-    // is one cluster. A per-file read would commit 600 MiB each.
+    // Sparse files (NF-POLY05-01): the declared length is over the ceiling
+    // while the disk cost is holes, not clusters — on Windows only because
+    // the file is marked sparse first; a plain `set_len` would allocate
+    // real zero-filled clusters. A per-file read would commit 600 MiB each.
     for seed in 0..2 {
         let path = dir.join(format!("sparse-{seed}.ainf"));
         let file = fs::File::create(&path).expect("create");
-        file.set_len(600u64 << 20).expect("set len");
+        extend_sparse(&file, &path, 600u64 << 20);
         drop(file);
         samples.push(path.to_string_lossy().into_owned());
     }
@@ -1455,4 +1545,66 @@ fn a_conformance_manifest_with_another_format_is_refused() {
         manifest.to_str().expect("utf8"),
     ]);
     assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+}
+
+/// NF-POLY05-01: a sandbox deletes itself when the test ends, and two
+/// sandboxes with the same name never share a path.
+#[test]
+fn sandbox_deletes_its_directory_and_names_are_unique() {
+    let first_path;
+    let second_path;
+    {
+        let first = sandbox("regression-guard");
+        let second = sandbox("regression-guard");
+        assert_ne!(
+            first.path(),
+            second.path(),
+            "two live sandboxes with the same name must not share a path"
+        );
+        assert!(first.path().exists());
+        assert!(second.path().exists());
+        first_path = first.path().to_path_buf();
+        second_path = second.path().to_path_buf();
+        write(&first.join("scratch.txt"), b"scratch");
+        assert!(first.join("scratch.txt").exists());
+        // Both guards drop at the end of this block.
+    }
+    assert!(
+        !first_path.exists(),
+        "a dropped sandbox must delete its directory"
+    );
+    assert!(
+        !second_path.exists(),
+        "a dropped sandbox must delete its directory"
+    );
+}
+
+/// NF-POLY05-01: a ceiling fixture is sparse on Windows — its declared
+/// length exceeds the ceiling while its disk cost is ~nothing. (On Unix
+/// `set_len` already creates holes, so there is no flag to check; the
+/// `fsutil` query below is Windows-only.)
+#[test]
+#[cfg(windows)]
+fn ceiling_fixture_is_sparse_and_still_over_the_ceiling() {
+    let dir = sandbox("regression-sparse");
+    let huge = dir.join("huge.bin");
+    let file = fs::File::create(&huge).expect("create");
+    extend_sparse(&file, &huge, (1u64 << 30) + 8192);
+    drop(file);
+    assert_eq!(
+        fs::metadata(&huge).expect("metadata").len(),
+        (1u64 << 30) + 8192,
+        "the ceiling check reads the declared length, which must stay over the ceiling"
+    );
+    let flag = Command::new("fsutil")
+        .arg("sparse")
+        .arg("queryflag")
+        .arg(&huge)
+        .output()
+        .expect("spawn fsutil");
+    let flag = String::from_utf8_lossy(&flag.stdout);
+    assert!(
+        flag.contains("set as sparse"),
+        "the fixture must be marked sparse on Windows, got: {flag}"
+    );
 }

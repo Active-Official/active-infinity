@@ -15,7 +15,12 @@
   The 1.1 dialect is `0x23f9_4360_a471_a63e`. A 1.0 image is structurally valid
   but not canonical under 1.1: migrate by decoding leniently
   (`DecodeOpts { verify_canonical: false, .. }`), re-encoding, and storing the
-  1.1 image, which has a new content hash. Any future hash-affecting
+  1.1 image, which has a new content hash. A signed (enveloped) 1.0 image
+  cannot be migrated by re-encoding alone: the signature covers the 1.0
+  bytes, so re-encoding invalidates it -- re-sign the 1.1 image instead
+  (NF-INF03-03: the checked-in fuzz seed `fuzz/corpus/fuzz_signed_image/
+  valid-envelope` was orphaned exactly this way and had to be regenerated
+  with `fuzz/examples/gen_seeds.rs`). Any future hash-affecting
   canonical-form change must bump `DIALECT_VERSION` (and `FORMAT_MINOR` with
   it), never ship in a patch release.
 

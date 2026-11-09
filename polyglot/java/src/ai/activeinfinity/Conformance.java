@@ -15,13 +15,19 @@ public final class Conformance {
             "\"path\"\\s*:\\s*\"([^\"]+)\".*?\"content_hash\"\\s*:\\s*\"([^\"]+)\"",
             Pattern.DOTALL);
 
+    // INF-FFI-02: the limits option. It captures the `limits` value
+    // (e.g. `max_nodes:1`) from the options object the invalid-case
+    // pattern captures.
+    private static final Pattern LIMITS_OPTION = Pattern.compile(
+            "\"limits\"\\s*:\\s*\"([^\"]+)\"");
+
     // INF-POLY-02: the invalid-case pattern. It anchors on
     // `"kind": "invalid"` with the closing quote, so it never matches
     // `"kind": "invalid_stream"`; the `.*?` spans the options object,
     // which sits between path and expected_code and never contains an
     // expected_code of its own.
     private static final Pattern INVALID_CASE = Pattern.compile(
-            "\"kind\"\\s*:\\s*\"invalid\".*?\"name\"\\s*:\\s*\"([^\"]+)\".*?\"path\"\\s*:\\s*\"([^\"]+)\".*?\"expected_code\"\\s*:\\s*\"([^\"]+)\"",
+            "\"kind\"\\s*:\\s*\"invalid\".*?\"name\"\\s*:\\s*\"([^\"]+)\".*?\"path\"\\s*:\\s*\"([^\"]+)\".*?\"options\"\\s*:\\s*\\{([^}]*)\\}.*?\"expected_code\"\\s*:\\s*\"([^\"]+)\"",
             Pattern.DOTALL);
 
     public static void main(String[] args) throws IOException {
@@ -93,27 +99,31 @@ public final class Conformance {
             throw new IllegalStateException("manifest vectors were not exercised: " + checked + " of " + valid);
         }
 
-        // INF-POLY-02: every invalid vector except the two limits-dependent
-        // ones (limit, too_deep) must be refused by validateCanonical with
-        // exactly the manifest's expected_code. The FFI exposes no limits
-        // parameter, so those two need narrowed limits (max_nodes:1,
-        // max_depth:8) and are covered by the CLI's `conformance run` and
-        // the Rust suite instead. invalid_stream vectors are CLI-only: no
-        // stream decode exists in the FFI.
+        // INF-POLY-02: every invalid vector must be refused with exactly
+        // the manifest's expected_code. INF-FFI-02: the two limits-dependent
+        // ones (limit, too_deep) go through validateWithLimits with the
+        // narrowed budget from the entry's options.limits (max_nodes:1,
+        // max_depth:8); the rest go through validateCanonical.
+        // invalid_stream vectors are CLI-only: no stream decode exists in
+        // the FFI.
         int invalidChecked = 0;
-        int invalidSkipped = 0;
         Matcher invalidMatcher = INVALID_CASE.matcher(manifest);
         while (invalidMatcher.find()) {
             String invalidName = invalidMatcher.group(1);
             String invalidPath = invalidMatcher.group(2);
-            String expectedCode = invalidMatcher.group(3);
-            if (invalidName.equals("limit") || invalidName.equals("too_deep")) {
-                invalidSkipped++;
-                continue;
-            }
+            String invalidOptions = invalidMatcher.group(3);
+            String expectedCode = invalidMatcher.group(4);
             byte[] invalidImage = Files.readAllBytes(root.resolve(invalidPath));
             try {
-                ActiveInfinity.validateCanonical(invalidImage);
+                Matcher limitsMatcher = LIMITS_OPTION.matcher(invalidOptions);
+                if (limitsMatcher.find()) {
+                    String[] parts = limitsMatcher.group(1).split(":", 2);
+                    Limits limits = Limits.defaults();
+                    limits.setField(parts[0], Long.parseLong(parts[1]));
+                    ActiveInfinity.validateWithLimits(invalidImage, limits);
+                } else {
+                    ActiveInfinity.validateCanonical(invalidImage);
+                }
                 throw new IllegalStateException(invalidName + ": invalid image was accepted");
             } catch (ActiveInfinity.Error error) {
                 if (!error.code().equals(expectedCode)) {
@@ -123,11 +133,8 @@ public final class Conformance {
             invalidChecked++;
         }
         int invalidTotal = manifest.split("\"kind\": \"invalid\"", -1).length - 1;
-        if (invalidChecked + invalidSkipped != invalidTotal) {
-            throw new IllegalStateException("manifest invalid vectors were not exercised: " + invalidChecked + " + " + invalidSkipped + " of " + invalidTotal);
-        }
-        if (invalidSkipped != 2) {
-            throw new IllegalStateException("limits-dependent skips changed: " + invalidSkipped);
+        if (invalidChecked != invalidTotal) {
+            throw new IllegalStateException("manifest invalid vectors were not exercised: " + invalidChecked + " of " + invalidTotal);
         }
 
         String source = "port = 8080\nname = \"java\"\n";

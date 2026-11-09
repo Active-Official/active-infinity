@@ -111,14 +111,13 @@ if (checkedCases != validCases)
     throw new Exception($"valid vectors were not exercised: {checkedCases} of {validCases}");
 }
 
-// INF-POLY-02: every invalid vector except the two limits-dependent ones
-// (limit, too_deep) must be refused by ValidateCanonical with exactly the
-// manifest's expected_code. The FFI exposes no limits parameter, so those
-// two need narrowed limits (max_nodes:1, max_depth:8) and are covered by
-// the CLI's `conformance run` and the Rust suite instead. invalid_stream
-// vectors are CLI-only: no stream decode exists in the FFI.
+// INF-POLY-02: every invalid vector must be refused with exactly the
+// manifest's expected_code. INF-FFI-02: the two limits-dependent ones
+// (limit, too_deep) go through ValidateWithLimits with the narrowed budget
+// from the entry's options.limits (max_nodes:1, max_depth:8); the rest go
+// through ValidateCanonical. invalid_stream vectors are CLI-only: no stream
+// decode exists in the FFI.
 int invalidChecked = 0;
-int invalidSkipped = 0;
 foreach (JsonElement entry in manifest.RootElement.GetProperty("cases").EnumerateArray())
 {
     if (entry.GetProperty("kind").GetString() != "invalid")
@@ -126,17 +125,26 @@ foreach (JsonElement entry in manifest.RootElement.GetProperty("cases").Enumerat
         continue;
     }
     string invalidName = entry.GetProperty("name").GetString()!;
-    if (invalidName == "limit" || invalidName == "too_deep")
-    {
-        invalidSkipped += 1;
-        continue;
-    }
     string invalidPath = Path.Combine(root, entry.GetProperty("path").GetString()!);
     string expectedCode = entry.GetProperty("expected_code").GetString()!;
     Image invalidImage = Image.FromFile(invalidPath);
+    string? limitsSpec = entry.TryGetProperty("options", out JsonElement options)
+        && options.TryGetProperty("limits", out JsonElement limitsElement)
+        ? limitsElement.GetString()
+        : null;
     try
     {
-        invalidImage.ValidateCanonical();
+        if (limitsSpec is not null)
+        {
+            string[] parts = limitsSpec.Split(':', 2);
+            Limits limits = Limits.Default();
+            limits.SetField(parts[0], ulong.Parse(parts[1]));
+            invalidImage.ValidateWithLimits(limits);
+        }
+        else
+        {
+            invalidImage.ValidateCanonical();
+        }
         throw new Exception($"{invalidName}: invalid image was accepted");
     }
     catch (ActiveInfinityException error)
@@ -150,13 +158,9 @@ foreach (JsonElement entry in manifest.RootElement.GetProperty("cases").Enumerat
 }
 int invalidTotal = manifest.RootElement.GetProperty("cases").EnumerateArray()
     .Count(entry => entry.GetProperty("kind").GetString() == "invalid");
-if (invalidChecked + invalidSkipped != invalidTotal)
+if (invalidChecked != invalidTotal)
 {
-    throw new Exception($"invalid vectors were not exercised: {invalidChecked} + {invalidSkipped} of {invalidTotal}");
-}
-if (invalidSkipped != 2)
-{
-    throw new Exception($"limits-dependent skips changed: {invalidSkipped}");
+    throw new Exception($"invalid vectors were not exercised: {invalidChecked} of {invalidTotal}");
 }
 
 string source = "port = 8080\nname = \"csharp\"\n";

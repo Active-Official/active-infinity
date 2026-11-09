@@ -25,6 +25,35 @@ uint8_t *active_infinity_alloc(size_t len);
 void active_infinity_free(uint8_t *ptr, size_t len);
 int32_t active_infinity_validate(const uint8_t *ptr, size_t len);
 int32_t active_infinity_validate_canonical(const uint8_t *ptr, size_t len);
+typedef struct {
+    uint32_t max_nodes;
+    uint32_t max_edges;
+    uint32_t max_children;
+    uint32_t max_fields;
+    uint32_t max_parts;
+    uint32_t max_strings;
+    uint32_t max_string_bytes;
+    uint32_t max_blobs;
+    uint32_t max_blob_bytes;
+    uint32_t max_annotations;
+    uint32_t max_units;
+    uint32_t max_types;
+    uint32_t max_aux;
+    uint32_t max_numbers;
+    uint32_t max_secrets;
+    uint32_t max_secret_bytes;
+    uint32_t max_extensions;
+    uint32_t max_prov_bytes;
+    uint32_t max_prov_entries;
+    uint32_t max_hashes;
+    uint32_t max_bindings;
+    uint64_t max_total_bytes;
+    uint64_t max_decoded_bytes;
+    uint32_t max_depth;
+} active_infinity_limits;
+int32_t active_infinity_limits_default(active_infinity_limits *limits);
+int32_t active_infinity_validate_with_limits(const uint8_t *ptr, size_t len, const active_infinity_limits *limits);
+int32_t active_infinity_decode_with_limits(const uint8_t *ptr, size_t len, const active_infinity_limits *limits, uint8_t *out, size_t *out_len);
 int32_t active_infinity_content_hash(const uint8_t *ptr, size_t len, uint8_t *out32);
 int32_t active_infinity_reencode(const uint8_t *ptr, size_t len, uint8_t *out, size_t *out_len);
 int32_t active_infinity_from_active(const uint8_t *source, size_t source_len, const char *name, uint8_t *out, size_t *out_len);
@@ -60,6 +89,56 @@ C;
     {
         $this->checkWithInput($image, fn ($pointer, int $length) =>
             $this->ffi->active_infinity_validate_canonical($pointer, $length));
+    }
+
+    // INF-FFI-02: caller-supplied budget. Returns a Limits struct filled
+    // with the library defaults; override the ceiling to tighten.
+    public function limitsDefault(): FFI\CData
+    {
+        $limits = FFI::new('active_infinity_limits');
+        $this->check($this->ffi->active_infinity_limits_default(FFI::addr($limits)));
+        return $limits;
+    }
+
+    // INF-FFI-02: the limits-parameterized form of validateCanonical.
+    // null means the library defaults.
+    public function validateWithLimits(string $image, ?FFI\CData $limits = null): void
+    {
+        $pointer = $limits === null ? null : FFI::addr($limits);
+        $this->checkWithInput($image, fn ($buffer, int $length) =>
+            $this->ffi->active_infinity_validate_with_limits($buffer, $length, $pointer));
+    }
+
+    // INF-FFI-02: the limits-parameterized form of reencode. A null limits
+    // is materialized through limitsDefault() so the FFI always receives a
+    // struct pointer.
+    public function decodeWithLimits(string $image, ?FFI\CData $limits = null): string
+    {
+        $limits = $limits ?? $this->limitsDefault();
+        $input = $this->buffer($image);
+        try {
+            $size = FFI::new('size_t[1]');
+            $size[0] = 0;
+            $status = $this->ffi->active_infinity_decode_with_limits(
+                $input, strlen($image), FFI::addr($limits), null, $size
+            );
+            if ($status !== -2) {
+                $this->check($status);
+                return '';
+            }
+            $required = (int) $size[0];
+            if ($required === 0) {
+                return '';
+            }
+            $out = FFI::new("uint8_t[$required]");
+            $size[0] = $required;
+            $this->check($this->ffi->active_infinity_decode_with_limits(
+                $input, strlen($image), FFI::addr($limits), $out, $size
+            ));
+            return FFI::string($out, (int) $size[0]);
+        } finally {
+            $this->release($input, strlen($image));
+        }
     }
 
     public function contentHash(string $image): string

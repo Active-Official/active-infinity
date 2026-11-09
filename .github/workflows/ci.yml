@@ -165,14 +165,19 @@ jobs:
       - name: C consumer on the invalid vectors (INF-POLY-02)
         run: |
           # Every invalid vector except the two limits-dependent ones
-          # (limit, too_deep) must be refused with its declared code. The
-          # FFI exposes no limits parameter, so those two need narrowed
-          # limits and are covered by the CLI's `conformance run` and the
-          # Rust suite instead.
-          python3 -c "import json; [print(c['path'], c['expected_code']) for c in json.load(open('conformance/manifest.json'))['cases'] if c['kind']=='invalid' and c['name'] not in ('limit','too_deep')]" > invalid-vectors.txt
-          while read -r path code; do
+          # (limit, too_deep) must be refused with its declared code.
+          # INF-FFI-02: the two limits-dependent vectors carry their narrowed
+          # budget as a third column and go through the consumer's --limits
+          # flag; the rest pass `-` and run as before.
+          python3 -c "import json; [print(c['path'], c['expected_code'], c.get('options', {}).get('limits', '-')) for c in json.load(open('conformance/manifest.json'))['cases'] if c['kind']=='invalid']" > invalid-vectors.txt
+          while read -r path code limits; do
             code="${code%$'\r'}"
-            /tmp/active-infinity-c "$path" --expect-code "$code" || exit 1
+            limits="${limits%$'\r'}"
+            if [ "$limits" = "-" ]; then
+              /tmp/active-infinity-c "$path" --expect-code "$code" || exit 1
+            else
+              /tmp/active-infinity-c "$path" --expect-code "$code" --limits "$limits" || exit 1
+            fi
           done < invalid-vectors.txt
 
   abi-windows-macos:
@@ -229,10 +234,15 @@ jobs:
           else
             CONSUMER=./active-infinity-c
           fi
-          python3 -c "import json; [print(c['path'], c['expected_code']) for c in json.load(open('conformance/manifest.json'))['cases'] if c['kind']=='invalid' and c['name'] not in ('limit','too_deep')]" > invalid-vectors.txt
-          while read -r path code; do
+          python3 -c "import json; [print(c['path'], c['expected_code'], c.get('options', {}).get('limits', '-')) for c in json.load(open('conformance/manifest.json'))['cases'] if c['kind']=='invalid']" > invalid-vectors.txt
+          while read -r path code limits; do
             code="${code%$'\r'}"
-            "$CONSUMER" "$path" --expect-code "$code" || exit 1
+            limits="${limits%$'\r'}"
+            if [ "$limits" = "-" ]; then
+              "$CONSUMER" "$path" --expect-code "$code" || exit 1
+            else
+              "$CONSUMER" "$path" --expect-code "$code" --limits "$limits" || exit 1
+            fi
           done < invalid-vectors.txt
 
   wasm:
@@ -274,14 +284,19 @@ jobs:
       - name: C++ consumer on the invalid vectors (INF-POLY-02)
         run: |
           # Every invalid vector except the two limits-dependent ones
-          # (limit, too_deep) must be refused with its declared code. The
-          # FFI exposes no limits parameter, so those two need narrowed
-          # limits and are covered by the CLI's `conformance run` and the
-          # Rust suite instead.
-          python3 -c "import json; [print(c['path'], c['expected_code']) for c in json.load(open('conformance/manifest.json'))['cases'] if c['kind']=='invalid' and c['name'] not in ('limit','too_deep')]" > invalid-vectors.txt
-          while read -r path code; do
+          # (limit, too_deep) must be refused with its declared code.
+          # INF-FFI-02: the two limits-dependent vectors carry their narrowed
+          # budget as a third column and go through the consumer's --limits
+          # flag; the rest pass `-` and run as before.
+          python3 -c "import json; [print(c['path'], c['expected_code'], c.get('options', {}).get('limits', '-')) for c in json.load(open('conformance/manifest.json'))['cases'] if c['kind']=='invalid']" > invalid-vectors.txt
+          while read -r path code limits; do
             code="${code%$'\r'}"
-            /tmp/active-infinity-cpp "$path" --expect-code "$code" || exit 1
+            limits="${limits%$'\r'}"
+            if [ "$limits" = "-" ]; then
+              /tmp/active-infinity-cpp "$path" --expect-code "$code" || exit 1
+            else
+              /tmp/active-infinity-cpp "$path" --expect-code "$code" --limits "$limits" || exit 1
+            fi
           done < invalid-vectors.txt
       - name: Python conformance
         env:
@@ -303,16 +318,20 @@ jobs:
       - name: Zig consumer on the invalid vectors (INF-POLY-02)
         working-directory: polyglot/zig
         run: |
-          # Every invalid vector except the two limits-dependent ones
-          # (limit, too_deep) must be refused with its declared code. The
-          # FFI exposes no limits parameter, so those two need narrowed
-          # limits and are covered by the CLI's `conformance run` and the
-          # Rust suite instead.
-          python3 -c "import json; [print('../../' + c['path'], c['expected_code']) for c in json.load(open('../../conformance/manifest.json'))['cases'] if c['kind']=='invalid' and c['name'] not in ('limit','too_deep')]" > ../../invalid-vectors.txt
-          while read -r path code; do
+          # Every invalid vector must be refused with its declared code.
+          # INF-FFI-02: the two limits-dependent vectors carry their narrowed
+          # budget as a third column and go through the consumer's --limits
+          # flag; the rest pass `-` and run as before.
+          python3 -c "import json; [print('../../' + c['path'], c['expected_code'], c.get('options', {}).get('limits', '-')) for c in json.load(open('../../conformance/manifest.json'))['cases'] if c['kind']=='invalid']" > ../../invalid-vectors.txt
+          while read -r path code limits; do
             LD_LIBRARY_PATH=${{ github.workspace }}/ffi/active-infinity-ffi/target/release \
               code="${code%$'\r'}"
-              ./zig-out/bin/active-infinity-zig "$path" --expect-code "$code" || exit 1
+              limits="${limits%$'\r'}"
+              if [ "$limits" = "-" ]; then
+                ./zig-out/bin/active-infinity-zig "$path" --expect-code "$code" || exit 1
+              else
+                ./zig-out/bin/active-infinity-zig "$path" --expect-code "$code" --limits "$limits" || exit 1
+              fi
           done < ../../invalid-vectors.txt
 
   polyglot-go:

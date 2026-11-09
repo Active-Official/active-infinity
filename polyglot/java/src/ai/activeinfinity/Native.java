@@ -18,6 +18,14 @@ final class Native {
     // this states the requirement explicitly.
     static native int validateCanonical(byte[] image);
 
+    // INF-FFI-02: caller-supplied budget. The limits are a long[24] in C
+    // struct order (see Limits); a null limits means the library defaults.
+    static native int limitsDefault(long[] values);
+
+    static native int validateWithLimits(byte[] image, long[] limits);
+
+    static native int decodeWithLimits(byte[] image, long[] limits, byte[] output, int[] outLength);
+
     static native int hash(byte[] image, byte[] output);
 
     static native int reencode(byte[] image, byte[] output, int[] outLength);

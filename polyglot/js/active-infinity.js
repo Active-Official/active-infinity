@@ -17,6 +17,75 @@ class ActiveInfinityError extends Error {
 	}
 }
 
+// INF-FFI-02: caller-supplied budget. A Limits holds the 112-byte C
+// `active_infinity_limits` struct in WASM memory: 21 uint32 ceilings,
+// then max_total_bytes and max_decoded_bytes (uint64, at offsets 88 and
+// 96), then max_depth (uint32, at offset 104). Build one with
+// `Limits.defaults(ai)`, set a ceiling with `set(field, value)`, pass it
+// to `validateWithLimits` / `decodeWithLimits`, and free it with `free()`.
+// The offsets are the ABI: the struct layout is fixed by the C header.
+const LIMITS_SIZE = 112;
+const LIMITS_FIELDS = {
+	max_nodes: [0, "u32"],
+	max_edges: [4, "u32"],
+	max_children: [8, "u32"],
+	max_fields: [12, "u32"],
+	max_parts: [16, "u32"],
+	max_strings: [20, "u32"],
+	max_string_bytes: [24, "u32"],
+	max_blobs: [28, "u32"],
+	max_blob_bytes: [32, "u32"],
+	max_annotations: [36, "u32"],
+	max_units: [40, "u32"],
+	max_types: [44, "u32"],
+	max_aux: [48, "u32"],
+	max_numbers: [52, "u32"],
+	max_secrets: [56, "u32"],
+	max_secret_bytes: [60, "u32"],
+	max_extensions: [64, "u32"],
+	max_prov_bytes: [68, "u32"],
+	max_prov_entries: [72, "u32"],
+	max_hashes: [76, "u32"],
+	max_bindings: [80, "u32"],
+	max_total_bytes: [88, "u64"],
+	max_decoded_bytes: [96, "u64"],
+	max_depth: [104, "u32"],
+};
+
+class Limits {
+	constructor(ai, pointer) {
+		this.ai = ai;
+		this.pointer = pointer;
+	}
+
+	static defaults(ai) {
+		const pointer = ai._alloc(LIMITS_SIZE);
+		const status = ai.exports.active_infinity_limits_default(pointer);
+		if (status !== 0) {
+			ai.exports.active_infinity_free(pointer, LIMITS_SIZE);
+			ai._fail(status);
+		}
+		return new Limits(ai, pointer);
+	}
+
+	set(field, value) {
+		const entry = LIMITS_FIELDS[field];
+		if (!entry) throw new Error(`unknown limits field ${field}`);
+		const [offset, kind] = entry;
+		const view = new DataView(this.ai.memory.buffer, this.pointer + offset, 8);
+		if (kind === "u64") view.setBigUint64(0, BigInt(value), true);
+		else view.setUint32(0, value, true);
+		return this;
+	}
+
+	free() {
+		if (this.pointer !== 0) {
+			this.ai.exports.active_infinity_free(this.pointer, LIMITS_SIZE);
+			this.pointer = 0;
+		}
+	}
+}
+
 class ActiveInfinity {
 	constructor(instance) {
 		this.exports = instance.exports;
@@ -130,6 +199,38 @@ class ActiveInfinity {
 		return true;
 	}
 
+	/**
+	 * True when the image is the canonical encoding of its own content
+	 * under the caller's budget; otherwise throws. A null limits means the
+	 * library defaults. (INF-FFI-02)
+	 */
+	validateWithLimits(bytes, limits = null) {
+		const status = this._withInput(bytes, (pointer, length) =>
+			this.exports.active_infinity_validate_with_limits(
+				pointer,
+				length,
+				limits === null ? 0 : limits.pointer,
+			),
+		);
+		if (status !== 0) this._fail(status);
+		return true;
+	}
+
+	/** Canonical AINF bytes for a valid image, under the caller's budget. */
+	decodeWithLimits(bytes, limits = null) {
+		return this._withInput(bytes, (pointer, length) =>
+			this._callOutput((out, outLen) =>
+				this.exports.active_infinity_decode_with_limits(
+					pointer,
+					length,
+					limits === null ? 0 : limits.pointer,
+					out,
+					outLen,
+					),
+			),
+		);
+	}
+
 	/** 32-byte Blake3 content hash of a valid image. */
 	contentHash(bytes) {
 		const hashPointer = this._alloc(32);
@@ -233,4 +334,4 @@ class ActiveInfinity {
 	}
 }
 
-module.exports = { ActiveInfinity, ActiveInfinityError, ABI_VERSION };
+module.exports = { ActiveInfinity, ActiveInfinityError, Limits, ABI_VERSION };

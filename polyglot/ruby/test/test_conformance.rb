@@ -58,33 +58,43 @@ end
 valid = manifest["cases"].count { |entry| entry["kind"] == "valid" }
 raise "valid vectors were not exercised: #{checked} of #{valid}" unless checked == valid
 
-# INF-POLY-02: every invalid vector except the two limits-dependent ones
-# (limit, too_deep) must be refused by validate_canonical with exactly the
-# manifest's expected_code. The FFI exposes no limits parameter, so those
-# two need narrowed limits (max_nodes:1, max_depth:8) and are covered by
-# the CLI's `conformance run` and the Rust suite instead. invalid_stream
-# vectors are CLI-only: no stream decode exists in the FFI.
+# INF-POLY-02: every invalid vector must be refused with exactly the
+# manifest's expected_code. INF-FFI-02: the two limits-dependent ones
+# (limit, too_deep) go through validate_with_limits with the narrowed
+# budget from the entry's options.limits (max_nodes:1, max_depth:8); the
+# rest go through validate_canonical. invalid_stream vectors are CLI-only:
+# no stream decode exists in the FFI.
 invalid_checked = 0
-invalid_skipped = 0
 manifest["cases"].each do |entry|
   next unless entry["kind"] == "invalid"
 
-  if entry["name"] == "limit" || entry["name"] == "too_deep"
-    invalid_skipped += 1
-    next
-  end
   image = ActiveInfinity::Image.from_file(File.join(root, entry["path"]))
-  begin
-    image.validate_canonical
-    raise "#{entry['name']}: invalid image was accepted"
-  rescue ActiveInfinity::Error => e
-    raise "#{entry['name']}: wrong code #{e.code}" unless e.code == entry["expected_code"]
+  limits_spec = entry.dig("options", "limits")
+  if limits_spec
+    field, value = limits_spec.split(":", 2)
+    limits = ActiveInfinity::Limits.default
+    unless limits.members.include?(field.to_sym)
+      raise "#{entry['name']}: unknown limits field #{field}"
+    end
+    limits[field.to_sym] = value.to_i
+    begin
+      image.validate_with_limits(limits)
+      raise "#{entry['name']}: invalid image was accepted"
+    rescue ActiveInfinity::Error => e
+      raise "#{entry['name']}: wrong code #{e.code}" unless e.code == entry["expected_code"]
+    end
+  else
+    begin
+      image.validate_canonical
+      raise "#{entry['name']}: invalid image was accepted"
+    rescue ActiveInfinity::Error => e
+      raise "#{entry['name']}: wrong code #{e.code}" unless e.code == entry["expected_code"]
+    end
   end
   invalid_checked += 1
 end
 invalid_total = manifest["cases"].count { |entry| entry["kind"] == "invalid" }
-raise "invalid vectors were not exercised: #{invalid_checked} + #{invalid_skipped} of #{invalid_total}" unless invalid_checked + invalid_skipped == invalid_total
-raise "limits-dependent skips changed: #{invalid_skipped}" unless invalid_skipped == 2
+raise "invalid vectors were not exercised: #{invalid_checked} of #{invalid_total}" unless invalid_checked == invalid_total
 
 source = "port = 8080\nname = \"ruby\"\n"
 first = ActiveInfinity::Image.from_active(source, "ruby.active")

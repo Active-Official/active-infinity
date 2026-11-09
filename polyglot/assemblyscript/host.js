@@ -177,6 +177,75 @@ function bind(reference, getAssemblyMemory) {
 					reference.free(input.pointer, input.length);
 				}
 			},
+			// INF-FFI-02: caller-supplied budget. The limits struct is
+			// 112 bytes (21 uint32 ceilings, then max_total_bytes and
+			// max_decoded_bytes as uint64, then max_depth as uint32). A
+			// null limits pointer means the library defaults.
+			limits_default: (limits) => {
+				if (!limits) {
+					return reference.exports.active_infinity_limits_default(0);
+				}
+				const out = allocOrThrow(112);
+				try {
+					const status = reference.exports.active_infinity_limits_default(out);
+					if (status === 0) {
+						writeToAs(
+							limits,
+							new Uint8Array(reference.exports.memory.buffer, out, 112),
+						);
+					}
+					return status;
+				} finally {
+					reference.free(out, 112);
+				}
+			},
+			validate_with_limits: (pointer, length, limits) => {
+				const input = copyFromAs(pointer, length);
+				let limitsPointer = 0;
+				let limitsCopied = null;
+				try {
+					if (limits) {
+						limitsCopied = copyFromAs(limits, 112);
+						limitsPointer = limitsCopied.pointer;
+					}
+					return reference.exports.active_infinity_validate_with_limits(
+						input.pointer,
+						input.length,
+						limitsPointer,
+					);
+				} finally {
+					reference.free(input.pointer, input.length);
+					if (limitsCopied) reference.free(limitsCopied.pointer, 112);
+				}
+			},
+			decode_with_limits: (pointer, length, limits, output, outputLength) => {
+				const input = copyFromAs(pointer, length);
+				let limitsPointer = 0;
+				let limitsCopied = null;
+				try {
+					if (limits) {
+						limitsCopied = copyFromAs(limits, 112);
+						limitsPointer = limitsCopied.pointer;
+					}
+					return runOutput(
+						input.pointer,
+						input.length,
+						output,
+						outputLength,
+						(buffer, size) =>
+							reference.exports.active_infinity_decode_with_limits(
+								input.pointer,
+								input.length,
+								limitsPointer,
+								buffer,
+								size,
+							),
+					);
+				} finally {
+					reference.free(input.pointer, input.length);
+					if (limitsCopied) reference.free(limitsCopied.pointer, 112);
+				}
+			},
 			// INF-POLY-03: `validate` already proves the canonical form
 			// (INF-02); this states the requirement explicitly.
 			validate_canonical: (pointer, length) => {

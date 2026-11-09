@@ -60,6 +60,29 @@ public final class ActiveInfinity {
         check(Native.validateCanonical(image));
     }
 
+    // INF-FFI-02: the limits-parameterized form of validateCanonical. A null
+    // limits means the library defaults.
+    public static void validateWithLimits(byte[] image, Limits limits) {
+        checkAbi();
+        check(Native.validateWithLimits(image, limits == null ? null : limits.toArray()));
+    }
+
+    // INF-FFI-02: the limits-parameterized form of reencode.
+    public static byte[] decodeWithLimits(byte[] image, Limits limits) {
+        checkAbi();
+        long[] values = limits == null ? null : limits.toArray();
+        int[] length = {0};
+        int probe = Native.decodeWithLimits(image, values, null, length);
+        if (probe != -2) {
+            check(probe);
+            return new byte[0];
+        }
+        byte[] output = new byte[length[0]];
+        int[] capacity = {output.length};
+        check(Native.decodeWithLimits(image, values, output, capacity));
+        return Arrays.copyOf(output, capacity[0]);
+    }
+
     public static byte[] contentHash(byte[] image) {
         checkAbi();
         byte[] hash = new byte[32];

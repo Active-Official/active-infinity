@@ -90,12 +90,12 @@ for (block in blocks) {
   checked <- checked + 1L
 }
 
-# INF-POLY-02: every invalid vector except the two limits-dependent ones
-# (limit, too_deep) must be refused by ai_validate_canonical with exactly
-# the manifest's expected_code. The FFI exposes no limits parameter, so
-# those two need narrowed limits (max_nodes:1, max_depth:8) and are covered
-# by the CLI's `conformance run` and the Rust suite instead. invalid_stream
-# vectors are CLI-only: no stream decode exists in the FFI. The split is on
+# INF-POLY-02: every invalid vector must be refused with exactly the
+# manifest's expected_code. INF-FFI-02: the two limits-dependent ones
+# (limit, too_deep) go through ai_validate_with_limits with the narrowed
+# budget from the entry's options.limits (max_nodes:1, max_depth:8); the
+# rest go through ai_validate_canonical. invalid_stream vectors are
+# CLI-only: no stream decode exists in the FFI. The split is on
 # `"kind": "invalid"` with the closing quote, so `"kind": "invalid_stream"`
 # never splits.
 invalid_blocks <- strsplit(manifest, '"kind": "invalid"', fixed = TRUE)[[1]][-1]
@@ -103,27 +103,32 @@ if (length(invalid_blocks) != 35) {
   stop("the manifest must list exactly 35 invalid cases", call. = FALSE)
 }
 invalid_checked <- 0L
-invalid_skipped <- 0L
 for (block in invalid_blocks) {
   match <- regexec(
-    '"name": "([^"]+)"[\\s\\S]*?"path": "([^"]+)"[\\s\\S]*?"expected_code": "([^"]+)"',
+    '"name": "([^"]+)"[\\s\\S]*?"path": "([^"]+)"[\\s\\S]*?"options": \\{([^}]*)\\}[\\s\\S]*?"expected_code": "([^"]+)"',
     block, perl = TRUE
   )
   captures <- regmatches(block, match)[[1]]
-  if (length(captures) != 4) {
+  if (length(captures) != 5) {
     stop("the manifest invalid case scan failed", call. = FALSE)
   }
   name <- captures[2]
   path <- captures[3]
-  expected_code <- captures[4]
-  if (name == "limit" || name == "too_deep") {
-    invalid_skipped <- invalid_skipped + 1L
-    next
-  }
+  options <- captures[4]
+  expected_code <- captures[5]
   image <- readBin(file.path(root, path), "raw", file.size(file.path(root, path)))
   refused <- tryCatch(
     {
-      ai_validate_canonical(image)
+      limits_match <- regexec('"limits": "([^"]+)"', options, perl = TRUE)
+      limits_captures <- regmatches(options, limits_match)[[1]]
+      if (length(limits_captures) == 2) {
+        parts <- strsplit(limits_captures[2], ":", fixed = TRUE)[[1]]
+        limits <- ai_limits_default()
+        limits <- ai_limits_set(limits, parts[1], as.numeric(parts[2]))
+        ai_validate_with_limits(image, limits)
+      } else {
+        ai_validate_canonical(image)
+      }
       FALSE
     },
     error = function(condition) {
@@ -135,11 +140,8 @@ for (block in invalid_blocks) {
   }
   invalid_checked <- invalid_checked + 1L
 }
-if (invalid_checked + invalid_skipped != 35L) {
+if (invalid_checked != 35L) {
   stop("the manifest invalid vectors were not exercised", call. = FALSE)
-}
-if (invalid_skipped != 2L) {
-  stop("the limits-dependent skips changed", call. = FALSE)
 }
 
 source_text <- "port = 8080\nname = \"r\"\n"

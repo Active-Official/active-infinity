@@ -11,8 +11,13 @@
 //! comparing it to the manifest, and it never ran on a hostile vector, so
 //! a wrong hash or a wrong refusal code passed silently. The optional
 //! expected-hash argument and the --expect-code hostile mode close both
-//! gaps; CI passes the manifest hash for full.ainf and loops the 33
-//! checkable invalid vectors through this binary.
+//! gaps; CI passes the manifest hash for full.ainf and loops the invalid
+//! vectors through this binary.
+//!
+//! INF-FFI-02: the --limits flag narrows one ceiling (e.g. --limits
+//! max_nodes:1) and routes the hostile mode through validate_with_limits,
+//! so the two limits-dependent vectors (limit, too_deep) are checked here
+//! instead of being skipped.
 
 const std = @import("std");
 const c = @cImport({
@@ -43,10 +48,16 @@ pub fn main(init: std.process.Init) !void {
     };
     var expected_hash: ?[]const u8 = null;
     var expected_code: ?[]const u8 = null;
+    var limits_spec: ?[]const u8 = null;
     while (arguments.next()) |argument| {
         if (std.mem.eql(u8, argument, "--expect-code")) {
             expected_code = arguments.next() orelse {
                 std.debug.print("--expect-code needs a code\n", .{});
+                std.process.exit(2);
+            };
+        } else if (std.mem.eql(u8, argument, "--limits")) {
+            limits_spec = arguments.next() orelse {
+                std.debug.print("--limits needs a field:value spec\n", .{});
                 std.process.exit(2);
             };
         } else if (expected_hash == null) {
@@ -76,9 +87,81 @@ pub fn main(init: std.process.Init) !void {
     if (c.fread(image.ptr, 1, image.len, file) != image.len) std.process.exit(2);
 
     // INF-POLY-02: hostile mode -- the image must be refused by
-    // validate_canonical with exactly the expected code.
+    // validate_canonical with exactly the expected code. INF-FFI-02: with
+    // --limits, the refusal goes through validate_with_limits under the
+    // narrowed budget instead.
     if (expected_code) |code| {
-        const status = c.active_infinity_validate_canonical(image.ptr, image.len);
+        const status = if (limits_spec) |spec| blk: {
+            var limits: c.active_infinity_limits = undefined;
+            if (c.active_infinity_limits_default(&limits) != 0) {
+                std.debug.print("FAIL limits default failed\n", .{});
+                std.process.exit(2);
+            }
+            const colon = std.mem.indexOfScalar(u8, spec, ':') orelse {
+                std.debug.print("FAIL bad --limits spec: {s}\n", .{spec});
+                std.process.exit(2);
+            };
+            const field = spec[0..colon];
+            const value = std.fmt.parseUnsigned(u64, spec[colon + 1 ..], 10) catch {
+                std.debug.print("FAIL bad --limits spec: {s}\n", .{spec});
+                std.process.exit(2);
+            };
+            // One branch per ceiling, in C struct order; an unknown field
+            // fails closed.
+            if (std.mem.eql(u8, field, "max_nodes")) {
+                limits.max_nodes = @intCast(value);
+            } else if (std.mem.eql(u8, field, "max_edges")) {
+                limits.max_edges = @intCast(value);
+            } else if (std.mem.eql(u8, field, "max_children")) {
+                limits.max_children = @intCast(value);
+            } else if (std.mem.eql(u8, field, "max_fields")) {
+                limits.max_fields = @intCast(value);
+            } else if (std.mem.eql(u8, field, "max_parts")) {
+                limits.max_parts = @intCast(value);
+            } else if (std.mem.eql(u8, field, "max_strings")) {
+                limits.max_strings = @intCast(value);
+            } else if (std.mem.eql(u8, field, "max_string_bytes")) {
+                limits.max_string_bytes = @intCast(value);
+            } else if (std.mem.eql(u8, field, "max_blobs")) {
+                limits.max_blobs = @intCast(value);
+            } else if (std.mem.eql(u8, field, "max_blob_bytes")) {
+                limits.max_blob_bytes = @intCast(value);
+            } else if (std.mem.eql(u8, field, "max_annotations")) {
+                limits.max_annotations = @intCast(value);
+            } else if (std.mem.eql(u8, field, "max_units")) {
+                limits.max_units = @intCast(value);
+            } else if (std.mem.eql(u8, field, "max_types")) {
+                limits.max_types = @intCast(value);
+            } else if (std.mem.eql(u8, field, "max_aux")) {
+                limits.max_aux = @intCast(value);
+            } else if (std.mem.eql(u8, field, "max_numbers")) {
+                limits.max_numbers = @intCast(value);
+            } else if (std.mem.eql(u8, field, "max_secrets")) {
+                limits.max_secrets = @intCast(value);
+            } else if (std.mem.eql(u8, field, "max_secret_bytes")) {
+                limits.max_secret_bytes = @intCast(value);
+            } else if (std.mem.eql(u8, field, "max_extensions")) {
+                limits.max_extensions = @intCast(value);
+            } else if (std.mem.eql(u8, field, "max_prov_bytes")) {
+                limits.max_prov_bytes = @intCast(value);
+            } else if (std.mem.eql(u8, field, "max_prov_entries")) {
+                limits.max_prov_entries = @intCast(value);
+            } else if (std.mem.eql(u8, field, "max_hashes")) {
+                limits.max_hashes = @intCast(value);
+            } else if (std.mem.eql(u8, field, "max_bindings")) {
+                limits.max_bindings = @intCast(value);
+            } else if (std.mem.eql(u8, field, "max_total_bytes")) {
+                limits.max_total_bytes = value;
+            } else if (std.mem.eql(u8, field, "max_decoded_bytes")) {
+                limits.max_decoded_bytes = value;
+            } else if (std.mem.eql(u8, field, "max_depth")) {
+                limits.max_depth = @intCast(value);
+            } else {
+                std.debug.print("FAIL unknown limits field: {s}\n", .{field});
+                std.process.exit(2);
+            }
+            break :blk c.active_infinity_validate_with_limits(image.ptr, image.len, &limits);
+        } else c.active_infinity_validate_canonical(image.ptr, image.len);
         if (status == c.ACTIVE_INFINITY_OK) {
             std.debug.print("FAIL invalid image was accepted\n", .{});
             std.process.exit(1);

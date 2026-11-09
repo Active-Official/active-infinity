@@ -5,20 +5,35 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
 
+type manifestOptions struct {
+	Limits string `json:"limits"`
+}
+
 type manifestCase struct {
-	Kind         string `json:"kind"`
-	Name         string `json:"name"`
-	Path         string `json:"path"`
-	ContentHash  string `json:"content_hash"`
-	ExpectedCode string `json:"expected_code"`
+	Kind         string          `json:"kind"`
+	Name         string          `json:"name"`
+	Path         string          `json:"path"`
+	ContentHash  string          `json:"content_hash"`
+	ExpectedCode string          `json:"expected_code"`
+	Options      manifestOptions `json:"options"`
 }
 
 type manifest struct {
 	Cases []manifestCase `json:"cases"`
+}
+
+func parseLimitValue(t *testing.T, text string) uint64 {
+	t.Helper()
+	value, err := strconv.ParseUint(text, 10, 64)
+	if err != nil {
+		t.Fatalf("invalid limits value %q: %v", text, err)
+	}
+	return value
 }
 
 func repoRoot(t *testing.T) string {
@@ -132,31 +147,39 @@ func TestConformance(t *testing.T) {
 		t.Fatalf("checked %d vectors, want %d", checked, valid)
 	}
 
-	// INF-POLY-02: every invalid vector except the two limits-dependent
-	// ones (limit, too_deep) must be refused by ValidateCanonical with
-	// exactly the manifest's expected_code. The WASM binding exposes no
-	// limits parameter, so those two need narrowed limits (max_nodes:1,
-	// max_depth:8) and are covered by the CLI's `conformance run` and the
-	// Rust suite instead. invalid_stream vectors are CLI-only: no stream
-	// decode exists in the FFI.
+	// INF-POLY-02: every invalid vector must be refused with exactly the
+	// manifest's expected_code. INF-FFI-02: the two limits-dependent ones
+	// (limit, too_deep) go through ValidateWithLimits with the narrowed
+	// budget from the entry's options.limits (max_nodes:1, max_depth:8);
+	// the rest go through ValidateCanonical. invalid_stream vectors are
+	// CLI-only: no stream decode exists in the FFI.
 	invalidChecked := 0
-	invalidSkipped := 0
 	for _, entry := range cases.Cases {
 		if entry.Kind != "invalid" {
-			continue
-		}
-		if entry.Name == "limit" || entry.Name == "too_deep" {
-			invalidSkipped++
 			continue
 		}
 		image, err := os.ReadFile(filepath.Join(root, entry.Path))
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := instance.ValidateCanonical(ctx, image); err == nil {
+		var validateErr error
+		if entry.Options.Limits != "" {
+			parts := strings.SplitN(entry.Options.Limits, ":", 2)
+			limits, err := instance.DefaultLimits(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := limits.SetField(parts[0], parseLimitValue(t, parts[1])); err != nil {
+				t.Fatalf("%s: %v", entry.Name, err)
+			}
+			validateErr = instance.ValidateWithLimits(ctx, image, &limits)
+		} else {
+			validateErr = instance.ValidateCanonical(ctx, image)
+		}
+		if validateErr == nil {
 			t.Fatalf("%s: invalid image was accepted", entry.Name)
-		} else if failure, ok := err.(*Error); !ok || failure.Code != entry.ExpectedCode {
-			t.Fatalf("%s: wrong code %v", entry.Name, err)
+		} else if failure, ok := validateErr.(*Error); !ok || failure.Code != entry.ExpectedCode {
+			t.Fatalf("%s: wrong code %v", entry.Name, validateErr)
 		}
 		invalidChecked++
 	}
@@ -166,11 +189,8 @@ func TestConformance(t *testing.T) {
 			invalidTotal++
 		}
 	}
-	if invalidChecked+invalidSkipped != invalidTotal {
-		t.Fatalf("checked %d + skipped %d invalid vectors, want %d", invalidChecked, invalidSkipped, invalidTotal)
-	}
-	if invalidSkipped != 2 {
-		t.Fatalf("limits-dependent skips changed: %d", invalidSkipped)
+	if invalidChecked != invalidTotal {
+		t.Fatalf("checked %d invalid vectors, want %d", invalidChecked, invalidTotal)
 	}
 
 	first, err := instance.FromActive(ctx, []byte("port = 8080\nname = \"go\"\n"), "go.active")

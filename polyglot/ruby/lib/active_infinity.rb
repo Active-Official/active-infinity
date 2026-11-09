@@ -42,6 +42,45 @@ module ActiveInfinity
   attach_function :active_infinity_free, %i[pointer size_t], :void
   attach_function :active_infinity_validate, %i[pointer size_t], :int32
   attach_function :active_infinity_validate_canonical, %i[pointer size_t], :int32
+  attach_function :active_infinity_limits_default, [:pointer], :int32
+  attach_function :active_infinity_validate_with_limits, %i[pointer size_t pointer], :int32
+  attach_function :active_infinity_decode_with_limits,
+                  %i[pointer size_t pointer pointer pointer], :int32
+
+  # INF-FFI-02: caller-supplied budget, one ceiling per field, in the same
+  # order as the C `active_infinity_limits` struct.
+  class Limits < FFI::Struct
+    layout :max_nodes, :uint32,
+           :max_edges, :uint32,
+           :max_children, :uint32,
+           :max_fields, :uint32,
+           :max_parts, :uint32,
+           :max_strings, :uint32,
+           :max_string_bytes, :uint32,
+           :max_blobs, :uint32,
+           :max_blob_bytes, :uint32,
+           :max_annotations, :uint32,
+           :max_units, :uint32,
+           :max_types, :uint32,
+           :max_aux, :uint32,
+           :max_numbers, :uint32,
+           :max_secrets, :uint32,
+           :max_secret_bytes, :uint32,
+           :max_extensions, :uint32,
+           :max_prov_bytes, :uint32,
+           :max_prov_entries, :uint32,
+           :max_hashes, :uint32,
+           :max_bindings, :uint32,
+           :max_total_bytes, :uint64,
+           :max_decoded_bytes, :uint64,
+           :max_depth, :uint32
+
+    def self.default
+      limits = new
+      ActiveInfinity.check(ActiveInfinity.active_infinity_limits_default(limits))
+      limits
+    end
+  end
   attach_function :active_infinity_content_hash, %i[pointer size_t pointer], :int32
   attach_function :active_infinity_reencode, %i[pointer size_t pointer pointer], :int32
   attach_function :active_infinity_from_active,
@@ -124,6 +163,29 @@ module ActiveInfinity
         ActiveInfinity.check(ActiveInfinity.active_infinity_validate_canonical(input, length))
       end
       self
+    end
+
+    # INF-FFI-02: the limits-parameterized form of validate_canonical.
+    # nil means the library defaults.
+    def validate_with_limits(limits = nil)
+      ActiveInfinity.with_buffer(@bytes) do |input, length|
+        ActiveInfinity.check(
+          ActiveInfinity.active_infinity_validate_with_limits(input, length, limits)
+        )
+      end
+      self
+    end
+
+    # INF-FFI-02: the limits-parameterized form of reencode. A nil limits
+    # is materialized through Limits.default() because the output helper
+    # treats a nil prefix as "no prefix".
+    def decode_with_limits(limits = nil)
+      limits ||= Limits.default
+      ActiveInfinity.output(@bytes, limits) do |input, length, limits_pointer, out, size|
+        ActiveInfinity.active_infinity_decode_with_limits(
+          input, length, limits_pointer, out, size
+        )
+      end
     end
 
     def content_hash

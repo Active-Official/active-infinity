@@ -24,8 +24,8 @@ function manifest_invalid_cases()
     text = read(joinpath(ROOT, "conformance", "manifest.json"), String)
     # kind "invalid" (with the closing quote, so "invalid_stream" never
     # matches) is followed by this case's name, path and expected_code.
-    pattern = r"\"kind\": \"invalid\"[\s\S]*?\"name\": \"([^\"]+)\"[\s\S]*?\"path\": \"([^\"]+)\"[\s\S]*?\"expected_code\": \"([^\"]+)\""
-    return [(String(m.captures[1]), String(m.captures[2]), String(m.captures[3]))
+    pattern = r"\"kind\": \"invalid\"[\s\S]*?\"name\": \"([^\"]+)\"[\s\S]*?\"path\": \"([^\"]+)\"[\s\S]*?\"options\": \\{([^}]*)\\}[\s\S]*?\"expected_code\": \"([^\"]+)\""
+    return [(String(m.captures[1]), String(m.captures[2]), String(m.captures[3]), String(m.captures[4]))
             for m in eachmatch(pattern, text)]
 end
 
@@ -86,26 +86,28 @@ function main()
         checked += 1
     end
 
-    # INF-POLY-02: every invalid vector except the two limits-dependent
-    # ones (limit, too_deep) must be refused by validate_canonical with
-    # exactly the manifest's expected_code. The FFI exposes no limits
-    # parameter, so those two need narrowed limits (max_nodes:1,
-    # max_depth:8) and are covered by the CLI's `conformance run` and the
-    # Rust suite instead. invalid_stream vectors are CLI-only: no stream
-    # decode exists in the FFI.
+    # INF-POLY-02: every invalid vector must be refused with exactly the
+    # manifest's expected_code. INF-FFI-02: the two limits-dependent ones
+    # (limit, too_deep) go through validate_with_limits with the narrowed
+    # budget from the entry's options.limits (max_nodes:1, max_depth:8);
+    # the rest go through validate_canonical. invalid_stream vectors are
+    # CLI-only: no stream decode exists in the FFI.
     invalid_cases = manifest_invalid_cases()
     length(invalid_cases) == 35 || error("the manifest must list exactly 35 invalid cases")
     invalid_checked = 0
-    invalid_skipped = 0
-    for (name, path, expected) in invalid_cases
-        if name == "limit" || name == "too_deep"
-            invalid_skipped += 1
-            continue
-        end
+    for (name, path, options, expected) in invalid_cases
         data = read(joinpath(ROOT, path))
         refused = false
         try
-            validate_canonical(data)
+            limits_match = match(r"\"limits\": \"([^\"]+)\"", options)
+            if limits_match !== nothing
+                field, value = split(limits_match.captures[1], ":")
+                limits = Limits()
+                set_limit!(limits, field, parse(Int, value))
+                validate_with_limits(data, limits)
+            else
+                validate_canonical(data)
+            end
         catch failure
             failure isa ActiveInfinityError || rethrow()
             failure.code == expected || error("$name: wrong code $(failure.code)")

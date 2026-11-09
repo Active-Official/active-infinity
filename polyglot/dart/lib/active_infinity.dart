@@ -23,6 +23,16 @@ class ActiveInfinityException implements Exception {
 
 typedef _ValidateNative = Int32 Function(Pointer<Uint8>, IntPtr);
 typedef _ValidateDart = int Function(Pointer<Uint8>, int);
+typedef _LimitsDefaultNative = Int32 Function(Pointer<Limits>);
+typedef _LimitsDefaultDart = int Function(Pointer<Limits>);
+typedef _ValidateWithLimitsNative = Int32 Function(
+    Pointer<Uint8>, IntPtr, Pointer<Limits>);
+typedef _ValidateWithLimitsDart = int Function(
+    Pointer<Uint8>, int, Pointer<Limits>);
+typedef _DecodeWithLimitsNative = Int32 Function(Pointer<Uint8>, IntPtr,
+    Pointer<Limits>, Pointer<Uint8>, Pointer<IntPtr>);
+typedef _DecodeWithLimitsDart = int Function(Pointer<Uint8>, int,
+    Pointer<Limits>, Pointer<Uint8>, Pointer<IntPtr>);
 typedef _HashNative = Int32 Function(Pointer<Uint8>, IntPtr, Pointer<Uint8>);
 typedef _HashDart = int Function(Pointer<Uint8>, int, Pointer<Uint8>);
 typedef _OutputNative = Int32 Function(
@@ -50,6 +60,13 @@ class _Native {
         validateCanonical = library
             .lookupFunction<_ValidateNative, _ValidateDart>(
                 'active_infinity_validate_canonical'),
+        limitsDefault = library.lookupFunction<_LimitsDefaultNative,
+                _LimitsDefaultDart>('active_infinity_limits_default'),
+        validateWithLimits = library.lookupFunction<
+                _ValidateWithLimitsNative, _ValidateWithLimitsDart>(
+            'active_infinity_validate_with_limits'),
+        decodeWithLimits = library.lookupFunction<_DecodeWithLimitsNative,
+                _DecodeWithLimitsDart>('active_infinity_decode_with_limits'),
         hash = library.lookupFunction<_HashNative, _HashDart>(
             'active_infinity_content_hash'),
         reencode = library.lookupFunction<_OutputNative, _OutputDart>(
@@ -73,6 +90,9 @@ class _Native {
   // INF-POLY-03: `validate` already proves the canonical form (INF-02);
   // this states the requirement explicitly.
   final _ValidateDart validateCanonical;
+  final _LimitsDefaultDart limitsDefault;
+  final _ValidateWithLimitsDart validateWithLimits;
+  final _DecodeWithLimitsDart decodeWithLimits;
   final _HashDart hash;
   final _OutputDart reencode;
   final _OutputDart redactedJson;
@@ -118,6 +138,129 @@ String _lastError(_Native native) {
   return utf8.decode(bytes);
 }
 
+/// Caller-supplied budget (INF-FFI-02): one ceiling per field, in the
+/// same order as the C `active_infinity_limits` struct.
+final class Limits extends Struct {
+  @Uint32()
+  external int maxNodes;
+  @Uint32()
+  external int maxEdges;
+  @Uint32()
+  external int maxChildren;
+  @Uint32()
+  external int maxFields;
+  @Uint32()
+  external int maxParts;
+  @Uint32()
+  external int maxStrings;
+  @Uint32()
+  external int maxStringBytes;
+  @Uint32()
+  external int maxBlobs;
+  @Uint32()
+  external int maxBlobBytes;
+  @Uint32()
+  external int maxAnnotations;
+  @Uint32()
+  external int maxUnits;
+  @Uint32()
+  external int maxTypes;
+  @Uint32()
+  external int maxAux;
+  @Uint32()
+  external int maxNumbers;
+  @Uint32()
+  external int maxSecrets;
+  @Uint32()
+  external int maxSecretBytes;
+  @Uint32()
+  external int maxExtensions;
+  @Uint32()
+  external int maxProvBytes;
+  @Uint32()
+  external int maxProvEntries;
+  @Uint32()
+  external int maxHashes;
+  @Uint32()
+  external int maxBindings;
+  @Uint64()
+  external int maxTotalBytes;
+  @Uint64()
+  external int maxDecodedBytes;
+  @Uint32()
+  external int maxDepth;
+
+  /// Fill a Limits with the library defaults (via the FFI). Free it with
+  /// `calloc.free` when done.
+  static Pointer<Limits> defaults() {
+    final native = _open();
+    final limits = calloc<Limits>();
+    final status = native.limitsDefault(limits);
+    if (status != 0) {
+      calloc.free(limits);
+      throw ActiveInfinityException(_lastError(native), status);
+    }
+    return limits;
+  }
+
+  /// Set one ceiling by its C field name (e.g. `max_nodes`). Fails closed
+  /// on an unknown name.
+  void setField(String name, int value) {
+    switch (name) {
+      case 'max_nodes':
+        maxNodes = value;
+      case 'max_edges':
+        maxEdges = value;
+      case 'max_children':
+        maxChildren = value;
+      case 'max_fields':
+        maxFields = value;
+      case 'max_parts':
+        maxParts = value;
+      case 'max_strings':
+        maxStrings = value;
+      case 'max_string_bytes':
+        maxStringBytes = value;
+      case 'max_blobs':
+        maxBlobs = value;
+      case 'max_blob_bytes':
+        maxBlobBytes = value;
+      case 'max_annotations':
+        maxAnnotations = value;
+      case 'max_units':
+        maxUnits = value;
+      case 'max_types':
+        maxTypes = value;
+      case 'max_aux':
+        maxAux = value;
+      case 'max_numbers':
+        maxNumbers = value;
+      case 'max_secrets':
+        maxSecrets = value;
+      case 'max_secret_bytes':
+        maxSecretBytes = value;
+      case 'max_extensions':
+        maxExtensions = value;
+      case 'max_prov_bytes':
+        maxProvBytes = value;
+      case 'max_prov_entries':
+        maxProvEntries = value;
+      case 'max_hashes':
+        maxHashes = value;
+      case 'max_bindings':
+        maxBindings = value;
+      case 'max_total_bytes':
+        maxTotalBytes = value;
+      case 'max_decoded_bytes':
+        maxDecodedBytes = value;
+      case 'max_depth':
+        maxDepth = value;
+      default:
+        throw ArgumentError('unknown limits field $name');
+    }
+  }
+}
+
 class Image {
   Image(this.bytes);
 
@@ -146,6 +289,27 @@ class Image {
     });
     return this;
   }
+
+  /// INF-FFI-02: the limits-parameterized form of validateCanonical.
+  /// A null limits means the library defaults.
+  Image validateWithLimits([Pointer<Limits>? limits]) {
+    final native = _open();
+    _withInput(bytes, (pointer, length) {
+      final status = native.validateWithLimits(
+          pointer, length, limits ?? nullptr.cast<Limits>());
+      if (status != 0) {
+        throw ActiveInfinityException(_lastError(native), status);
+      }
+    });
+    return this;
+  }
+
+  /// INF-FFI-02: the limits-parameterized form of reencode. A null limits
+  /// means the library defaults (the FFI's NULL convention).
+  Uint8List decodeWithLimits([Pointer<Limits>? limits]) =>
+      _output(bytes, (native, input, length, out, size) =>
+          native.decodeWithLimits(
+              input, length, limits ?? nullptr.cast<Limits>(), out, size));
 
   Uint8List contentHash() {
     final native = _open();

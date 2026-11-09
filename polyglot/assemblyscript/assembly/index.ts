@@ -14,6 +14,24 @@ declare function hostValidate(pointer: usize, length: usize): i32;
 @external("active_infinity", "validate_canonical")
 declare function hostValidateCanonical(pointer: usize, length: usize): i32;
 
+// INF-FFI-02: caller-supplied budget. The limits struct is 112 bytes in
+// this module's memory (see the host's LIMITS_SIZE); the host fills it
+// from the reference defaults and copies it across on each call.
+@external("active_infinity", "limits_default")
+declare function hostLimitsDefault(limits: usize): i32;
+
+@external("active_infinity", "validate_with_limits")
+declare function hostValidateWithLimits(pointer: usize, length: usize, limits: usize): i32;
+
+@external("active_infinity", "decode_with_limits")
+declare function hostDecodeWithLimits(
+  pointer: usize,
+  length: usize,
+  limits: usize,
+  output: usize,
+  outputLength: usize,
+): i32;
+
 @external("active_infinity", "content_hash")
 declare function hostHash(pointer: usize, length: usize, output: usize): i32;
 
@@ -70,6 +88,24 @@ export function validate(pointer: usize, length: i32): i32 {
 
 export function validateCanonical(pointer: usize, length: i32): i32 {
   return hostValidateCanonical(pointer, length);
+}
+
+export function limitsDefault(limits: usize): i32 {
+  return hostLimitsDefault(limits);
+}
+
+export function validateWithLimits(pointer: usize, length: i32, limits: usize): i32 {
+  return hostValidateWithLimits(pointer, length, limits);
+}
+
+export function decodeWithLimits(
+  pointer: usize,
+  length: i32,
+  limits: usize,
+  output: usize,
+  outputLength: usize,
+): i32 {
+  return hostDecodeWithLimits(pointer, length, limits, output, outputLength);
 }
 
 export function contentHash(pointer: usize, length: i32, output: usize): i32 {

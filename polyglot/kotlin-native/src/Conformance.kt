@@ -28,6 +28,14 @@ private class Abi {
     // this states the requirement explicitly.
     val validateCanonical: CPointer<CFunction<(CPointer<UByteVar>?, ULong) -> Int>> =
         symbol("active_infinity_validate_canonical")
+    // INF-FFI-02: caller-supplied budget. The limits struct is 112 bytes in
+    // native memory (21 uint32 ceilings, then max_total_bytes and
+    // max_decoded_bytes as uint64, then max_depth as uint32); a null limits
+    // pointer means the library defaults.
+    val limitsDefault: CPointer<CFunction<(CPointer<ByteVar>?) -> Int>> =
+        symbol("active_infinity_limits_default")
+    val validateWithLimits: CPointer<CFunction<(CPointer<UByteVar>?, ULong, CPointer<ByteVar>?) -> Int>> =
+        symbol("active_infinity_validate_with_limits")
     val hash: CPointer<CFunction<(CPointer<UByteVar>?, ULong, CPointer<UByteVar>?) -> Int>> =
         symbol("active_infinity_content_hash")
     val reencode: CPointer<CFunction<(CPointer<UByteVar>?, ULong, CPointer<UByteVar>?, CPointer<ULongVar>?) -> Int>> =
@@ -174,7 +182,8 @@ fun main() {
     // `"kind": "invalid_stream"`; the `.*?` spans the options object,
     // which sits between path and expected_code and never contains an
     // expected_code of its own.
-    val invalidCase = Regex("(?s)\"kind\"\\s*:\\s*\"invalid\".*?\"name\"\\s*:\\s*\"([^\"]+)\".*?\"path\"\\s*:\\s*\"([^\"]+)\".*?\"expected_code\"\\s*:\\s*\"([^\"]+)\"")
+    val invalidCase = Regex("(?s)\"kind\"\\s*:\\s*\"invalid\".*?\"name\"\\s*:\\s*\"([^\"]+)\".*?\"path\"\\s*:\\s*\"([^\"]+)\".*?\"options\"\\s*:\\s*\\{([^}]*)\\}.*?\"expected_code\"\\s*:\\s*\"([^\"]+)\"")
+    val limitsOption = Regex("\"limits\"\\s*:\\s*\"([^\"]+)\"")
 
     var checked = 0
     for (match in case.findAll(manifest)) {
@@ -248,34 +257,53 @@ fun main() {
     val valid = Regex("\"kind\": \"valid\"").findAll(manifest).count()
     check(checked == valid) { "manifest vectors not exercised: $checked of $valid" }
 
-    // INF-POLY-02: every invalid vector except the two limits-dependent
-    // ones (limit, too_deep) must be refused by validateCanonical with
-    // exactly the manifest's expected_code. The FFI exposes no limits
-    // parameter, so those two need narrowed limits (max_nodes:1,
-    // max_depth:8) and are covered by the CLI's `conformance run` and
-    // the Rust suite instead. invalid_stream vectors are CLI-only: no
-    // stream decode exists in the FFI.
+    // INF-POLY-02: every invalid vector must be refused with exactly the
+    // manifest's expected_code. INF-FFI-02: the two limits-dependent ones
+    // (limit, too_deep) go through validateWithLimits with the narrowed
+    // budget from the entry's options.limits (max_nodes:1, max_depth:8);
+    // the rest go through validateCanonical. invalid_stream vectors are
+    // CLI-only: no stream decode exists in the FFI. The limits struct is
+    // 112 bytes in native memory; only the two fields the manifest narrows
+    // are written (max_nodes at offset 0, max_depth at offset 104).
     var invalidChecked = 0
-    var invalidSkipped = 0
     for (match in invalidCase.findAll(manifest)) {
         val invalidName = match.groupValues[1]
         val invalidPath = match.groupValues[2]
-        val expectedCode = match.groupValues[3]
-        if (invalidName == "limit" || invalidName == "too_deep") {
-            invalidSkipped++
-            continue
-        }
+        val invalidOptions = match.groupValues[3]
+        val expectedCode = match.groupValues[4]
         val invalidImage = readFile("$root/$invalidPath")
         withInput(abi, invalidImage) { pointer, length ->
-            val status = abi.validateCanonical(pointer, length)
+            val limitsMatch = limitsOption.find(invalidOptions)
+            val status = if (limitsMatch != null) {
+                val parts = limitsMatch.groupValues[1].split(":", limit = 2)
+                // The limits struct is 112 bytes in native memory, allocated
+                // with the FFI's own allocator (withInput is not in a
+                // memScoped, so allocArray is unavailable).
+                val limits = abi.alloc(112u) ?: error("$invalidName: cannot allocate limits")
+                try {
+                    check(abi.limitsDefault(limits.reinterpret<ByteVar>()) == 0) { "$invalidName: limitsDefault failed" }
+                    val offset = when (parts[0]) {
+                        "max_nodes" -> 0
+                        "max_depth" -> 104
+                        else -> error("$invalidName: unknown limits field ${parts[0]}")
+                    }
+                    val bytes: CPointer<ByteVar> = limits.reinterpret<ByteVar>()!!
+                    val slot: CPointer<UIntVar> = (bytes + offset)!!.reinterpret()!!
+                    slot.pointed.value = parts[1].toUInt()
+                    abi.validateWithLimits(pointer, length, limits.reinterpret())
+                } finally {
+                    abi.free(limits, 112u)
+                }
+            } else {
+                abi.validateCanonical(pointer, length)
+            }
             if (status == 0) error("$invalidName: invalid image was accepted")
             check(lastError(abi) == expectedCode) { "$invalidName: wrong code ${lastError(abi)}" }
         }
         invalidChecked++
     }
     val invalidTotal = Regex("\"kind\": \"invalid\"").findAll(manifest).count()
-    check(invalidChecked + invalidSkipped == invalidTotal) { "manifest invalid vectors were not exercised: $invalidChecked + $invalidSkipped of $invalidTotal" }
-    check(invalidSkipped == 2) { "limits-dependent skips changed: $invalidSkipped" }
+    check(invalidChecked == invalidTotal) { "manifest invalid vectors were not exercised: $invalidChecked of $invalidTotal" }
 
     val source = "port = 8080\nname = \"kotlin-native\"\n".encodeToByteArray()
     val first = fromActive(abi, source, "kn.active")

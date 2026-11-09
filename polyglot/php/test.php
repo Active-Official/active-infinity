@@ -89,39 +89,50 @@ if ($checked !== $valid) {
     throw new RuntimeException("valid vectors were not exercised: $checked of $valid");
 }
 
-// INF-POLY-02: every invalid vector except the two limits-dependent ones
-// (limit, too_deep) must be refused by validateCanonical with exactly the
-// manifest's expected_code. The FFI exposes no limits parameter, so those
-// two need narrowed limits (max_nodes:1, max_depth:8) and are covered by
-// the CLI's `conformance run` and the Rust suite instead. invalid_stream
-// vectors are CLI-only: no stream decode exists in the FFI.
+// INF-POLY-02: every invalid vector must be refused with exactly the
+// manifest's expected_code. INF-FFI-02: the two limits-dependent ones
+// (limit, too_deep) go through validateWithLimits with the narrowed budget
+// from the entry's options.limits (max_nodes:1, max_depth:8); the rest go
+// through validateCanonical. invalid_stream vectors are CLI-only: no stream
+// decode exists in the FFI.
 $invalidChecked = 0;
-$invalidSkipped = 0;
+$limitFields = ['max_nodes', 'max_edges', 'max_children', 'max_fields', 'max_parts', 'max_strings', 'max_string_bytes', 'max_blobs', 'max_blob_bytes', 'max_annotations', 'max_units', 'max_types', 'max_aux', 'max_numbers', 'max_secrets', 'max_secret_bytes', 'max_extensions', 'max_prov_bytes', 'max_prov_entries', 'max_hashes', 'max_bindings', 'max_total_bytes', 'max_decoded_bytes', 'max_depth'];
 foreach ($manifest['cases'] as $entry) {
     if ($entry['kind'] !== 'invalid') {
         continue;
     }
-    if ($entry['name'] === 'limit' || $entry['name'] === 'too_deep') {
-        $invalidSkipped++;
-        continue;
-    }
     $image = file_get_contents($root . '/' . $entry['path']);
-    try {
-        $binding->validateCanonical($image);
-        throw new RuntimeException($entry['name'] . ': invalid image was accepted');
-    } catch (ActiveInfinityError $error) {
-        if ($error->errorCode !== $entry['expected_code']) {
-            throw new RuntimeException($entry['name'] . ': wrong code ' . $error->errorCode);
+    $limitsSpec = $entry['options']['limits'] ?? null;
+    if ($limitsSpec !== null) {
+        [$field, $value] = explode(':', $limitsSpec, 2);
+        $limits = $binding->limitsDefault();
+        if (!in_array($field, $limitFields, true)) {
+            throw new RuntimeException($entry['name'] . ": unknown limits field $field");
+        }
+        $limits->$field = (int) $value;
+        try {
+            $binding->validateWithLimits($image, $limits);
+            throw new RuntimeException($entry['name'] . ': invalid image was accepted');
+        } catch (ActiveInfinityError $error) {
+            if ($error->errorCode !== $entry['expected_code']) {
+                throw new RuntimeException($entry['name'] . ': wrong code ' . $error->errorCode);
+            }
+        }
+    } else {
+        try {
+            $binding->validateCanonical($image);
+            throw new RuntimeException($entry['name'] . ': invalid image was accepted');
+        } catch (ActiveInfinityError $error) {
+            if ($error->errorCode !== $entry['expected_code']) {
+                throw new RuntimeException($entry['name'] . ': wrong code ' . $error->errorCode);
+            }
         }
     }
     $invalidChecked++;
 }
 $invalidTotal = count(array_filter($manifest['cases'], fn ($entry) => $entry['kind'] === 'invalid'));
-if ($invalidChecked + $invalidSkipped !== $invalidTotal) {
-    throw new RuntimeException("invalid vectors were not exercised: $invalidChecked + $invalidSkipped of $invalidTotal");
-}
-if ($invalidSkipped !== 2) {
-    throw new RuntimeException("limits-dependent skips changed: $invalidSkipped");
+if ($invalidChecked !== $invalidTotal) {
+    throw new RuntimeException("invalid vectors were not exercised: $invalidChecked of $invalidTotal");
 }
 
 $source = "port = 8080\nname = \"php\"\n";

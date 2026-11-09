@@ -7,10 +7,18 @@ export declare class ActiveInfinityError extends Error {
 	readonly status: number;
 }
 
+export declare class Limits {
+	static defaults(ai: ActiveInfinity): Limits;
+	set(field: string, value: number): this;
+	free(): void;
+}
+
 export declare class ActiveInfinity {
 	static instantiate(bytes: Uint8Array | ArrayBuffer): Promise<ActiveInfinity>;
 	validate(bytes: Uint8Array | ArrayBuffer): true;
 	validateCanonical(bytes: Uint8Array | ArrayBuffer): true;
+	validateWithLimits(bytes: Uint8Array | ArrayBuffer, limits?: Limits | null): true;
+	decodeWithLimits(bytes: Uint8Array | ArrayBuffer, limits?: Limits | null): Uint8Array;
 	contentHash(bytes: Uint8Array | ArrayBuffer): Uint8Array;
 	reencode(bytes: Uint8Array | ArrayBuffer): Uint8Array;
 	fromActive(source: string | Uint8Array, name?: string): Uint8Array;

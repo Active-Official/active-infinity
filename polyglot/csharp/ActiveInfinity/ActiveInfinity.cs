@@ -39,6 +39,15 @@ internal static class Native
     internal static extern int active_infinity_validate_canonical(IntPtr pointer, nuint length);
 
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int active_infinity_limits_default(ref Limits limits);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int active_infinity_validate_with_limits(IntPtr pointer, nuint length, IntPtr limits);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int active_infinity_decode_with_limits(IntPtr pointer, nuint length, IntPtr limits, IntPtr output, out nuint outputLength);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
     internal static extern int active_infinity_content_hash(IntPtr pointer, nuint length, IntPtr output);
 
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
@@ -61,6 +70,83 @@ internal static class Native
         if (status != 0)
         {
             throw new ActiveInfinityException(LastError(), status);
+        }
+    }
+}
+
+/// <summary>
+/// Caller-supplied budget (INF-FFI-02): one ceiling per field, in the same
+/// order as the C <c>active_infinity_limits</c> struct.
+/// </summary>
+[StructLayout(LayoutKind.Sequential)]
+public struct Limits
+{
+    public uint MaxNodes;
+    public uint MaxEdges;
+    public uint MaxChildren;
+    public uint MaxFields;
+    public uint MaxParts;
+    public uint MaxStrings;
+    public uint MaxStringBytes;
+    public uint MaxBlobs;
+    public uint MaxBlobBytes;
+    public uint MaxAnnotations;
+    public uint MaxUnits;
+    public uint MaxTypes;
+    public uint MaxAux;
+    public uint MaxNumbers;
+    public uint MaxSecrets;
+    public uint MaxSecretBytes;
+    public uint MaxExtensions;
+    public uint MaxProvBytes;
+    public uint MaxProvEntries;
+    public uint MaxHashes;
+    public uint MaxBindings;
+    public ulong MaxTotalBytes;
+    public ulong MaxDecodedBytes;
+    public uint MaxDepth;
+
+    /// <summary>Fill a Limits with the library defaults (via the FFI).</summary>
+    public static Limits Default()
+    {
+        Limits limits = new();
+        Native.Check(Native.active_infinity_limits_default(ref limits));
+        return limits;
+    }
+
+    /// <summary>
+    /// Set one ceiling by its C field name (e.g. <c>max_nodes</c>). Fails
+    /// closed on an unknown name.
+    /// </summary>
+    public void SetField(string name, ulong value)
+    {
+        switch (name)
+        {
+            case "max_nodes": MaxNodes = (uint)value; break;
+            case "max_edges": MaxEdges = (uint)value; break;
+            case "max_children": MaxChildren = (uint)value; break;
+            case "max_fields": MaxFields = (uint)value; break;
+            case "max_parts": MaxParts = (uint)value; break;
+            case "max_strings": MaxStrings = (uint)value; break;
+            case "max_string_bytes": MaxStringBytes = (uint)value; break;
+            case "max_blobs": MaxBlobs = (uint)value; break;
+            case "max_blob_bytes": MaxBlobBytes = (uint)value; break;
+            case "max_annotations": MaxAnnotations = (uint)value; break;
+            case "max_units": MaxUnits = (uint)value; break;
+            case "max_types": MaxTypes = (uint)value; break;
+            case "max_aux": MaxAux = (uint)value; break;
+            case "max_numbers": MaxNumbers = (uint)value; break;
+            case "max_secrets": MaxSecrets = (uint)value; break;
+            case "max_secret_bytes": MaxSecretBytes = (uint)value; break;
+            case "max_extensions": MaxExtensions = (uint)value; break;
+            case "max_prov_bytes": MaxProvBytes = (uint)value; break;
+            case "max_prov_entries": MaxProvEntries = (uint)value; break;
+            case "max_hashes": MaxHashes = (uint)value; break;
+            case "max_bindings": MaxBindings = (uint)value; break;
+            case "max_total_bytes": MaxTotalBytes = value; break;
+            case "max_decoded_bytes": MaxDecodedBytes = value; break;
+            case "max_depth": MaxDepth = (uint)value; break;
+            default: throw new ArgumentException($"unknown limits field {name}", nameof(name));
         }
     }
 }
@@ -99,6 +185,54 @@ public sealed class Image
     {
         WithInput(pointer => Native.active_infinity_validate_canonical(pointer, (nuint)Bytes.Length));
         return this;
+    }
+
+    /// <summary>
+    /// The limits-parameterized form of <see cref="ValidateCanonical"/>.
+    /// A null limits means the library defaults. (INF-FFI-02)
+    /// </summary>
+    public Image ValidateWithLimits(Limits? limits = null)
+    {
+        WithInput(pointer =>
+        {
+            if (limits is null)
+            {
+                return Native.active_infinity_validate_with_limits(pointer, (nuint)Bytes.Length, IntPtr.Zero);
+            }
+            Limits value = limits.Value;
+            IntPtr handle = Marshal.AllocHGlobal(Marshal.SizeOf<Limits>());
+            try
+            {
+                Marshal.StructureToPtr(value, handle, false);
+                return Native.active_infinity_validate_with_limits(pointer, (nuint)Bytes.Length, handle);
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(handle);
+            }
+        });
+        return this;
+    }
+
+    /// <summary>
+    /// The limits-parameterized form of <see cref="Reencode"/>. A null limits
+    /// is materialized through <see cref="Limits.Default"/> so the FFI always
+    /// receives a struct pointer. (INF-FFI-02)
+    /// </summary>
+    public byte[] DecodeWithLimits(Limits? limits = null)
+    {
+        Limits value = limits ?? Limits.Default();
+        IntPtr handle = Marshal.AllocHGlobal(Marshal.SizeOf<Limits>());
+        try
+        {
+            Marshal.StructureToPtr(value, handle, false);
+            return Output((IntPtr input, IntPtr output, out nuint length) =>
+                Native.active_infinity_decode_with_limits(input, (nuint)Bytes.Length, handle, output, out length));
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(handle);
+        }
     }
 
     public byte[] ContentHash()

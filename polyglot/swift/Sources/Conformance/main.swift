@@ -69,6 +69,25 @@ struct Image {
         }
     }
 
+    // INF-FFI-02: the limits-parameterized form of validateCanonical. A nil
+    // limits means the library defaults. The `active_infinity_limits` struct
+    // is imported from the C header, so no Swift-side mirror is needed: fill
+    // one with `active_infinity_limits_default` and override the ceiling to
+    // tighten.
+    func validateWithLimits(_ limits: UnsafePointer<active_infinity_limits>? = nil) throws {
+        try withInput { pointer, length in
+            try Image.check(active_infinity_validate_with_limits(pointer, length, limits))
+        }
+    }
+
+    // INF-FFI-02: the limits-parameterized form of reencode. A nil limits
+    // means the library defaults (the FFI's NULL convention).
+    func decodeWithLimits(_ limits: UnsafePointer<active_infinity_limits>? = nil) throws -> [UInt8] {
+        try output { pointer, length, out, size in
+            active_infinity_decode_with_limits(pointer, length, limits, out, size)
+        }
+    }
+
     func contentHash() throws -> [UInt8] {
         var hash = [UInt8](repeating: 0, count: 32)
         try withInput { pointer, length in
@@ -134,6 +153,41 @@ struct Image {
                     size
                 )
             }
+        }
+    }
+}
+
+extension active_infinity_limits {
+    /// Set one ceiling by its C field name (e.g. `max_nodes`). Fails closed
+    /// on an unknown name. (INF-FFI-02)
+    mutating func setField(_ name: String, _ value: UInt64) throws {
+        switch name {
+        case "max_nodes": max_nodes = UInt32(value)
+        case "max_edges": max_edges = UInt32(value)
+        case "max_children": max_children = UInt32(value)
+        case "max_fields": max_fields = UInt32(value)
+        case "max_parts": max_parts = UInt32(value)
+        case "max_strings": max_strings = UInt32(value)
+        case "max_string_bytes": max_string_bytes = UInt32(value)
+        case "max_blobs": max_blobs = UInt32(value)
+        case "max_blob_bytes": max_blob_bytes = UInt32(value)
+        case "max_annotations": max_annotations = UInt32(value)
+        case "max_units": max_units = UInt32(value)
+        case "max_types": max_types = UInt32(value)
+        case "max_aux": max_aux = UInt32(value)
+        case "max_numbers": max_numbers = UInt32(value)
+        case "max_secrets": max_secrets = UInt32(value)
+        case "max_secret_bytes": max_secret_bytes = UInt32(value)
+        case "max_extensions": max_extensions = UInt32(value)
+        case "max_prov_bytes": max_prov_bytes = UInt32(value)
+        case "max_prov_entries": max_prov_entries = UInt32(value)
+        case "max_hashes": max_hashes = UInt32(value)
+        case "max_bindings": max_bindings = UInt32(value)
+        case "max_total_bytes": max_total_bytes = value
+        case "max_decoded_bytes": max_decoded_bytes = value
+        case "max_depth": max_depth = UInt32(value)
+        default:
+            throw ActiveInfinityError.failure(code: "infinity/manifest", status: -1)
         }
     }
 }
@@ -212,29 +266,34 @@ func main() throws {
         throw ActiveInfinityError.failure(code: "infinity/manifest", status: -1)
     }
 
-    // INF-POLY-02: every invalid vector except the two limits-dependent
-    // ones (limit, too_deep) must be refused by validateCanonical with
-    // exactly the manifest's expected_code. The FFI exposes no limits
-    // parameter, so those two need narrowed limits (max_nodes:1,
-    // max_depth:8) and are covered by the CLI's `conformance run` and the
-    // Rust suite instead. invalid_stream vectors are CLI-only: no stream
-    // decode exists in the FFI.
+    // INF-POLY-02: every invalid vector must be refused with exactly the
+    // manifest's expected_code. INF-FFI-02: the two limits-dependent ones
+    // (limit, too_deep) go through validateWithLimits with the narrowed
+    // budget from the entry's options.limits (max_nodes:1, max_depth:8);
+    // the rest go through validateCanonical. invalid_stream vectors are
+    // CLI-only: no stream decode exists in the FFI.
     var invalidChecked = 0
-    var invalidSkipped = 0
     for entry in cases {
         guard entry["kind"] as? String == "invalid" else { continue }
-        guard let invalidName = entry["name"] as? String,
-              let invalidPath = entry["path"] as? String,
+        guard let invalidPath = entry["path"] as? String,
               let expectedCode = entry["expected_code"] as? String else {
             throw ActiveInfinityError.failure(code: "infinity/manifest", status: -1)
         }
-        if invalidName == "limit" || invalidName == "too_deep" {
-            invalidSkipped += 1
-            continue
-        }
         let invalidImage = try Image.fromFile("\(root)/\(invalidPath)")
+        let limitsSpec = (entry["options"] as? [String: Any])?["limits"] as? String
         do {
-            try invalidImage.validateCanonical()
+            if let limitsSpec {
+                let parts = limitsSpec.split(separator: ":", maxSplits: 1)
+                guard parts.count == 2, let value = UInt64(parts[1]) else {
+                    throw ActiveInfinityError.failure(code: "infinity/manifest", status: -1)
+                }
+                var limits = active_infinity_limits()
+                try Image.check(active_infinity_limits_default(&limits))
+                try limits.setField(String(parts[0]), value)
+                try invalidImage.validateWithLimits(&limits)
+            } else {
+                try invalidImage.validateCanonical()
+            }
             throw ActiveInfinityError.failure(code: "infinity/accepted", status: -1)
         } catch let error as ActiveInfinityError {
             if case let .failure(code, _) = error, code != expectedCode {
@@ -244,10 +303,7 @@ func main() throws {
         invalidChecked += 1
     }
     let invalidTotal = cases.filter { $0["kind"] as? String == "invalid" }.count
-    guard invalidChecked + invalidSkipped == invalidTotal else {
-        throw ActiveInfinityError.failure(code: "infinity/manifest", status: -1)
-    }
-    guard invalidSkipped == 2 else {
+    guard invalidChecked == invalidTotal else {
         throw ActiveInfinityError.failure(code: "infinity/manifest", status: -1)
     }
 

@@ -16,8 +16,13 @@
  * comparing it to the manifest, and it never ran on a hostile vector, so
  * a wrong hash or a wrong refusal code passed silently. The optional
  * expected-hash argument and the --expect-code hostile mode close both
- * gaps; CI passes the manifest hash for full.ainf and loops the 33
- * checkable invalid vectors through this binary.
+ * gaps; CI passes the manifest hash for full.ainf and loops the invalid
+ * vectors through this binary.
+ *
+ * INF-FFI-02: the --limits flag narrows one ceiling (e.g. --limits
+ * max_nodes:1) and routes the hostile mode through validate_with_limits,
+ * so the two limits-dependent vectors (limit, too_deep) are checked here
+ * instead of being skipped.
  */
 
 #include <stdint.h>
@@ -58,6 +63,53 @@ static uint8_t *read_file(const char *path, size_t *len) {
   return buffer;
 }
 
+/* INF-FFI-02: set one ceiling in a limits struct from a "field:value"
+   spec (e.g. "max_nodes:1"). Returns 0 on success, -1 on a bad spec or an
+   unknown field (fail closed: the caller refuses to run). */
+static int set_limit(active_infinity_limits *limits, const char *spec) {
+  const char *colon = strchr(spec, ':');
+  if (colon == NULL) {
+    return -1;
+  }
+  char field[32];
+  size_t field_len = (size_t)(colon - spec);
+  if (field_len == 0 || field_len >= sizeof field) {
+    return -1;
+  }
+  memcpy(field, spec, field_len);
+  field[field_len] = '\0';
+  char *end = NULL;
+  unsigned long long value = strtoull(colon + 1, &end, 10);
+  if (end == colon + 1 || *end != '\0') {
+    return -1;
+  }
+  if (strcmp(field, "max_nodes") == 0) { limits->max_nodes = (uint32_t)value; return 0; }
+  if (strcmp(field, "max_edges") == 0) { limits->max_edges = (uint32_t)value; return 0; }
+  if (strcmp(field, "max_children") == 0) { limits->max_children = (uint32_t)value; return 0; }
+  if (strcmp(field, "max_fields") == 0) { limits->max_fields = (uint32_t)value; return 0; }
+  if (strcmp(field, "max_parts") == 0) { limits->max_parts = (uint32_t)value; return 0; }
+  if (strcmp(field, "max_strings") == 0) { limits->max_strings = (uint32_t)value; return 0; }
+  if (strcmp(field, "max_string_bytes") == 0) { limits->max_string_bytes = (uint32_t)value; return 0; }
+  if (strcmp(field, "max_blobs") == 0) { limits->max_blobs = (uint32_t)value; return 0; }
+  if (strcmp(field, "max_blob_bytes") == 0) { limits->max_blob_bytes = (uint32_t)value; return 0; }
+  if (strcmp(field, "max_annotations") == 0) { limits->max_annotations = (uint32_t)value; return 0; }
+  if (strcmp(field, "max_units") == 0) { limits->max_units = (uint32_t)value; return 0; }
+  if (strcmp(field, "max_types") == 0) { limits->max_types = (uint32_t)value; return 0; }
+  if (strcmp(field, "max_aux") == 0) { limits->max_aux = (uint32_t)value; return 0; }
+  if (strcmp(field, "max_numbers") == 0) { limits->max_numbers = (uint32_t)value; return 0; }
+  if (strcmp(field, "max_secrets") == 0) { limits->max_secrets = (uint32_t)value; return 0; }
+  if (strcmp(field, "max_secret_bytes") == 0) { limits->max_secret_bytes = (uint32_t)value; return 0; }
+  if (strcmp(field, "max_extensions") == 0) { limits->max_extensions = (uint32_t)value; return 0; }
+  if (strcmp(field, "max_prov_bytes") == 0) { limits->max_prov_bytes = (uint32_t)value; return 0; }
+  if (strcmp(field, "max_prov_entries") == 0) { limits->max_prov_entries = (uint32_t)value; return 0; }
+  if (strcmp(field, "max_hashes") == 0) { limits->max_hashes = (uint32_t)value; return 0; }
+  if (strcmp(field, "max_bindings") == 0) { limits->max_bindings = (uint32_t)value; return 0; }
+  if (strcmp(field, "max_total_bytes") == 0) { limits->max_total_bytes = (uint64_t)value; return 0; }
+  if (strcmp(field, "max_decoded_bytes") == 0) { limits->max_decoded_bytes = (uint64_t)value; return 0; }
+  if (strcmp(field, "max_depth") == 0) { limits->max_depth = (uint32_t)value; return 0; }
+  return -1;
+}
+
 static int expect(int32_t status, const char *what) {
   if (status != ACTIVE_INFINITY_OK) {
     const char *code = active_infinity_last_error();
@@ -71,8 +123,9 @@ static int expect(int32_t status, const char *what) {
 int main(int argc, char **argv) {
   const char *expected_hash = NULL;
   const char *expected_code = NULL;
-  if (argc < 2 || argc > 4) {
-    fprintf(stderr, "usage: %s <image.ainf> [expected-hash-hex] [--expect-code <code>]\n", argv[0]);
+  const char *limits_spec = NULL;
+  if (argc < 2 || argc > 6) {
+    fprintf(stderr, "usage: %s <image.ainf> [expected-hash-hex] [--expect-code <code>] [--limits <field:value>]\n", argv[0]);
     return 2;
   }
   for (int index = 2; index < argc; index++) {
@@ -82,6 +135,12 @@ int main(int argc, char **argv) {
         return 2;
       }
       expected_code = argv[++index];
+    } else if (strcmp(argv[index], "--limits") == 0) {
+      if (index + 1 >= argc) {
+        fprintf(stderr, "--limits needs a field:value spec\n");
+        return 2;
+      }
+      limits_spec = argv[++index];
     } else if (expected_hash == NULL) {
       expected_hash = argv[index];
     } else {
@@ -102,9 +161,23 @@ int main(int argc, char **argv) {
   }
 
   /* INF-POLY-02: hostile mode -- the image must be refused by
-     validate_canonical with exactly the expected code. */
+     validate_canonical with exactly the expected code. INF-FFI-02: with
+     --limits, the refusal goes through validate_with_limits under the
+     narrowed budget instead. */
   if (expected_code != NULL) {
-    int32_t status = active_infinity_validate_canonical(image, len);
+    int32_t status;
+    if (limits_spec != NULL) {
+      active_infinity_limits limits;
+      if (active_infinity_limits_default(&limits) != 0 ||
+          set_limit(&limits, limits_spec) != 0) {
+        fprintf(stderr, "bad --limits spec: %s\n", limits_spec);
+        free(image);
+        return 2;
+      }
+      status = active_infinity_validate_with_limits(image, len, &limits);
+    } else {
+      status = active_infinity_validate_canonical(image, len);
+    }
     if (status == ACTIVE_INFINITY_OK) {
       fprintf(stderr, "invalid image was accepted\n");
       free(image);

@@ -68,7 +68,114 @@ inline std::vector<uint8_t> output(int32_t (*call)(const uint8_t *, size_t,
   return buffer;
 }
 
+// INF-FFI-02: output for the limits-parameterized outputs -- the same
+// two-phase probe, with the limits struct threaded through the call.
+inline std::vector<uint8_t>
+output_with_limits(int32_t (*call)(const uint8_t *, size_t,
+                                   const active_infinity_limits *, uint8_t *,
+                                   size_t *),
+                   const std::vector<uint8_t> &input,
+                   const active_infinity_limits *limits) {
+  size_t length = 0;
+  int32_t status =
+      call(input.data(), input.size(), limits, nullptr, &length);
+  if (status != ACTIVE_INFINITY_BUFFER_TOO_SMALL || length == 0) {
+    check(status, "size query");
+    return {};
+  }
+  std::vector<uint8_t> buffer(length);
+  size_t capacity = length;
+  check(call(input.data(), input.size(), limits, buffer.data(), &capacity),
+        "output");
+  buffer.resize(capacity);
+  return buffer;
+}
+
 } // namespace detail
+
+// INF-FFI-02: a caller-supplied budget -- one ceiling per field, in the
+// same order as the C `active_infinity_limits` struct. Build one with
+// Limits::defaults(), set a ceiling with set(field, value), pass it to
+// Image::validate_with_limits / decode_with_limits. A default-constructed
+// Limits is all zeros (refused by the FFI as an invalid argument); use
+// defaults() for the library budget.
+struct Limits {
+  uint32_t max_nodes_ = 0;
+  uint32_t max_edges_ = 0;
+  uint32_t max_children_ = 0;
+  uint32_t max_fields_ = 0;
+  uint32_t max_parts_ = 0;
+  uint32_t max_strings_ = 0;
+  uint32_t max_string_bytes_ = 0;
+  uint32_t max_blobs_ = 0;
+  uint32_t max_blob_bytes_ = 0;
+  uint32_t max_annotations_ = 0;
+  uint32_t max_units_ = 0;
+  uint32_t max_types_ = 0;
+  uint32_t max_aux_ = 0;
+  uint32_t max_numbers_ = 0;
+  uint32_t max_secrets_ = 0;
+  uint32_t max_secret_bytes_ = 0;
+  uint32_t max_extensions_ = 0;
+  uint32_t max_prov_bytes_ = 0;
+  uint32_t max_prov_entries_ = 0;
+  uint32_t max_hashes_ = 0;
+  uint32_t max_bindings_ = 0;
+  uint64_t max_total_bytes_ = 0;
+  uint64_t max_decoded_bytes_ = 0;
+  uint32_t max_depth_ = 0;
+
+  static Limits defaults() {
+    Limits limits;
+    detail::check(active_infinity_limits_default(&limits.storage()),
+                  "limits default");
+    return limits;
+  }
+
+  // Set one ceiling by its C field name. Throws on an unknown name.
+  void set(const std::string &name, uint64_t value) {
+    if (name == "max_nodes") { max_nodes_ = static_cast<uint32_t>(value); return; }
+    if (name == "max_edges") { max_edges_ = static_cast<uint32_t>(value); return; }
+    if (name == "max_children") { max_children_ = static_cast<uint32_t>(value); return; }
+    if (name == "max_fields") { max_fields_ = static_cast<uint32_t>(value); return; }
+    if (name == "max_parts") { max_parts_ = static_cast<uint32_t>(value); return; }
+    if (name == "max_strings") { max_strings_ = static_cast<uint32_t>(value); return; }
+    if (name == "max_string_bytes") { max_string_bytes_ = static_cast<uint32_t>(value); return; }
+    if (name == "max_blobs") { max_blobs_ = static_cast<uint32_t>(value); return; }
+    if (name == "max_blob_bytes") { max_blob_bytes_ = static_cast<uint32_t>(value); return; }
+    if (name == "max_annotations") { max_annotations_ = static_cast<uint32_t>(value); return; }
+    if (name == "max_units") { max_units_ = static_cast<uint32_t>(value); return; }
+    if (name == "max_types") { max_types_ = static_cast<uint32_t>(value); return; }
+    if (name == "max_aux") { max_aux_ = static_cast<uint32_t>(value); return; }
+    if (name == "max_numbers") { max_numbers_ = static_cast<uint32_t>(value); return; }
+    if (name == "max_secrets") { max_secrets_ = static_cast<uint32_t>(value); return; }
+    if (name == "max_secret_bytes") { max_secret_bytes_ = static_cast<uint32_t>(value); return; }
+    if (name == "max_extensions") { max_extensions_ = static_cast<uint32_t>(value); return; }
+    if (name == "max_prov_bytes") { max_prov_bytes_ = static_cast<uint32_t>(value); return; }
+    if (name == "max_prov_entries") { max_prov_entries_ = static_cast<uint32_t>(value); return; }
+    if (name == "max_hashes") { max_hashes_ = static_cast<uint32_t>(value); return; }
+    if (name == "max_bindings") { max_bindings_ = static_cast<uint32_t>(value); return; }
+    if (name == "max_total_bytes") { max_total_bytes_ = static_cast<uint64_t>(value); return; }
+    if (name == "max_decoded_bytes") { max_decoded_bytes_ = static_cast<uint64_t>(value); return; }
+    if (name == "max_depth") { max_depth_ = static_cast<uint32_t>(value); return; }
+    throw Error("infinity/invalid-argument", -1);
+  }
+
+  const active_infinity_limits &storage() const noexcept {
+    return reinterpret_cast<const active_infinity_limits &>(*this);
+  }
+  active_infinity_limits &storage() noexcept {
+    return reinterpret_cast<active_infinity_limits &>(*this);
+  }
+};
+
+// The C++ struct must lay out exactly like the C struct (same field order
+// and types, standard layout) for the reinterpret_cast in
+// Limits::storage() to be sound. These asserts pin that.
+static_assert(sizeof(Limits) == sizeof(active_infinity_limits),
+              "Limits must match the C struct size");
+static_assert(alignof(Limits) == alignof(active_infinity_limits),
+              "Limits must match the C struct alignment");
 
 class Image {
 public:
@@ -105,6 +212,20 @@ public:
         active_infinity_validate_canonical(bytes_.data(), bytes_.size()),
         "validate canonical");
     return *this;
+  }
+
+  // INF-FFI-02: the limits-parameterized form of validate_canonical.
+  Image &validate_with_limits(const Limits &limits) {
+    detail::check(active_infinity_validate_with_limits(
+                      bytes_.data(), bytes_.size(), &limits.storage()),
+                  "validate with limits");
+    return *this;
+  }
+
+  // INF-FFI-02: the limits-parameterized form of reencode.
+  std::vector<uint8_t> decode_with_limits(const Limits &limits) const {
+    return detail::output_with_limits(active_infinity_decode_with_limits,
+                                      bytes_, &limits.storage());
   }
 
   std::vector<uint8_t> content_hash() const {

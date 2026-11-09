@@ -16,7 +16,7 @@ const assert = require("node:assert");
 const fs = require("node:fs");
 const path = require("node:path");
 
-import { ActiveInfinity, ActiveInfinityError } from "../js/active-infinity";
+import { ActiveInfinity, ActiveInfinityError, Limits } from "../js/active-infinity";
 
 const ROOT = path.resolve(process.cwd());
 
@@ -44,6 +44,7 @@ async function main(): Promise<void> {
 			// invalid and invalid_stream cases carry an expected_code.
 			content_hash?: string;
 			expected_code?: string;
+			options?: { limits?: string };
 		}>;
 	};
 
@@ -99,38 +100,49 @@ async function main(): Promise<void> {
 	const valid = manifest.cases.filter((entry) => entry.kind === "valid").length;
 	assert.strictEqual(checked, valid, "the manifest exercised valid vectors");
 
-	// INF-POLY-02: every invalid vector except the two limits-dependent
-	// ones (limit, too_deep) must be refused by validateCanonical with
-	// exactly the manifest's expected_code. The FFI exposes no limits
-	// parameter, so those two need narrowed limits (max_nodes:1,
-	// max_depth:8) and are covered by the CLI's `conformance run` and the
-	// Rust suite instead. invalid_stream vectors are CLI-only: no stream
-	// decode exists in the FFI.
+	// INF-POLY-02: every invalid vector must be refused with exactly the
+	// manifest's expected_code. INF-FFI-02: the two limits-dependent ones
+	// (limit, too_deep) go through validateWithLimits with the narrowed
+	// budget from the entry's options.limits (max_nodes:1, max_depth:8);
+	// the rest go through validateCanonical. invalid_stream vectors are
+	// CLI-only: no stream decode exists in the FFI.
 	let invalidChecked = 0;
-	let invalidSkipped = 0;
 	for (const entry of manifest.cases) {
 		if (entry.kind !== "invalid") continue;
-		if (entry.name === "limit" || entry.name === "too_deep") {
-			invalidSkipped += 1;
-			continue;
-		}
 		const image = fs.readFileSync(path.join(ROOT, entry.path));
-		assert.throws(
-			() => binding.validateCanonical(image),
-			(error: unknown) =>
-				error instanceof ActiveInfinityError &&
-				error.code === entry.expected_code,
-			`${entry.name}: validateCanonical must refuse the image with ${entry.expected_code}`,
-		);
+		const limitsSpec = entry.options?.limits;
+		if (limitsSpec) {
+			const [field, value] = limitsSpec.split(":");
+			const limits = Limits.defaults(binding);
+			try {
+				limits.set(field, Number(value));
+				assert.throws(
+					() => binding.validateWithLimits(image, limits),
+					(error: unknown) =>
+						error instanceof ActiveInfinityError &&
+						error.code === entry.expected_code,
+					`${entry.name}: validateWithLimits must refuse the image with ${entry.expected_code}`,
+				);
+			} finally {
+				limits.free();
+			}
+		} else {
+			assert.throws(
+				() => binding.validateCanonical(image),
+				(error: unknown) =>
+					error instanceof ActiveInfinityError &&
+					error.code === entry.expected_code,
+				`${entry.name}: validateCanonical must refuse the image with ${entry.expected_code}`,
+			);
+		}
 		invalidChecked += 1;
 	}
 	const invalidTotal = manifest.cases.filter((entry) => entry.kind === "invalid").length;
 	assert.strictEqual(
-		invalidChecked + invalidSkipped,
+		invalidChecked,
 		invalidTotal,
 		"the manifest exercised invalid vectors",
 	);
-	assert.strictEqual(invalidSkipped, 2, "limits-dependent skips changed");
 
 	const source = 'port = 8080\nname = "ts"\n';
 	const first = binding.fromActive(source, "ts.active");

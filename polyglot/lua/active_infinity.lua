@@ -24,6 +24,35 @@ uint8_t *active_infinity_alloc(size_t len);
 void active_infinity_free(uint8_t *ptr, size_t len);
 int32_t active_infinity_validate(const uint8_t *ptr, size_t len);
 int32_t active_infinity_validate_canonical(const uint8_t *ptr, size_t len);
+typedef struct {
+  uint32_t max_nodes;
+  uint32_t max_edges;
+  uint32_t max_children;
+  uint32_t max_fields;
+  uint32_t max_parts;
+  uint32_t max_strings;
+  uint32_t max_string_bytes;
+  uint32_t max_blobs;
+  uint32_t max_blob_bytes;
+  uint32_t max_annotations;
+  uint32_t max_units;
+  uint32_t max_types;
+  uint32_t max_aux;
+  uint32_t max_numbers;
+  uint32_t max_secrets;
+  uint32_t max_secret_bytes;
+  uint32_t max_extensions;
+  uint32_t max_prov_bytes;
+  uint32_t max_prov_entries;
+  uint32_t max_hashes;
+  uint32_t max_bindings;
+  uint64_t max_total_bytes;
+  uint64_t max_decoded_bytes;
+  uint32_t max_depth;
+} active_infinity_limits;
+int32_t active_infinity_limits_default(active_infinity_limits *limits);
+int32_t active_infinity_validate_with_limits(const uint8_t *ptr, size_t len, const active_infinity_limits *limits);
+int32_t active_infinity_decode_with_limits(const uint8_t *ptr, size_t len, const active_infinity_limits *limits, uint8_t *out, size_t *out_len);
 int32_t active_infinity_content_hash(const uint8_t *ptr, size_t len, uint8_t out32[32]);
 int32_t active_infinity_reencode(const uint8_t *ptr, size_t len, uint8_t *out, size_t *out_len);
 int32_t active_infinity_from_active(const uint8_t *source, size_t source_len,
@@ -123,6 +152,33 @@ function M.validate_canonical(bytes)
     check(lib.active_infinity_validate_canonical(pointer, length))
   end)
   return true
+end
+
+-- INF-FFI-02: caller-supplied budget. Returns a Limits struct filled with
+-- the library defaults; override the ceiling to tighten.
+function M.limits_default()
+  local limits = ffi.new("active_infinity_limits")
+  check(lib.active_infinity_limits_default(limits))
+  return limits
+end
+
+-- INF-FFI-02: the limits-parameterized form of validate_canonical.
+-- A nil limits means the library defaults.
+function M.validate_with_limits(bytes, limits)
+  with_input(bytes, function(pointer, length)
+    check(lib.active_infinity_validate_with_limits(pointer, length, limits))
+  end)
+  return true
+end
+
+-- INF-FFI-02: the limits-parameterized form of reencode. A nil limits is
+-- materialized through limits_default() so the FFI always receives a
+-- struct pointer.
+function M.decode_with_limits(bytes, limits)
+  limits = limits or M.limits_default()
+  return output(bytes, function(pointer, length, out, size)
+    return lib.active_infinity_decode_with_limits(pointer, length, limits, out, size)
+  end)
 end
 
 function M.content_hash(bytes)

@@ -37,6 +37,8 @@ working-storage section.
 01 ws-invalid-skipped usage binary-double unsigned value 0.
 01 ws-expected-code pic x(64).
 01 ws-cap-code usage binary-double unsigned value 64.
+01 ws-limits-spec pic x(64).
+01 ws-cap-limits usage binary-double unsigned value 64.
 01 ws-code-length usage binary-double unsigned.
 01 ws-image pic x(1048576).
 01 ws-image-length usage binary-double unsigned.
@@ -109,13 +111,13 @@ main-paragraph.
         add 1 to ws-checked
     end-perform
 
-    *> INF-POLY-02: every invalid vector except the two limits-dependent
-    *> ones (limit, too_deep) must be refused by validate_canonical with
-    *> exactly the manifest's expected_code. The FFI exposes no limits
-    *> parameter, so those two need narrowed limits (max_nodes:1,
-    *> max_depth:8) and are covered by the CLI's `conformance run` and the
-    *> Rust suite instead. invalid_stream vectors are CLI-only: no stream
-    *> decode exists in the FFI.
+    *> INF-POLY-02: every invalid vector must be refused with exactly
+    *> the manifest's expected_code. INF-FFI-02: the two limits-dependent
+    *> ones (limit, too_deep) go through validate_with_limits with the
+    *> narrowed budget from the entry's options.limits (max_nodes:1,
+    *> max_depth:8); the rest go through validate_canonical.
+    *> invalid_stream vectors are CLI-only: no stream decode exists in
+    *> the FFI.
     call static "ai_cobol_invalid_count" using
         by reference ws-manifest
         by value ws-manifest-length
@@ -126,7 +128,6 @@ main-paragraph.
     end-if
     move 0 to ws-invalid-index
     move 0 to ws-invalid-checked
-    move 0 to ws-invalid-skipped
     perform until ws-invalid-index >= ws-invalid-total
         call static "ai_cobol_invalid_case" using
             by reference ws-manifest
@@ -143,20 +144,24 @@ main-paragraph.
             move "the manifest invalid case scan failed" to ws-reason
             perform fail-now
         end-if
-        if ws-case-name(1:5) = "limit" or ws-case-name(1:8) = "too_deep"
-            add 1 to ws-invalid-skipped
+        move spaces to ws-limits-spec
+        call static "ai_cobol_invalid_limits" using
+            by reference ws-manifest
+            by value ws-manifest-length
+            by value ws-invalid-index
+            by reference ws-limits-spec
+            by value ws-cap-limits
+            returning ws-status
+        if ws-status = 1
+            perform check-invalid-case-with-limits
         else
             perform check-invalid-case
-            add 1 to ws-invalid-checked
         end-if
+        add 1 to ws-invalid-checked
         add 1 to ws-invalid-index
     end-perform
-    if ws-invalid-checked + ws-invalid-skipped not = ws-invalid-total
+    if ws-invalid-checked not = ws-invalid-total
         move "the manifest invalid vectors were not exercised" to ws-reason
-        perform fail-now
-    end-if
-    if ws-invalid-skipped not = 2
-        move "the limits-dependent skips changed" to ws-reason
         perform fail-now
     end-if
 
@@ -332,6 +337,38 @@ check-invalid-case.
     call static "active_infinity_validate_canonical" using
         by reference ws-image
         by value ws-image-length
+        returning ws-status
+    if ws-status = 0
+        move "invalid image was accepted" to ws-reason
+        perform fail-now
+    end-if
+    call static "ai_cobol_last_error" using
+        by reference ws-error
+        by value ws-error-cap
+    compute ws-code-length =
+        function length(function trim(ws-expected-code))
+    if ws-error(1:ws-code-length) not =
+            ws-expected-code(1:ws-code-length)
+        move "wrong code for the invalid vector" to ws-reason
+        perform fail-now
+    end-if.
+
+*> INF-FFI-02: the limits-dependent invalid vector -- refused by
+*> validate_with_limits under the narrowed budget in ws-limits-spec.
+check-invalid-case-with-limits.
+    call static "ai_cobol_read_file" using
+        by reference ws-case-path
+        by reference ws-image
+        by value ws-image-cap
+        returning ws-image-length
+    if ws-image-length = 0
+        move "cannot read an invalid vector" to ws-reason
+        perform fail-now
+    end-if
+    call static "ai_cobol_validate_with_limits" using
+        by reference ws-image
+        by value ws-image-length
+        by reference ws-limits-spec
         returning ws-status
     if ws-status = 0
         move "invalid image was accepted" to ws-reason

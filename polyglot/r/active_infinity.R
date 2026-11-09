@@ -87,6 +87,70 @@ ai_validate_canonical <- function(image) {
   ai_check(result[[3]])
 }
 
+# INF-FFI-02: a caller-supplied budget, a numeric[24] in C struct order.
+# Build one with ai_limits_default(), set a ceiling with ai_limits_set(),
+# pass it to ai_validate_with_limits() / ai_decode_with_limits(). A NULL
+# limits means the library defaults.
+ai_limits_default <- function() {
+  ai_load()
+  values <- double(24)
+  status <- integer(1)
+  result <- .C("ai_r_limits_default", values, status)
+  ai_check(result[[2]])
+  result[[1]]
+}
+
+ai_limits_set <- function(limits, field, value) {
+  fields <- c(
+    "max_nodes", "max_edges", "max_children", "max_fields", "max_parts",
+    "max_strings", "max_string_bytes", "max_blobs", "max_blob_bytes",
+    "max_annotations", "max_units", "max_types", "max_aux", "max_numbers",
+    "max_secrets", "max_secret_bytes", "max_extensions", "max_prov_bytes",
+    "max_prov_entries", "max_hashes", "max_bindings", "max_total_bytes",
+    "max_decoded_bytes", "max_depth"
+  )
+  index <- match(field, fields)
+  if (is.na(index)) {
+    stop(sprintf("unknown limits field %s", field), call. = FALSE)
+  }
+  limits[index] <- value
+  limits
+}
+
+ai_validate_with_limits <- function(image, limits = NULL) {
+  ai_load()
+  status <- integer(1)
+  # Always pass the 24 values (the library defaults when NULL); the shim
+  # builds the C struct from them.
+  if (is.null(limits)) {
+    limits <- ai_limits_default()
+  }
+  result <- .C("ai_r_validate_with_limits", image, as.double(length(image)), as.double(limits), status)
+  ai_check(result[[4]])
+}
+
+ai_decode_with_limits <- function(image, limits = NULL) {
+  ai_load()
+  if (is.null(limits)) {
+    limits <- ai_limits_default()
+  }
+  .ai_output_limits_call("ai_r_decode_with_limits", image, as.double(limits))
+}
+
+.ai_output_limits_call <- function(symbol, image, limits) {
+  ai_load()
+  length <- as.double(length(image))
+  status <- integer(1)
+  query <- .C(symbol, image, length, limits, raw(0), as.double(0), status)
+  capacity <- query[[5]]
+  # -2 is the documented size query; anything else is a real refusal.
+  if (query[[6]] != -2) ai_check(query[[6]])
+  out <- raw(as.integer(capacity))
+  result <- .C(symbol, image, length, limits, out, capacity, status)
+  ai_check(result[[6]])
+  result[[4]][seq_len(as.integer(result[[5]]))]
+}
+
 ai_content_hash <- function(image) {
   ai_load()
   out <- raw(32)

@@ -61,12 +61,74 @@ def _load() -> ctypes.CDLL:
 
 
 _lib = _load()
+
+
+class Limits(ctypes.Structure):
+    """Caller-supplied budget (INF-FFI-02): one ceiling per field, in the
+    same order as the C `active_infinity_limits` struct.
+
+    Build one from the library defaults with `Limits.default()`, then
+    override the ceiling to tighten. A ceiling of zero is refused
+    (`infinity/invalid-argument`).
+    """
+
+    _fields_ = [
+        ("max_nodes", ctypes.c_uint32),
+        ("max_edges", ctypes.c_uint32),
+        ("max_children", ctypes.c_uint32),
+        ("max_fields", ctypes.c_uint32),
+        ("max_parts", ctypes.c_uint32),
+        ("max_strings", ctypes.c_uint32),
+        ("max_string_bytes", ctypes.c_uint32),
+        ("max_blobs", ctypes.c_uint32),
+        ("max_blob_bytes", ctypes.c_uint32),
+        ("max_annotations", ctypes.c_uint32),
+        ("max_units", ctypes.c_uint32),
+        ("max_types", ctypes.c_uint32),
+        ("max_aux", ctypes.c_uint32),
+        ("max_numbers", ctypes.c_uint32),
+        ("max_secrets", ctypes.c_uint32),
+        ("max_secret_bytes", ctypes.c_uint32),
+        ("max_extensions", ctypes.c_uint32),
+        ("max_prov_bytes", ctypes.c_uint32),
+        ("max_prov_entries", ctypes.c_uint32),
+        ("max_hashes", ctypes.c_uint32),
+        ("max_bindings", ctypes.c_uint32),
+        ("max_total_bytes", ctypes.c_uint64),
+        ("max_decoded_bytes", ctypes.c_uint64),
+        ("max_depth", ctypes.c_uint32),
+    ]
+
+    @classmethod
+    def default(cls) -> Limits:
+        """Fill a Limits with the library defaults (via the FFI)."""
+        limits = cls()
+        _check(_lib.active_infinity_limits_default(ctypes.byref(limits)))
+        return limits
+
+
 _lib.active_infinity_abi_version.restype = ctypes.c_uint32
 _lib.active_infinity_last_error.restype = ctypes.c_char_p
 _lib.active_infinity_validate.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
 _lib.active_infinity_validate.restype = ctypes.c_int32
 _lib.active_infinity_validate_canonical.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
 _lib.active_infinity_validate_canonical.restype = ctypes.c_int32
+_lib.active_infinity_limits_default.argtypes = [ctypes.POINTER(Limits)]
+_lib.active_infinity_limits_default.restype = ctypes.c_int32
+_lib.active_infinity_validate_with_limits.argtypes = [
+    ctypes.c_void_p,
+    ctypes.c_size_t,
+    ctypes.POINTER(Limits),
+]
+_lib.active_infinity_validate_with_limits.restype = ctypes.c_int32
+_lib.active_infinity_decode_with_limits.argtypes = [
+    ctypes.c_void_p,
+    ctypes.c_size_t,
+    ctypes.POINTER(Limits),
+    ctypes.c_void_p,
+    ctypes.POINTER(ctypes.c_size_t),
+]
+_lib.active_infinity_decode_with_limits.restype = ctypes.c_int32
 _lib.active_infinity_content_hash.argtypes = [
     ctypes.c_void_p,
     ctypes.c_size_t,
@@ -147,6 +209,23 @@ class Image:
         buffer, length = _buffer(self.data)
         _check(_lib.active_infinity_validate_canonical(_pointer(buffer), length))
         return self
+
+    def validate_with_limits(self, limits: Limits | None = None) -> Image:
+        # INF-FFI-02: the limits-parameterized form of validate_canonical.
+        # None means the library defaults.
+        buffer, length = _buffer(self.data)
+        pointer = ctypes.byref(limits) if limits is not None else None
+        _check(
+            _lib.active_infinity_validate_with_limits(_pointer(buffer), length, pointer)
+        )
+        return self
+
+    def decode_with_limits(self, limits: Limits | None = None) -> bytes:
+        # INF-FFI-02: the limits-parameterized form of reencode.
+        pointer = ctypes.byref(limits) if limits is not None else None
+        return _call_output(
+            _lib.active_infinity_decode_with_limits, self.data, pointer
+        )
 
     def content_hash(self) -> bytes:
         buffer, length = _buffer(self.data)

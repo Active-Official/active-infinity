@@ -9,9 +9,9 @@ leave it unset to let the loader search.
 """
 module ActiveInfinity
 
-export ABI_VERSION, ActiveInfinityError, Image, abi_version, content_hash,
+export ABI_VERSION, ActiveInfinityError, Image, Limits, abi_version, content_hash,
        content_hash_hex, from_active, redacted_json, reencode, validate,
-       validate_canonical
+       validate_canonical, validate_with_limits, decode_with_limits
 
 const ABI_VERSION = Int32(1)
 
@@ -47,6 +47,125 @@ validate(image::AbstractVector{UInt8}) =
 validate_canonical(image::AbstractVector{UInt8}) =
     check(ccall((:active_infinity_validate_canonical, LIBRARY_NAME), Int32,
                 (Ptr{UInt8}, Csize_t), image, length(image)))
+
+# INF-FFI-02: caller-supplied budget. A Limits mirrors the C
+# `active_infinity_limits` struct field for field (an isbits struct with
+# primitive fields lays out like the C struct). Build one with
+# `Limits()` (filled with the library defaults), set a ceiling with
+# `set_limit!(limits, name, value)`, pass it to `validate_with_limits` /
+# `decode_with_limits`. A null limits means the library defaults.
+mutable struct Limits
+    max_nodes::UInt32
+    max_edges::UInt32
+    max_children::UInt32
+    max_fields::UInt32
+    max_parts::UInt32
+    max_strings::UInt32
+    max_string_bytes::UInt32
+    max_blobs::UInt32
+    max_blob_bytes::UInt32
+    max_annotations::UInt32
+    max_units::UInt32
+    max_types::UInt32
+    max_aux::UInt32
+    max_numbers::UInt32
+    max_secrets::UInt32
+    max_secret_bytes::UInt32
+    max_extensions::UInt32
+    max_prov_bytes::UInt32
+    max_prov_entries::UInt32
+    max_hashes::UInt32
+    max_bindings::UInt32
+    max_total_bytes::UInt64
+    max_decoded_bytes::UInt64
+    max_depth::UInt32
+end
+
+function Limits()
+    limits = Limits(
+        zero(UInt32),
+        zero(UInt32),
+        zero(UInt32),
+        zero(UInt32),
+        zero(UInt32),
+        zero(UInt32),
+        zero(UInt32),
+        zero(UInt32),
+        zero(UInt32),
+        zero(UInt32),
+        zero(UInt32),
+        zero(UInt32),
+        zero(UInt32),
+        zero(UInt32),
+        zero(UInt32),
+        zero(UInt32),
+        zero(UInt32),
+        zero(UInt32),
+        zero(UInt32),
+        zero(UInt32),
+        zero(UInt32),
+        zero(UInt64),
+        zero(UInt64),
+        zero(UInt32)
+    )
+    status = ccall((:active_infinity_limits_default, LIBRARY_NAME), Int32,
+                   (Ref{Limits},), limits)
+    status == 0 || throw(ActiveInfinityError(last_error()))
+    return limits
+end
+
+function set_limit!(limits::Limits, name::AbstractString, value::Integer)
+        "max_nodes" => limits.max_nodes = UInt32(value)
+        "max_edges" => limits.max_edges = UInt32(value)
+        "max_children" => limits.max_children = UInt32(value)
+        "max_fields" => limits.max_fields = UInt32(value)
+        "max_parts" => limits.max_parts = UInt32(value)
+        "max_strings" => limits.max_strings = UInt32(value)
+        "max_string_bytes" => limits.max_string_bytes = UInt32(value)
+        "max_blobs" => limits.max_blobs = UInt32(value)
+        "max_blob_bytes" => limits.max_blob_bytes = UInt32(value)
+        "max_annotations" => limits.max_annotations = UInt32(value)
+        "max_units" => limits.max_units = UInt32(value)
+        "max_types" => limits.max_types = UInt32(value)
+        "max_aux" => limits.max_aux = UInt32(value)
+        "max_numbers" => limits.max_numbers = UInt32(value)
+        "max_secrets" => limits.max_secrets = UInt32(value)
+        "max_secret_bytes" => limits.max_secret_bytes = UInt32(value)
+        "max_extensions" => limits.max_extensions = UInt32(value)
+        "max_prov_bytes" => limits.max_prov_bytes = UInt32(value)
+        "max_prov_entries" => limits.max_prov_entries = UInt32(value)
+        "max_hashes" => limits.max_hashes = UInt32(value)
+        "max_bindings" => limits.max_bindings = UInt32(value)
+        "max_total_bytes" => limits.max_total_bytes = UInt64(value)
+        "max_decoded_bytes" => limits.max_decoded_bytes = UInt64(value)
+        "max_depth" => limits.max_depth = UInt32(value)
+    error("unknown limits field $name")
+end
+
+validate_with_limits(image::AbstractVector{UInt8}, limits::Union{Limits, Nothing} = nothing) =
+    check(ccall((:active_infinity_validate_with_limits, LIBRARY_NAME), Int32,
+                (Ptr{UInt8}, Csize_t, Ptr{Limits}),
+                image, length(image),
+                limits === nothing ? C_NULL : Ref(limits)))
+
+function decode_with_limits(image::AbstractVector{UInt8}, limits::Union{Limits, Nothing} = nothing)::Vector{UInt8}
+    out = Vector{UInt8}(undef, 0)
+    out_len = Ref{Csize_t}(0)
+    status = ccall((:active_infinity_decode_with_limits, LIBRARY_NAME), Int32,
+                   (Ptr{UInt8}, Csize_t, Ptr{Limits}, Ptr{UInt8}, Ref{Csize_t}),
+                   image, length(image),
+                   limits === nothing ? C_NULL : Ref(limits),
+                   out, out_len)
+    status == -2 || check(status)
+    out = Vector{UInt8}(undef, out_len[])
+    status = ccall((:active_infinity_decode_with_limits, LIBRARY_NAME), Int32,
+                   (Ptr{UInt8}, Csize_t, Ptr{Limits}, Ptr{UInt8}, Ref{Csize_t}),
+                   image, length(image),
+                   limits === nothing ? C_NULL : Ref(limits),
+                   out, out_len)
+    check(status)
+    return out[1:out_len[]]
+end
 
 function content_hash(image::AbstractVector{UInt8})::Vector{UInt8}
     out = Vector{UInt8}(undef, 32)

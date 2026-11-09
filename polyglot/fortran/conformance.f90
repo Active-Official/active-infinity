@@ -29,7 +29,9 @@ program conformance
   character(len=64) :: expected
   character(len=64) :: expected_code
   integer :: position, kind_at, path_at, name_at, hash_at, quote_at, code_at
-  integer :: invalid_checked, invalid_skipped, invalid_total
+  integer :: invalid_checked, invalid_total
+  integer :: limits_at
+  character(len=64) :: limits_spec
   integer(c_int8_t), allocatable, target :: image(:)
   integer(c_int32_t) :: status
 
@@ -80,16 +82,17 @@ program conformance
   ! vectors. A slack `< 4` let a dropped vector pass silently.
   if (checked /= 5) call fail("the manifest must list exactly five valid cases")
 
-  ! INF-POLY-02: every invalid vector except the two limits-dependent
-  ! ones (limit, too_deep) must be refused by validate_canonical with
-  ! exactly the manifest's expected_code. The FFI exposes no limits
-  ! parameter, so those two need narrowed limits (max_nodes:1,
-  ! max_depth:8) and are covered by the CLI's `conformance run` and the
-  ! Rust suite instead. invalid_stream vectors are CLI-only: no stream
-  ! decode exists in the FFI. The scan finds `"kind": "invalid"` with
-  ! the closing quote, so `"kind": "invalid_stream"` never matches.
+  ! INF-POLY-02: every invalid vector must be refused with exactly the
+  ! manifest's expected_code. INF-FFI-02: the two limits-dependent ones
+  ! (limit, too_deep) go through validate_with_limits with the narrowed
+  ! budget from the entry's options.limits (max_nodes:1, max_depth:8);
+  ! the rest go through validate_canonical. invalid_stream vectors are
+  ! CLI-only: no stream decode exists in the FFI. The scan finds
+  ! `"kind": "invalid"` with the closing quote, so `"kind":
+  ! "invalid_stream"` never matches. The options object sits between the
+  ! path and the expected_code, so a `"limits": "` search from the path
+  ! finds this case's limits spec (or nothing, for the other vectors).
   invalid_checked = 0
-  invalid_skipped = 0
   invalid_total = 0
   position = 1
   do
@@ -114,18 +117,28 @@ program conformance
     expected_code = manifest(code_at:quote_at - 1)
     position = quote_at + 1
 
-    invalid_total = invalid_total + 1
-    if (trim(name) == "limit" .or. trim(name) == "too_deep") then
-      invalid_skipped = invalid_skipped + 1
-      cycle
+    ! The limits spec, when this case has one, is in the options object
+    ! between the path and the expected_code.
+    limits_spec = ""
+    call find_after(manifest, '"limits": "', path_at, limits_at)
+    if (limits_at /= 0 .and. limits_at < code_at) then
+      limits_at = limits_at + len('"limits": "')
+      quote_at = index(manifest(limits_at:), '"') + limits_at - 1
+      limits_spec = manifest(limits_at:quote_at - 1)
     end if
+
+    invalid_total = invalid_total + 1
     call read_bytes(path, image)
-    call expect_invalid_refusal(image, trim(expected_code))
+    if (len_trim(limits_spec) > 0) then
+      call expect_invalid_refusal_with_limits(image, trim(expected_code), &
+                                              trim(limits_spec))
+    else
+      call expect_invalid_refusal(image, trim(expected_code))
+    end if
     invalid_checked = invalid_checked + 1
   end do
-  if (invalid_checked + invalid_skipped /= invalid_total) &
+  if (invalid_checked /= invalid_total) &
     call fail("the manifest invalid vectors were not exercised")
-  if (invalid_skipped /= 2) call fail("the limits-dependent skips changed")
 
   call check_from_active()
   call check_redaction()
@@ -235,6 +248,30 @@ contains
     if (status /= ai_invalid) call fail("invalid image was accepted: " // expected)
     call last_error_text(code)
     if (code /= expected) call fail("wrong code for validate_canonical: " // code)
+  end subroutine
+
+  ! INF-FFI-02: an invalid vector that needs a narrowed budget must be
+  ! refused by validate_with_limits with exactly the manifest's
+  ! expected_code. The spec is "field:value" (e.g. "max_nodes:1").
+  subroutine expect_invalid_refusal_with_limits(data, expected, spec)
+    integer(c_int8_t), allocatable, target, intent(in) :: data(:)
+    character(len=*), intent(in) :: expected, spec
+    integer(c_int32_t) :: status
+    character(len=:), allocatable :: code
+    type(ai_limits) :: limits
+    integer :: colon
+    integer(c_int64_t) :: value
+    colon = index(spec, ":")
+    if (colon == 0) call fail("bad limits spec: " // spec)
+    read (spec(colon + 1:), *) value
+    status = ai_limits_default(limits)
+    if (status /= ai_ok) call fail("limits_default failed")
+    status = ai_set_limit(limits, spec(1:colon - 1), value)
+    if (status /= ai_ok) call fail("unknown limits field: " // spec(1:colon - 1))
+    status = ai_validate_with_limits(c_loc(data), int(size(data), c_size_t), limits)
+    if (status /= ai_invalid) call fail("invalid image was accepted: " // expected)
+    call last_error_text(code)
+    if (code /= expected) call fail("wrong code for validate_with_limits: " // code)
   end subroutine
 
   subroutine expect_hash_refusal(data)

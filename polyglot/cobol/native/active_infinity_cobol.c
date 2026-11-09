@@ -11,6 +11,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "active_infinity.h"
@@ -137,6 +138,97 @@ int ai_cobol_invalid_case(const char *manifest, size_t length, size_t index,
     return 0;
   }
   return 1;
+}
+
+/* Fetch the limits spec ("field:value") of the index-th invalid case,
+ * or return 0 when the case has none. The options object sits between the
+ * path and the expected_code, so the limits must come before this case's
+ * expected_code. */
+int ai_cobol_invalid_limits(const char *manifest, size_t length, size_t index,
+                            char *limits, size_t limits_capacity) {
+  const char *end = manifest + length;
+  const char *cursor = manifest;
+  for (size_t at = 0; at <= index; at++) {
+    const char *found = find_text(cursor, end, "\"kind\": \"invalid\"");
+    if (found == NULL) {
+      return 0;
+    }
+    cursor = found + 1;
+  }
+  const char *at = find_text(cursor, end, "\"limits\": \"");
+  if (at == NULL) {
+    return 0;
+  }
+  const char *code = find_text(cursor, end, "\"expected_code\": \"");
+  if (code != NULL && at > code) {
+    return 0;
+  }
+  at += strlen("\"limits\": \"");
+  const char *quote = memchr(at, '"', (size_t)(end - at));
+  if (quote == NULL || limits_capacity == 0) {
+    return 0;
+  }
+  size_t len = (size_t)(quote - at);
+  if (len >= limits_capacity) {
+    len = limits_capacity - 1;
+  }
+  memcpy(limits, at, len);
+  limits[len] = '\0';
+  return 1;
+}
+
+/* Validate under a narrowed budget given as "field:value". Returns the FFI
+ * status, or -1 on a bad spec. */
+int ai_cobol_validate_with_limits(const uint8_t *image, size_t length,
+                                  const char *spec) {
+  active_infinity_limits limits;
+  if (active_infinity_limits_default(&limits) != 0) {
+    return -1;
+  }
+  const char *colon = strchr(spec, ':');
+  if (colon == NULL) {
+    return -1;
+  }
+  char field[32];
+  size_t field_len = (size_t)(colon - spec);
+  if (field_len == 0 || field_len >= sizeof field) {
+    return -1;
+  }
+  memcpy(field, spec, field_len);
+  field[field_len] = '\0';
+  char *end = NULL;
+  unsigned long long value = strtoull(colon + 1, &end, 10);
+  if (end == colon + 1 || *end != '\0') {
+    return -1;
+  }
+  if (strcmp(field, "max_nodes") == 0) { limits.max_nodes = (uint32_t)value; }
+  else if (strcmp(field, "max_edges") == 0) { limits.max_edges = (uint32_t)value; }
+  else if (strcmp(field, "max_children") == 0) { limits.max_children = (uint32_t)value; }
+  else if (strcmp(field, "max_fields") == 0) { limits.max_fields = (uint32_t)value; }
+  else if (strcmp(field, "max_parts") == 0) { limits.max_parts = (uint32_t)value; }
+  else if (strcmp(field, "max_strings") == 0) { limits.max_strings = (uint32_t)value; }
+  else if (strcmp(field, "max_string_bytes") == 0) { limits.max_string_bytes = (uint32_t)value; }
+  else if (strcmp(field, "max_blobs") == 0) { limits.max_blobs = (uint32_t)value; }
+  else if (strcmp(field, "max_blob_bytes") == 0) { limits.max_blob_bytes = (uint32_t)value; }
+  else if (strcmp(field, "max_annotations") == 0) { limits.max_annotations = (uint32_t)value; }
+  else if (strcmp(field, "max_units") == 0) { limits.max_units = (uint32_t)value; }
+  else if (strcmp(field, "max_types") == 0) { limits.max_types = (uint32_t)value; }
+  else if (strcmp(field, "max_aux") == 0) { limits.max_aux = (uint32_t)value; }
+  else if (strcmp(field, "max_numbers") == 0) { limits.max_numbers = (uint32_t)value; }
+  else if (strcmp(field, "max_secrets") == 0) { limits.max_secrets = (uint32_t)value; }
+  else if (strcmp(field, "max_secret_bytes") == 0) { limits.max_secret_bytes = (uint32_t)value; }
+  else if (strcmp(field, "max_extensions") == 0) { limits.max_extensions = (uint32_t)value; }
+  else if (strcmp(field, "max_prov_bytes") == 0) { limits.max_prov_bytes = (uint32_t)value; }
+  else if (strcmp(field, "max_prov_entries") == 0) { limits.max_prov_entries = (uint32_t)value; }
+  else if (strcmp(field, "max_hashes") == 0) { limits.max_hashes = (uint32_t)value; }
+  else if (strcmp(field, "max_bindings") == 0) { limits.max_bindings = (uint32_t)value; }
+  else if (strcmp(field, "max_total_bytes") == 0) { limits.max_total_bytes = (uint64_t)value; }
+  else if (strcmp(field, "max_decoded_bytes") == 0) { limits.max_decoded_bytes = (uint64_t)value; }
+  else if (strcmp(field, "max_depth") == 0) { limits.max_depth = (uint32_t)value; }
+  else {
+    return -1;
+  }
+  return active_infinity_validate_with_limits(image, length, &limits);
 }
 
 /* Fetch the name, path and content hash of the index-th valid case. */

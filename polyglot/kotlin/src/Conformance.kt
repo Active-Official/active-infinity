@@ -25,7 +25,8 @@ fun main() {
     // `"kind": "invalid_stream"`; the `.*?` spans the options object,
     // which sits between path and expected_code and never contains an
     // expected_code of its own.
-    val invalidCase = Regex("\"kind\"\\s*:\\s*\"invalid\".*?\"name\"\\s*:\\s*\"([^\"]+)\".*?\"path\"\\s*:\\s*\"([^\"]+)\".*?\"expected_code\"\\s*:\\s*\"([^\"]+)\"", RegexOption.DOT_MATCHES_ALL)
+    val invalidCase = Regex("\"kind\"\\s*:\\s*\"invalid\".*?\"name\"\\s*:\\s*\"([^\"]+)\".*?\"path\"\\s*:\\s*\"([^\"]+)\".*?\"options\"\\s*:\\s*\\{([^}]*)\\}.*?\"expected_code\"\\s*:\\s*\"([^\"]+)\"", RegexOption.DOT_MATCHES_ALL)
+    val limitsOption = Regex("\"limits\"\\s*:\\s*\"([^\"]+)\"")
 
     var checked = 0
     for (match in case.findAll(manifest)) {
@@ -77,26 +78,29 @@ fun main() {
     val valid = Regex("\"kind\": \"valid\"").findAll(manifest).count()
     check(checked == valid) { "manifest vectors were not exercised: $checked of $valid" }
 
-    // INF-POLY-02: every invalid vector except the two limits-dependent
-    // ones (limit, too_deep) must be refused by validateCanonical with
-    // exactly the manifest's expected_code. The FFI exposes no limits
-    // parameter, so those two need narrowed limits (max_nodes:1,
-    // max_depth:8) and are covered by the CLI's `conformance run` and
-    // the Rust suite instead. invalid_stream vectors are CLI-only: no
-    // stream decode exists in the FFI.
+    // INF-POLY-02: every invalid vector must be refused with exactly the
+    // manifest's expected_code. INF-FFI-02: the two limits-dependent ones
+    // (limit, too_deep) go through validateWithLimits with the narrowed
+    // budget from the entry's options.limits (max_nodes:1, max_depth:8);
+    // the rest go through validateCanonical. invalid_stream vectors are
+    // CLI-only: no stream decode exists in the FFI.
     var invalidChecked = 0
-    var invalidSkipped = 0
     for (match in invalidCase.findAll(manifest)) {
         val invalidName = match.groupValues[1]
         val invalidPath = match.groupValues[2]
-        val expectedCode = match.groupValues[3]
-        if (invalidName == "limit" || invalidName == "too_deep") {
-            invalidSkipped++
-            continue
-        }
+        val invalidOptions = match.groupValues[3]
+        val expectedCode = match.groupValues[4]
         val invalidImage = File(root, invalidPath).readBytes()
         try {
-            ActiveInfinity.validateCanonical(invalidImage)
+            val limitsMatch = limitsOption.find(invalidOptions)
+            if (limitsMatch != null) {
+                val parts = limitsMatch.groupValues[1].split(":", limit = 2)
+                val limits = Limits.defaults()
+                limits.setField(parts[0], parts[1].toLong())
+                ActiveInfinity.validateWithLimits(invalidImage, limits)
+            } else {
+                ActiveInfinity.validateCanonical(invalidImage)
+            }
             error("$invalidName: invalid image was accepted")
         } catch (e: ActiveInfinity.Error) {
             check(e.code() == expectedCode) { "$invalidName: wrong code ${e.code()}" }
@@ -104,8 +108,7 @@ fun main() {
         invalidChecked++
     }
     val invalidTotal = Regex("\"kind\": \"invalid\"").findAll(manifest).count()
-    check(invalidChecked + invalidSkipped == invalidTotal) { "manifest invalid vectors were not exercised: $invalidChecked + $invalidSkipped of $invalidTotal" }
-    check(invalidSkipped == 2) { "limits-dependent skips changed: $invalidSkipped" }
+    check(invalidChecked == invalidTotal) { "manifest invalid vectors were not exercised: $invalidChecked of $invalidTotal" }
 
     val source = "port = 8080\nname = \"kotlin\"\n"
     val first = ActiveInfinity.fromActive(source, "kotlin.active")

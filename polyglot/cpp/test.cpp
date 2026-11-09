@@ -21,8 +21,9 @@
 int main(int argc, char **argv) {
   std::string expected_hash;
   std::string expected_code;
-  if (argc < 2 || argc > 4) {
-    std::fprintf(stderr, "usage: %s <image.ainf> [expected-hash-hex] [--expect-code <code>]\n", argv[0]);
+  std::string limits_spec;
+  if (argc < 2 || argc > 6) {
+    std::fprintf(stderr, "usage: %s <image.ainf> [expected-hash-hex] [--expect-code <code>] [--limits <field:value>]\n", argv[0]);
     return 2;
   }
   for (int index = 2; index < argc; index++) {
@@ -32,6 +33,12 @@ int main(int argc, char **argv) {
         return 2;
       }
       expected_code = argv[++index];
+    } else if (std::strcmp(argv[index], "--limits") == 0) {
+      if (index + 1 >= argc) {
+        std::fprintf(stderr, "--limits needs a field:value spec\n");
+        return 2;
+      }
+      limits_spec = argv[++index];
     } else if (expected_hash.empty()) {
       expected_hash = argv[index];
     } else {
@@ -42,10 +49,24 @@ int main(int argc, char **argv) {
   try {
     auto image = active_infinity::Image::from_file(argv[1]);
     // INF-POLY-02: hostile mode -- the image must be refused by
-    // validate_canonical with exactly the expected code.
+    // validate_canonical with exactly the expected code. INF-FFI-02: with
+    // --limits, the refusal goes through validate_with_limits under the
+    // narrowed budget instead.
     if (!expected_code.empty()) {
       try {
-        image.validate_canonical();
+        if (!limits_spec.empty()) {
+          auto colon = limits_spec.find(':');
+          if (colon == std::string::npos) {
+            std::fprintf(stderr, "bad --limits spec: %s\n", limits_spec.c_str());
+            return 2;
+          }
+          auto limits = active_infinity::Limits::defaults();
+          limits.set(limits_spec.substr(0, colon),
+                     std::stoull(limits_spec.substr(colon + 1)));
+          image.validate_with_limits(limits);
+        } else {
+          image.validate_canonical();
+        }
         std::fprintf(stderr, "invalid image was accepted\n");
         return 1;
       } catch (const active_infinity::Error &error) {

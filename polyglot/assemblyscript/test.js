@@ -103,35 +103,55 @@ async function main() {
 	const valid = manifest.cases.filter((entry) => entry.kind === "valid").length;
 	assert.strictEqual(checked, valid, "the manifest exercised valid vectors");
 
-	// INF-POLY-02: every invalid vector except the two limits-dependent
-	// ones (limit, too_deep) must be refused by validateCanonical with
-	// exactly the manifest's expected_code. The WASM binding exposes no
-	// limits parameter, so those two need narrowed limits (max_nodes:1,
-	// max_depth:8) and are covered by the CLI's `conformance run` and the
-	// Rust suite instead. invalid_stream vectors are CLI-only: no stream
-	// decode exists in the FFI. validateCanonical returns -1 on refusal
-	// and the code is read back through the reference lastError.
+	// INF-POLY-02: every invalid vector must be refused with exactly the
+	// manifest's expected_code. INF-FFI-02: the two limits-dependent ones
+	// (limit, too_deep) go through validateWithLimits with the narrowed
+	// budget from the entry's options.limits (max_nodes:1, max_depth:8);
+	// the rest go through validateCanonical. invalid_stream vectors are
+	// CLI-only: no stream decode exists in the FFI. The validate functions
+	// return -1 on refusal and the code is read back through the reference
+	// lastError. The limits struct is 112 bytes in AS memory: max_nodes at
+	// offset 0, max_depth at offset 104 (the only two fields the manifest
+	// narrows); any other limits field is an error.
+	const LIMITS_FIELDS = {
+		max_nodes: [0, "u32"],
+		max_depth: [104, "u32"],
+	};
 	let invalidChecked = 0;
-	let invalidSkipped = 0;
 	for (const entry of manifest.cases) {
 		if (entry.kind !== "invalid") continue;
-		if (entry.name === "limit" || entry.name === "too_deep") {
-			invalidSkipped += 1;
-			continue;
-		}
 		const image = new Uint8Array(fs.readFileSync(path.join(ROOT, entry.path)));
 		const pointer = alloc(image);
-		assert.strictEqual(exports.validateCanonical(pointer, image.length), -1, entry.name);
-		assert.strictEqual(reference.lastError(), entry.expected_code, entry.name);
+		const limitsSpec = entry.options?.limits;
+		if (limitsSpec) {
+			const [field, value] = limitsSpec.split(":");
+			const limitsPointer = exports.allocate(112);
+			assert.strictEqual(exports.limitsDefault(limitsPointer), 0, entry.name);
+			const slot = LIMITS_FIELDS[field];
+			assert.ok(slot, `${entry.name}: unknown limits field ${field}`);
+			new DataView(memory().buffer, limitsPointer + slot[0], 4).setUint32(
+				0,
+				Number(value),
+				true,
+			);
+			assert.strictEqual(
+				exports.validateWithLimits(pointer, image.length, limitsPointer),
+				-1,
+				entry.name,
+			);
+			assert.strictEqual(reference.lastError(), entry.expected_code, entry.name);
+		} else {
+			assert.strictEqual(exports.validateCanonical(pointer, image.length), -1, entry.name);
+			assert.strictEqual(reference.lastError(), entry.expected_code, entry.name);
+		}
 		invalidChecked += 1;
 	}
 	const invalidTotal = manifest.cases.filter((entry) => entry.kind === "invalid").length;
 	assert.strictEqual(
-		invalidChecked + invalidSkipped,
+		invalidChecked,
 		invalidTotal,
 		"the manifest exercised invalid vectors",
 	);
-	assert.strictEqual(invalidSkipped, 2, "limits-dependent skips changed");
 
 	// A capacity smaller than the result must return -2 with the required size
 	// and must not write into the caller's buffer.

@@ -54,7 +54,7 @@ fn slack_image() -> Vec<u8> {
     img.extend_from_slice(&1u32.to_le_bytes());
     img.extend_from_slice(&10u32.to_le_bytes());
     img.extend_from_slice(b"azzz-unref");
-    img.extend(std::iter::repeat(0u8).take(new_padded - new_body));
+    img.extend(std::iter::repeat_n(0u8, new_padded - new_body));
     // Rest of the image (sections after Strings), unchanged bytes.
     let rest_start = str_off + old_padded;
     img.extend_from_slice(&orig[rest_start..]);

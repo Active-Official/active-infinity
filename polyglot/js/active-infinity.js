@@ -38,13 +38,27 @@ class ActiveInfinity {
 		// instantiation. Resolve it lazily through the instance object below.
 		let instanceRef = null;
 		imports.env.active_random_fill = (dest, len) => {
-			const buffer = new Uint8Array(
-				instanceRef.exports.memory.buffer,
-				dest,
-				len,
-			);
-			crypto.getRandomValues(buffer);
-			return 0;
+			// INF-POLY-01: WebCrypto caps one getRandomValues call at
+			// 65,536 bytes; a larger fill threw QuotaExceededError into
+			// the WASM import and trapped the instance. Chunk at the cap
+			// and return non-zero on any failure -- the Rust side treats
+			// non-zero as a clean getrandom error. (Keep in sync with the
+			// twin in polyglot/assemblyscript/host.js.)
+			try {
+				for (let offset = 0; offset < len; offset += 65536) {
+					const chunk = Math.min(65536, len - offset);
+					crypto.getRandomValues(
+						new Uint8Array(
+							instanceRef.exports.memory.buffer,
+							dest + offset,
+							chunk,
+						),
+					);
+				}
+				return 0;
+			} catch {
+				return 1;
+			}
 		};
 		const instance = await WebAssembly.instantiate(module, imports);
 		instanceRef = instance;

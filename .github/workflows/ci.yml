@@ -214,6 +214,8 @@ jobs:
           node-version: 20
       - name: JavaScript conformance
         run: node polyglot/js/test.js
+      - name: Random-fill regression (INF-POLY-01)
+        run: node polyglot/js/test_random_fill.js
 
   polyglot-native:
     runs-on: ubuntu-latest

@@ -19,9 +19,40 @@ POLYGLOT_CACHE="$CACHE" bash "$OUT/install.sh"
 
 cargo build --release --manifest-path "$ROOT/ffi/active-infinity-ffi/Cargo.toml"
 
+# XPL-INF-06: the loader is per-OS. Windows has no `dlopen`, so the mingw
+# target compiles WindowsLoader.kt (LoadLibraryW) instead of
+# PosixLoader.kt (dlopen); the two files implement the same
+# openNativeLibrary/loadSymbol surface, and exactly one is compiled.
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*)
+    LOADER="WindowsLoader.kt"
+    ;;
+  *)
+    LOADER="PosixLoader.kt"
+    ;;
+esac
+
 cd "$OUT"
-"$KONAN/bin/konanc" -o conformance src/Conformance.kt
+"$KONAN/bin/konanc" -o conformance src/Conformance.kt "src/$LOADER"
 
 cd "$ROOT"
-LD_LIBRARY_PATH="$ROOT/ffi/active-infinity-ffi/target/release${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
-  "$OUT/conformance.kexe"
+# The reference library is found through the platform loader's search:
+# LD_LIBRARY_PATH on Linux, DYLD_LIBRARY_PATH on macOS, PATH on Windows.
+# konanc emits `conformance.kexe` on POSIX targets and `conformance.exe`
+# on Windows.
+BIN="$OUT/conformance.kexe"
+[ -x "$BIN" ] || BIN="$OUT/conformance.exe"
+case "$(uname -s)" in
+  Darwin*)
+    DYLD_LIBRARY_PATH="$ROOT/ffi/active-infinity-ffi/target/release${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}" \
+      "$BIN"
+    ;;
+  MINGW*|MSYS*|CYGWIN*)
+    PATH="$ROOT/ffi/active-infinity-ffi/target/release:$PATH" \
+      "$BIN"
+    ;;
+  *)
+    LD_LIBRARY_PATH="$ROOT/ffi/active-infinity-ffi/target/release${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
+      "$BIN"
+    ;;
+esac

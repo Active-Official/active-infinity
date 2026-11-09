@@ -23,17 +23,21 @@ ai_load <- function() {
   library <- if (nzchar(configured)) configured else "active_infinity_ffi"
   dyn.load(library)
 
+  # XPL-INF-06: one shim candidate per OS. The list used to name only
+  # `.dll` and `.so`, so on macOS no shim was ever found even when built.
   candidates <- c(
     Sys.getenv("ACTIVE_INFINITY_R_SHIM", ""),
     file.path(.ai_script_dir(), "active_infinity_r.dll"),
+    file.path(.ai_script_dir(), "active_infinity_r.dylib"),
     file.path(.ai_script_dir(), "active_infinity_r.so"),
     file.path(getwd(), "polyglot", "r", "active_infinity_r.dll"),
+    file.path(getwd(), "polyglot", "r", "active_infinity_r.dylib"),
     file.path(getwd(), "polyglot", "r", "active_infinity_r.so")
   )
   candidates <- candidates[nzchar(candidates)]
   existing <- candidates[file.exists(candidates)]
   if (length(existing) == 0) {
-    stop("build polyglot/r/active_infinity_r.[dll|so] first", call. = FALSE)
+    stop("build polyglot/r/active_infinity_r.[dll|dylib|so] first", call. = FALSE)
   }
   dyn.load(existing[[1]])
   .ai_state$loaded <- TRUE

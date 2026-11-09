@@ -29,7 +29,11 @@ module ActiveInfinity
   if library && !library.empty?
     ffi_lib library
   else
-    ffi_lib %w[active_infinity_ffi libactive_infinity_ffi.so libactive_infinity_ffi.dylib]
+    # One candidate per OS: the bare name resolves through the platform
+    # loader where it can, and the explicit names cover the rest.
+    # XPL-INF-06: the list used to name no `.dll`, so the binding could
+    # not load on Windows at all.
+    ffi_lib %w[active_infinity_ffi active_infinity_ffi.dll libactive_infinity_ffi.so libactive_infinity_ffi.dylib]
   end
 
   attach_function :active_infinity_abi_version, [], :uint32

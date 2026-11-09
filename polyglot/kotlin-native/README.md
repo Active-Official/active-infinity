@@ -1,8 +1,12 @@
 # Kotlin/Native binding
 
-Kotlin/Native loads the C ABI with `dlopen` instead of linking against it. That
+Kotlin/Native loads the C ABI with the platform loader (`dlopen` on Linux and
+macOS, `LoadLibrary` on Windows) instead of linking against it. That
 avoids the compiler's bundled sysroot, which is older than the glibc the shared
 library expects, and keeps the ABI surface identical to the other bindings.
+The default library name is per-OS (`libactive_infinity_ffi.so` on Linux,
+`libactive_infinity_ffi.dylib` on macOS, `active_infinity_ffi.dll` on
+Windows); set `ACTIVE_INFINITY_LIB` to override it.
 
 ## Prerequisites
 
@@ -21,14 +25,18 @@ sysroot downloads are reused across containers.
 
 ## Quickstart
 
-The binding pattern lives in `src/Conformance.kt`: declare the six ABI
-functions with `CFunction`, resolve them with `dlsym`, and copy byte arrays in
-and out of `active_infinity_alloc` buffers.
+The binding pattern lives in `src/Conformance.kt`, with the platform loader
+in `src/PosixLoader.kt` (`dlopen`) and `src/WindowsLoader.kt`
+(`LoadLibrary`); `build.sh` compiles exactly one loader file for the host.
+Declare the six ABI functions with `CFunction`, resolve them with
+`loadSymbol`, and copy byte arrays in and out of `active_infinity_alloc`
+buffers.
 
 ```kotlin
-val handle = dlopen("libactive_infinity_ffi.so", RTLD_NOW) ?: error("cannot load")
-val validate = dlsym(handle, "active_infinity_validate")!!
-    .reinterpret<CFunction<(CPointer<UByteVar>?, ULong) -> Int>>()
+val handle = openNativeLibrary() // ACTIVE_INFINITY_LIB, or the per-OS default
+val validate = loadSymbol<CFunction<(CPointer<UByteVar>?, ULong) -> Int>>(
+    handle, "active_infinity_validate"
+)
 val status = validate(pointer, length.toULong())
 ```
 

@@ -4,7 +4,9 @@ import kotlinx.cinterop.*
 import platform.posix.*
 
 /**
- * Kotlin/Native conformance over the C ABI, loaded with `dlopen`.
+ * Kotlin/Native conformance over the C ABI, loaded with the platform
+ * loader (`dlopen` on POSIX, `LoadLibrary` on Windows; see
+ * PosixLoader.kt / WindowsLoader.kt, selected by build.sh).
  *
  * Dynamic loading keeps the binding independent of the compiler's bundled
  * sysroot: the executable only links libc, and the reference library is resolved
@@ -31,17 +33,17 @@ private class Abi {
     val fromActive: CPointer<CFunction<(CPointer<UByteVar>?, ULong, CPointer<ByteVar>?, CPointer<UByteVar>?, CPointer<ULongVar>?) -> Int>> =
         symbol("active_infinity_from_active")
 
-    private fun <T : CFunction<*>> symbol(name: String): CPointer<T> {
-        val pointer = dlsym(handle, name) ?: error("missing symbol $name")
-        return pointer.reinterpret<T>()
-    }
+    private fun <T : CFunction<*>> symbol(name: String): CPointer<T> =
+        loadSymbol(handle, name)
 
     companion object {
-        val handle: COpaquePointer? by lazy {
-            val configured = getenv("ACTIVE_INFINITY_LIB")?.toKString()
-            val name = if (configured.isNullOrEmpty()) "libactive_infinity_ffi.so" else configured
-            dlopen(name, RTLD_NOW) ?: error("cannot load $name: ${dlerror()?.toKString()}")
-        }
+        // XPL-INF-06: the library name and the load mechanism are per-OS.
+        // The default used to be a hardcoded `libactive_infinity_ffi.so`
+        // loaded with `dlopen`, which names no `.dll` and does not even
+        // exist on the Windows (mingw) target. PosixLoader.kt and
+        // WindowsLoader.kt implement openNativeLibrary/loadSymbol for
+        // their platform; build.sh compiles exactly one of them.
+        val handle: COpaquePointer by lazy { openNativeLibrary() }
     }
 }
 

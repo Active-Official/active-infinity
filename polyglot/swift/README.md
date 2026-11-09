@@ -15,8 +15,27 @@ The Swift module links the Rust reference directly through a
 ```text
 (cd ffi/active-infinity-ffi && cargo build --release)
 cd polyglot/swift && swift build -c release && cd ../..
+```
+
+The executable links the FFI crate statically on Linux and macOS, so the
+shared library only has to be findable at run time:
+
+```text
+# Linux
 LD_LIBRARY_PATH="$PWD/ffi/active-infinity-ffi/target/release" \
   polyglot/swift/.build/release/Conformance
+# macOS
+DYLD_LIBRARY_PATH="$PWD/ffi/active-infinity-ffi/target/release" \
+  polyglot/swift/.build/release/Conformance
+```
+
+On Windows the executable links the shared library instead (see
+`Package.swift`), so the `.dll` must sit next to it at run time:
+
+```text
+swift build -c release --show-bin-path   # prints the directory holding Conformance.exe
+copy ffi\active-infinity-ffi\target\release\active_infinity_ffi.dll <that directory>
+<that directory>\Conformance.exe
 ```
 
 ## Quickstart

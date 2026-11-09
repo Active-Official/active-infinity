@@ -151,6 +151,45 @@ jobs:
             -lpthread -ldl -lm -o /tmp/active-infinity-c
           /tmp/active-infinity-c tests/vectors/valid/full.ainf
 
+  abi-windows-macos:
+    # XPL-INF-06: the FFI crate is the shared library every binding loads,
+    # and the `abi` job only ever built it on Linux. This job proves the
+    # crate builds, passes its tests and links into the C consumer on
+    # Windows and macOS too. The C consumer link line is per-OS: the static
+    # library is `libactive_infinity_ffi.a` on Linux and macOS, and `-ldl`
+    # exists only on Linux. On Windows the consumer links the cdylib's
+    # import library instead: MinGW gcc cannot link the MSVC static library
+    # (`active_infinity_ffi.lib` holds MSVC objects, __chkstk / C++ RTTI).
+    strategy:
+      matrix:
+        os: [windows-latest, macos-latest]
+      fail-fast: false
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      - name: ABI tests (validate, hash, reencode, redaction)
+        working-directory: ffi/active-infinity-ffi
+        run: cargo test --locked --release
+      - name: Build the shared library
+        working-directory: ffi/active-infinity-ffi
+        run: cargo build --locked --release
+      - name: Compile and run the C consumer
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            gcc -I ffi/active-infinity-ffi/include polyglot/c/consumer.c \
+              ffi/active-infinity-ffi/target/release/active_infinity_ffi.dll.lib \
+              -lpthread -lm -o active-infinity-c.exe
+            cp ffi/active-infinity-ffi/target/release/active_infinity_ffi.dll .
+            ./active-infinity-c.exe tests/vectors/valid/full.ainf
+          else
+            cc -I ffi/active-infinity-ffi/include polyglot/c/consumer.c \
+              ffi/active-infinity-ffi/target/release/libactive_infinity_ffi.a \
+              -lpthread -lm -o active-infinity-c
+            ./active-infinity-c tests/vectors/valid/full.ainf
+          fi
+
   wasm:
     runs-on: ubuntu-latest
     steps:
@@ -348,6 +387,37 @@ jobs:
           cd ../..
           LD_LIBRARY_PATH="$PWD/ffi/active-infinity-ffi/target/release" \
             polyglot/swift/.build/release/Conformance
+
+  polyglot-swift-windows:
+    # XPL-INF-06: the Windows leg of `polyglot-swift`. The Swift package
+    # links the FFI's shared import library on Windows
+    # (`active_infinity_ffi.dll.lib`), which no Linux run can exercise.
+    # INFORMATIONAL until green: add to the `polyglot-matrix` gate once
+    # this job goes green. If the link or the run fails only on Windows
+    # for a legitimate platform reason, the fix belongs to that finding -
+    # never weaken this job to green.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      - name: Set up Swift
+        uses: swift-actions/setup-swift@7ca6abe6b3b0e8b5421b88be48feee39cbf52c6a # v2.4.0
+        with:
+          swift-version: "6.0"
+      - name: Build the shared library
+        working-directory: ffi/active-infinity-ffi
+        run: cargo build --locked --release
+      - name: Swift conformance
+        shell: bash
+        run: |
+          cd polyglot/swift
+          swift build -c release
+          BIN="$(swift build -c release --show-bin-path)"
+          # The executable links the shared library: the `.dll` must sit
+          # next to it at run time.
+          cp ../../ffi/active-infinity-ffi/target/release/active_infinity_ffi.dll "$BIN/"
+          cd ../..
+          "$BIN/Conformance.exe"
 
   polyglot-assemblyscript:
     runs-on: ubuntu-latest

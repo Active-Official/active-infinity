@@ -388,8 +388,10 @@ impl Store {
     ///
     /// A hard link is the atomic no-replace primitive that both Unix and
     /// Windows provide. Filesystems without hard links fall back to a rename
-    /// guarded by an existence check; that window is harmless because readers
-    /// validate what they find and refuse a partial object.
+    /// guarded by an existence check (`commit_fallback`): the scratch file
+    /// already holds the complete, synced bytes, so one atomic rename
+    /// publishes it and a reader never observes a partial object at the
+    /// final name.
     fn commit(&self, temp: &Path, dest: &Path, bytes: &[u8], limit: u64) -> Result<()> {
         match fs::hard_link(temp, dest) {
             Ok(()) => {
@@ -404,33 +406,38 @@ impl Store {
                 let _ = fs::remove_file(temp);
                 self.compare_existing(dest, bytes, limit)
             }
+            Err(_) => self.commit_fallback(temp, dest, bytes, limit),
+        }
+    }
+
+    /// Publish the scratch file on a filesystem without hard links.
+    ///
+    /// The scratch file already holds the complete, synced bytes
+    /// (`store_bytes` wrote and synced them before calling `commit`), so
+    /// this only renames it into place — no second write, and no window in
+    /// which a reader can observe a partial object at the final name. The
+    /// existence check keeps the no-replace rule for the normal case. The
+    /// residual window (an object planted between the check and the rename)
+    /// is replaced by the rename on Unix; that can only substitute bytes
+    /// this store verified for this hash — the image, or a verified envelope
+    /// over it — and a reader validates whatever it finds, so the
+    /// replacement converges the store instead of corrupting it. On Windows
+    /// the rename itself refuses an existing destination, so there the
+    /// window does not exist.
+    fn commit_fallback(&self, temp: &Path, dest: &Path, bytes: &[u8], limit: u64) -> Result<()> {
+        if dest.exists() {
+            let _ = fs::remove_file(temp);
+            return self.compare_existing(dest, bytes, limit);
+        }
+        match fs::rename(temp, dest) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => {
+                let _ = fs::remove_file(temp);
+                self.compare_existing(dest, bytes, limit)
+            }
             Err(_) => {
-                // Filesystems without hard links: an exclusive create cannot
-                // replace a concurrently planted object, unlike a rename on
-                // Unix. The object becomes visible while it is written, so a
-                // reader may see a partial file and refuse it (validation is
-                // fail-closed).
-                match create_new_file(dest) {
-                    Ok(mut file) => {
-                        let written = file.write_all(bytes).and_then(|()| file.sync_all());
-                        drop(file);
-                        let _ = fs::remove_file(temp);
-                        if written.is_ok() {
-                            Ok(())
-                        } else {
-                            let _ = fs::remove_file(dest);
-                            Err(Error::Store("cannot commit object"))
-                        }
-                    }
-                    Err(error) if error.kind() == ErrorKind::AlreadyExists => {
-                        let _ = fs::remove_file(temp);
-                        self.compare_existing(dest, bytes, limit)
-                    }
-                    Err(_) => {
-                        let _ = fs::remove_file(temp);
-                        Err(Error::Store("cannot commit object"))
-                    }
-                }
+                let _ = fs::remove_file(temp);
+                Err(Error::Store("cannot commit object"))
             }
         }
     }
@@ -807,5 +814,66 @@ fn store_read_fault(error: Error) -> Error {
     match error {
         Error::Store(_) => error,
         _ => Error::Store("object is absent or unreadable"),
+    }
+}
+
+#[cfg(test)]
+mod commit_fallback_tests {
+    use super::*;
+
+    fn store() -> (tempfile::TempDir, Store) {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let store = Store::open(directory.path()).expect("store");
+        (directory, store)
+    }
+
+    fn scratch(directory: &tempfile::TempDir, bytes: &[u8]) -> PathBuf {
+        let path = directory.path().join(".fallback.tmp");
+        std::fs::write(&path, bytes).expect("write scratch");
+        path
+    }
+
+    #[test]
+    fn fallback_publishes_the_complete_scratch_file() {
+        let (directory, store) = store();
+        let bytes = b"complete object bytes";
+        let temp = scratch(&directory, bytes);
+        let dest = directory.path().join("object.ainf");
+        store
+            .commit_fallback(&temp, &dest, bytes, 1024)
+            .expect("fallback commit");
+        assert!(!temp.exists(), "scratch file is moved, not copied");
+        assert_eq!(std::fs::read(&dest).expect("read dest"), bytes);
+    }
+
+    #[test]
+    fn fallback_refuses_to_replace_a_different_object() {
+        let (directory, store) = store();
+        let dest = directory.path().join("object.ainf");
+        std::fs::write(&dest, b"planted different bytes").expect("plant occupant");
+        let bytes = b"new object bytes";
+        let temp = scratch(&directory, bytes);
+        let error = store
+            .commit_fallback(&temp, &dest, bytes, 1024)
+            .expect_err("a different occupant must be refused");
+        assert_eq!(error.code(), "infinity/store");
+        assert_eq!(
+            std::fs::read(&dest).expect("read dest"),
+            b"planted different bytes",
+            "the occupant is untouched"
+        );
+    }
+
+    #[test]
+    fn fallback_accepts_an_identical_existing_object() {
+        let (directory, store) = store();
+        let bytes = b"already stored bytes";
+        let dest = directory.path().join("object.ainf");
+        std::fs::write(&dest, bytes).expect("plant occupant");
+        let temp = scratch(&directory, bytes);
+        store
+            .commit_fallback(&temp, &dest, bytes, 1024)
+            .expect("an identical occupant is a deduplicated no-op");
+        assert_eq!(std::fs::read(&dest).expect("read dest"), bytes);
     }
 }

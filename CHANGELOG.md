@@ -45,6 +45,18 @@
 
 ### Fixed
 
+- **Store commits are atomic on filesystems without hard links (XPL-INF-05 /
+  INF-L10).** `commit()` fell back to writing the object directly at its
+  final name when hard links were unavailable (exFAT/FAT32, some network
+  shares), so a concurrent reader could observe a partial object. The
+  fallback now renames the scratch file — which already holds the complete,
+  synced bytes — into place, guarded by the same existence check. The
+  code's own doc comment already described a rename fallback; the code did
+  not do it. On Unix a plant landing between the existence check and the
+  rename is still replaced by the rename; that can only substitute bytes
+  this store verified for the hash, and readers validate whatever they
+  find. On Windows the rename itself refuses an existing destination.
+
 - **A swapped store root is refused on Windows (XPL-INF-03).** `Store::open`
   pinned the root directory by (device, inode) only on Unix; on Windows the
   check was skipped, so an open store silently split its objects across two

@@ -41,6 +41,72 @@ jobs:
       - name: Benchmarks compile
         run: cargo bench --locked --bench codec --no-run
 
+  gates-windows:
+    # XPL-01: the Windows leg of the gates. Mirrors `gates` step for step -
+    # do not invent a different gate set for Windows. INFORMATIONAL until
+    # green: add to the branch's required-status checks once the XPL-INF
+    # fixes land and this job goes green. If a test fails only on Windows
+    # for a legitimate platform reason, the fix belongs to that finding -
+    # never weaken this job to green.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          components: rustfmt, clippy
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Clippy (all targets, all features)
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+      - name: Clippy (no default features)
+        run: cargo clippy --locked --all-targets --no-default-features -- -D warnings
+      - name: Tests
+        run: cargo test --locked --all-features
+      - name: Invariant gate (secret canary and capability authority)
+        run: cargo test --locked --all-features --test invariant_gate
+      - name: Tests (no default features)
+        run: cargo test --locked --no-default-features
+      - name: Documentation
+        env:
+          # A broken intra-doc link is a documentation defect, not a warning.
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --locked --no-deps --all-features
+      - name: Benchmarks compile
+        run: cargo bench --locked --bench codec --no-run
+
+  gates-macos:
+    # XPL-01: the macOS leg of the gates. Mirrors `gates` step for step.
+    # No macOS execution of these suites exists anywhere today; this job is
+    # the first. INFORMATIONAL until green: add to the branch's
+    # required-status checks once the XPL-INF fixes land and this job goes
+    # green. If a test fails only on macOS for a legitimate platform
+    # reason, the fix belongs to that finding - never weaken this job.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          components: rustfmt, clippy
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Clippy (all targets, all features)
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+      - name: Clippy (no default features)
+        run: cargo clippy --locked --all-targets --no-default-features -- -D warnings
+      - name: Tests
+        run: cargo test --locked --all-features
+      - name: Invariant gate (secret canary and capability authority)
+        run: cargo test --locked --all-features --test invariant_gate
+      - name: Tests (no default features)
+        run: cargo test --locked --no-default-features
+      - name: Documentation
+        env:
+          # A broken intra-doc link is a documentation defect, not a warning.
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --locked --no-deps --all-features
+      - name: Benchmarks compile
+        run: cargo bench --locked --bench codec --no-run
+
   pin-lint:
     # R2-NEW-01: the pin state is a gate, not a convention. Fails when any
     # `uses:` in .github/workflows/*.yml is not a full 40-hex commit SHA,

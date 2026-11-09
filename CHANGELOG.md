@@ -4,6 +4,19 @@
 
 ### Fixed
 
+- **Decode amplification is bounded (INF-01, R2-INF-DEC-01).** `decode_validated`
+  now refuses an image whose materialised form would exceed the new
+  `Limits::max_decoded_bytes` (default 256 MiB, `Limits::strict()` 1 MiB),
+  charging every cloned byte per use before any cloning happens: shared
+  strings, blob payloads, secrets, named units, table field names,
+  interpolated literals, constraint/patch/schema strings, annotation strings,
+  binding names, extension payloads and provenance strings — including
+  type-enum members, charged once per `SchemaField` that names the type, so
+  the interned type table can no longer hide fan-out from the budget. A
+  246 KiB image that decoded to 268 MB (1091x) is now refused with
+  `infinity/limit`; `validate()` and the zero-copy `view` path are
+  unaffected.
+
 - **`Any` and an open `Table` keep their whole cone on the value plane.** The
   schema walk accepted an array or table without looking inside, so an `Ident`
   (or any other program node) nested under an `Any` field passed validation even

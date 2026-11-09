@@ -677,7 +677,13 @@ this is an encoder-side error rather than a wire error.
 
 `Limits` bounds nodes, edges, children, fields, parts, strings, string bytes,
 blobs, blob bytes, annotations, units, types, aux, numbers, secrets, secret
-bytes, extensions, provenance entries, total bytes and depth. The total-byte and
+bytes, extensions, provenance entries, total bytes and depth. `Limits`
+additionally bounds decoded output: `max_decoded_bytes` (default 256 MiB)
+caps the bytes `decode_validated` may materialise as owned data, charged per
+use before any cloning — a string referenced by N nodes is charged N times,
+and a type-enum member is charged once per `SchemaField` that names the type
+(INF-01, R2-INF-DEC-01). `validate()` (no materialisation) and the zero-copy
+`view` path are unaffected. The total-byte and
 string-heap ceilings are checked before anything is decoded, and the depth
 ceiling applies to **every** root (module root, bindings, annotation subjects) —
 a second shallow root cannot hide a deep chain. Defaults accept

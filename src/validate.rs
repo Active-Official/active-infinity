@@ -470,6 +470,26 @@ impl<'a> Validated<'a> {
         }
     }
 
+    /// Bytes a `Named` unit entry would clone on decode, without cloning
+    /// it: the length of the unit name for a named unit, 0 for a built-in
+    /// discriminant. The decoded-bytes budget (INF-01) charges a named unit
+    /// once per `Quantity` node that names it; measuring through `unit()`
+    /// would allocate the name on every call, so the budget measures here.
+    pub(crate) fn unit_name_len(&self, id: u32) -> Result<u64> {
+        let count = self.header.span(Section::Units).count;
+        if id >= count {
+            return Err(Error::UnitRef(id));
+        }
+        let offset = self.header.span(Section::Units).offset as usize + id as usize * 8;
+        let disc = read_u32(self.buf, offset)?;
+        let name = read_u32(self.buf, offset + 4)?;
+        if disc == UNIT_NAMED {
+            Ok(self.string(name)?.len() as u64)
+        } else {
+            Ok(0)
+        }
+    }
+
     /// Read a type table entry: (code, flags, aux start, aux count).
     pub fn type_entry(&self, id: u32) -> Result<(u32, u32, u32, u32)> {
         let count = self.header.span(Section::Types).count;
@@ -698,6 +718,82 @@ impl<'a> Validated<'a> {
             parent,
             entries,
         }))
+    }
+
+    /// Bytes `provenance()` would clone as owned strings, without cloning
+    /// them: producer/model/tool names plus, per entry, the key and the
+    /// `Text` value. The decoded-bytes budget (INF-01) charges provenance
+    /// strings because many entries may reference one shared string. The
+    /// walk mirrors `provenance()` exactly (same offsets, same bounds
+    /// checks) so the charge and the clone can never disagree about which
+    /// strings exist; any inconsistency surfaces as the same
+    /// `Error::Provenance` the clone path would return.
+    pub(crate) fn provenance_string_bytes(&self) -> Result<u64> {
+        let len = self.header.span(Section::Provenance).count as usize;
+        if len == 0 {
+            return Ok(0);
+        }
+        let start = self.header.span(Section::Provenance).offset as usize;
+        if len < PROV_HEADER_SIZE {
+            return Err(Error::Provenance("block shorter than its header"));
+        }
+        let block = &self.buf[start..start + len];
+        let version = read_u32(block, 0)?;
+        if version != 1 {
+            return Err(Error::Provenance("unsupported provenance version"));
+        }
+        let count = read_u32(block, 4)?;
+        let mut total: u64 = 0;
+        let sid_len = |offset: usize| -> Result<u64> {
+            let id = read_u32(block, offset)?;
+            if id == u32::MAX {
+                Ok(0)
+            } else {
+                self.string(id)
+                    .map(|text| text.len() as u64)
+                    .map_err(|_| Error::Provenance("dangling provenance string"))
+            }
+        };
+        for offset in [16, 20, 24] {
+            total = total
+                .checked_add(sid_len(offset)?)
+                .ok_or(Error::Provenance("provenance string bytes overflow"))?;
+        }
+        for index in 0..count as usize {
+            let offset = PROV_HEADER_SIZE
+                .checked_add(
+                    index
+                        .checked_mul(PROV_ENTRY_SIZE)
+                        .ok_or(Error::Provenance("provenance entry offset overflows"))?,
+                )
+                .ok_or(Error::Provenance("provenance entry offset overflows"))?;
+            if offset + PROV_ENTRY_SIZE > block.len() {
+                return Err(Error::Provenance("entry exceeds block"));
+            }
+            let kind = read_u32(block, offset)?;
+            if kind > 3 {
+                return Err(Error::Provenance("reserved provenance entry kind"));
+            }
+            let key = read_u32(block, offset + 4)?;
+            total = total
+                .checked_add(
+                    self.string(key)
+                        .map(|text| text.len() as u64)
+                        .map_err(|_| Error::Provenance("dangling provenance string"))?,
+                )
+                .ok_or(Error::Provenance("provenance string bytes overflow"))?;
+            if kind == 0 {
+                let a = read_u32(block, offset + 8)?;
+                total = total
+                    .checked_add(
+                        self.string(a)
+                            .map(|text| text.len() as u64)
+                            .map_err(|_| Error::Provenance("dangling provenance string"))?,
+                    )
+                    .ok_or(Error::Provenance("provenance string bytes overflow"))?;
+            }
+        }
+        Ok(total)
     }
 
     /// Module root recorded in the bindings index (row 0), if any.

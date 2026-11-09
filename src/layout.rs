@@ -457,6 +457,17 @@ pub struct Limits {
     /// Binding entries (the table carries a root word, then name/node pairs).
     pub max_bindings: u32,
     pub max_total_bytes: u64,
+    /// Cap on the bytes `decode_validated` may materialise as owned data
+    /// (INF-01): every string, blob payload, secret, extension payload,
+    /// provenance string, annotation string, binding name, table field name
+    /// and type-enum member the decoder clones, charged per use — a string
+    /// referenced by N nodes is charged N times, and a type-enum member is
+    /// charged once per `SchemaField` that names the type (R2-INF-DEC-01).
+    /// The check runs before any cloning, so decoded output is bounded by
+    /// this ceiling plus the node arena (`max_nodes` entries), never by a
+    /// multiple of the input size. `validate()` (no materialisation) and the
+    /// zero-copy `view` path are unaffected.
+    pub max_decoded_bytes: u64,
     pub max_depth: u32,
 }
 
@@ -485,6 +496,7 @@ impl Default for Limits {
             max_hashes: 1 << 20,
             max_bindings: 1 << 20,
             max_total_bytes: 1 << 30,
+            max_decoded_bytes: 256 << 20,
             max_depth: 4096,
         }
     }
@@ -516,6 +528,7 @@ impl Limits {
             max_hashes: 4096,
             max_bindings: 4096,
             max_total_bytes: 8 << 20,
+            max_decoded_bytes: 1 << 20,
             max_depth: 128,
         }
     }
@@ -526,7 +539,7 @@ impl Limits {
     /// "limit" the reader discovers later as `infinity/limit` on the first
     /// hostile input. The message names the field so a caller can fix it.
     pub fn check(&self) -> Result<()> {
-        let ceilings: [(&'static str, u64); 23] = [
+        let ceilings: [(&'static str, u64); 24] = [
             ("max_nodes", self.max_nodes as u64),
             ("max_edges", self.max_edges as u64),
             ("max_children", self.max_children as u64),
@@ -549,6 +562,7 @@ impl Limits {
             ("max_hashes", self.max_hashes as u64),
             ("max_bindings", self.max_bindings as u64),
             ("max_total_bytes", self.max_total_bytes),
+            ("max_decoded_bytes", self.max_decoded_bytes),
             ("max_depth", self.max_depth as u64),
         ];
         for (name, value) in ceilings {
@@ -576,6 +590,7 @@ impl Limits {
                     "max_hashes" => "max_hashes must be non-zero",
                     "max_bindings" => "max_bindings must be non-zero",
                     "max_total_bytes" => "max_total_bytes must be non-zero",
+                    "max_decoded_bytes" => "max_decoded_bytes must be non-zero",
                     _ => "max_depth must be non-zero",
                 }));
             }

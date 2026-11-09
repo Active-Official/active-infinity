@@ -33,6 +33,7 @@ pub fn decode_with(bytes: &[u8], opts: DecodeOpts) -> Result<InfinityModule> {
 
 /// Materialise an already validated image.
 pub fn decode_validated(validated: &Validated<'_>) -> Result<InfinityModule> {
+    check_decoded_budget(validated)?;
     let count = validated.node_count();
     let mut nodes = Vec::with_capacity(count as usize);
     for index in 0..count {
@@ -79,6 +80,142 @@ pub fn decode_validated(validated: &Validated<'_>) -> Result<InfinityModule> {
         validated.limits_snapshot().max_depth,
     )?;
     Ok(module)
+}
+
+/// Refuse an image whose decoded form would exceed
+/// `Limits::max_decoded_bytes` (INF-01, R2-INF-DEC-01).
+///
+/// Every byte `decode_validated` is about to clone as owned data is charged
+/// here, per use, before any cloning happens: a string referenced by N nodes
+/// is charged N times, a blob payload once per `Blob` node that carries it,
+/// a named unit once per `Quantity` node, a type-enum member once per
+/// `SchemaField` that names the type (the type table is an indirection the
+/// per-string count cannot see — the member string is directly referenced
+/// exactly once, by the interned type entry, while decode clones it once
+/// per referencing node). Annotation strings, binding names, extension
+/// payloads and provenance strings are charged the same way. The running
+/// total uses checked `u64` arithmetic and trips the budget the moment it
+/// exceeds it, so the pre-pass itself allocates nothing but the per-type
+/// member table (bounded by `max_types` entries) and refuses before the
+/// clone loop runs. An image that passes has decoded output bounded by the
+/// ceiling plus the node arena (`max_nodes` entries); `validate()` and the
+/// zero-copy `view` path do not call this and are unaffected.
+fn check_decoded_budget(validated: &Validated<'_>) -> Result<()> {
+    let budget = validated.limits_snapshot().max_decoded_bytes;
+    let mut total: u64 = 0;
+    let charge = |total: &mut u64, bytes: u64| -> Result<()> {
+        *total = total.checked_add(bytes).ok_or(Error::Limit {
+            kind: "decoded bytes",
+            limit: budget,
+        })?;
+        if *total > budget {
+            return Err(Error::Limit {
+                kind: "decoded bytes",
+                limit: budget,
+            });
+        }
+        Ok(())
+    };
+    // Materialised bytes of each type entry's enum members, computed once
+    // per type (not once per referencing node): only code 8 (`Enum`) clones
+    // strings, and only its `AUX_TYPE_ENUM_ITEM` aux records do. The sum is
+    // saturated, not budget-checked, here: it is only a per-type figure, and
+    // the budget trips when a `SchemaField` actually charges it below.
+    let type_count = validated.span(crate::layout::Section::Types).count as usize;
+    let mut type_cost: Vec<u64> = Vec::with_capacity(type_count);
+    for index in 0..type_count {
+        let (code, _flags, start, len) = validated.type_entry(index as u32)?;
+        let mut cost: u64 = 0;
+        if code == 8 {
+            for offset in start..start + len {
+                let (tag, value) = validated.aux(offset)?;
+                if tag == crate::layout::AUX_TYPE_ENUM_ITEM {
+                    cost = cost.saturating_add(validated.string(value)?.len() as u64);
+                }
+            }
+        }
+        type_cost.push(cost);
+    }
+    let count = validated.node_count();
+    for index in 0..count {
+        let id = NodeId(index);
+        let rec = validated.node(id)?;
+        match rec.kind {
+            4 => charge(&mut total, validated.string(rec.aux)?.len() as u64)?,
+            6 => charge(&mut total, validated.unit_name_len(rec.a as u32)?)?,
+            8 | 20 => {
+                for offset in rec.a..rec.a + rec.b {
+                    let (name, _node) = validated.field(offset as u32)?;
+                    charge(&mut total, validated.string(name)?.len() as u64)?;
+                }
+            }
+            9 => charge(&mut total, validated.secret(rec.a as u32)?.len() as u64)?,
+            12 | 13 => charge(&mut total, validated.string(rec.aux)?.len() as u64)?,
+            14 => {
+                for offset in rec.a..rec.a + rec.b {
+                    let (tag, value) = validated.part(offset as u32)?;
+                    if tag == crate::layout::PART_LITERAL {
+                        charge(&mut total, validated.string(value)?.len() as u64)?;
+                    }
+                }
+            }
+            17 => {
+                for offset in rec.b as u32..rec.b as u32 + rec.c as u32 {
+                    let (tag, value) = validated.aux(offset)?;
+                    if tag == crate::layout::AUX_CONSTRAINT_ENUM_ITEM
+                        || tag == crate::layout::AUX_CONSTRAINT_PATTERN
+                        || tag == crate::layout::AUX_CONSTRAINT_CUSTOM
+                    {
+                        charge(&mut total, validated.string(value)?.len() as u64)?;
+                    }
+                }
+            }
+            18 => {
+                for offset in rec.b as u32..rec.b as u32 + rec.c as u32 {
+                    let (tag, value) = validated.aux(offset)?;
+                    if tag == crate::layout::AUX_PATCH_PATH
+                        || tag == crate::layout::AUX_PATCH_RENAME_TO
+                    {
+                        charge(&mut total, validated.string(value)?.len() as u64)?;
+                    }
+                }
+            }
+            19 => {
+                charge(
+                    &mut total,
+                    type_cost.get(rec.aux as usize).copied().unwrap_or(0),
+                )?;
+                for offset in rec.b as u32..rec.b as u32 + rec.c as u32 {
+                    let (tag, value) = validated.aux(offset)?;
+                    if tag == crate::layout::AUX_SCHEMA_DEPRECATED {
+                        charge(&mut total, validated.string(value)?.len() as u64)?;
+                    }
+                }
+            }
+            23 => {
+                charge(&mut total, validated.string(rec.aux)?.len() as u64)?;
+                if rec.flags & crate::layout::NODE_FLAG_1 != 0 {
+                    charge(&mut total, validated.blob(rec.a as u32)?.len() as u64)?;
+                }
+            }
+            _ => {}
+        }
+    }
+    for index in 0..validated.span(crate::layout::Section::Annotations).count {
+        let (_node, kind, a, _b) = validated.annotation(index)?;
+        if kind == ANN_KIND_INTENT || kind == ANN_KIND_CONSTRAINT {
+            charge(&mut total, validated.string(a)?.len() as u64)?;
+        }
+    }
+    for (name, _id) in validated.bindings()? {
+        charge(&mut total, name.len() as u64)?;
+    }
+    charge(&mut total, validated.provenance_string_bytes()?)?;
+    for index in 0..validated.span(crate::layout::Section::Extensions).count {
+        let (_tag, _offset, len) = validated.extension_entry(index)?;
+        charge(&mut total, len as u64)?;
+    }
+    Ok(())
 }
 
 /// Read the extension directory and its payloads back into the module.

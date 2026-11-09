@@ -37,7 +37,7 @@ use std::slice;
 use std::sync::Mutex;
 
 use active_infinity::{
-    content_hash, decode, decode_with, encode, validate, validate_canonical, DecodeOpts,
+    content_hash, decode, decode_with, encode, validate, validate_canonical, DecodeOpts, Limits,
 };
 
 /// ABI version. Bumped only for an incompatible layout or calling change.
@@ -105,6 +105,9 @@ pub const EXPORTS: &[&str] = &[
     "active_infinity_free",
     "active_infinity_validate",
     "active_infinity_validate_canonical",
+    "active_infinity_validate_with_limits",
+    "active_infinity_decode_with_limits",
+    "active_infinity_limits_default",
     "active_infinity_content_hash",
     "active_infinity_reencode",
     "active_infinity_from_active",
@@ -415,6 +418,234 @@ pub unsafe extern "C" fn active_infinity_validate_canonical(ptr: *const u8, len:
                 set_error("infinity/ok");
                 OK
             }
+            Err(error) => {
+                set_error(error.code());
+                INVALID
+            }
+        }
+    })
+}
+
+/// The caller-visible form of [`Limits`] (INF-FFI-02).
+///
+/// One field per ceiling, in the same order as the Rust `Limits` struct, so a
+/// binding can build it by name and the conversion is a field-by-field copy —
+/// never a transmute, because the Rust struct is not `#[repr(C)]`. All
+/// ceilings are `u32` except `max_total_bytes` and `max_decoded_bytes`
+/// (`u64`). A ceiling of zero is refused (`infinity/invalid-argument`): the
+/// Rust `Limits::check` rejects a zero ceiling before any decoding happens.
+/// Pass a null pointer to the `*_with_limits` functions for
+/// `Limits::default()`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct ActiveInfinityLimits {
+    pub max_nodes: u32,
+    pub max_edges: u32,
+    pub max_children: u32,
+    pub max_fields: u32,
+    pub max_parts: u32,
+    pub max_strings: u32,
+    pub max_string_bytes: u32,
+    pub max_blobs: u32,
+    pub max_blob_bytes: u32,
+    pub max_annotations: u32,
+    pub max_units: u32,
+    pub max_types: u32,
+    pub max_aux: u32,
+    pub max_numbers: u32,
+    pub max_secrets: u32,
+    pub max_secret_bytes: u32,
+    pub max_extensions: u32,
+    pub max_prov_bytes: u32,
+    pub max_prov_entries: u32,
+    pub max_hashes: u32,
+    pub max_bindings: u32,
+    pub max_total_bytes: u64,
+    pub max_decoded_bytes: u64,
+    pub max_depth: u32,
+}
+
+fn limits_from_ffi(limits: &ActiveInfinityLimits) -> Limits {
+    Limits {
+        max_nodes: limits.max_nodes,
+        max_edges: limits.max_edges,
+        max_children: limits.max_children,
+        max_fields: limits.max_fields,
+        max_parts: limits.max_parts,
+        max_strings: limits.max_strings,
+        max_string_bytes: limits.max_string_bytes,
+        max_blobs: limits.max_blobs,
+        max_blob_bytes: limits.max_blob_bytes,
+        max_annotations: limits.max_annotations,
+        max_units: limits.max_units,
+        max_types: limits.max_types,
+        max_aux: limits.max_aux,
+        max_numbers: limits.max_numbers,
+        max_secrets: limits.max_secrets,
+        max_secret_bytes: limits.max_secret_bytes,
+        max_extensions: limits.max_extensions,
+        max_prov_bytes: limits.max_prov_bytes,
+        max_prov_entries: limits.max_prov_entries,
+        max_hashes: limits.max_hashes,
+        max_bindings: limits.max_bindings,
+        max_total_bytes: limits.max_total_bytes,
+        max_decoded_bytes: limits.max_decoded_bytes,
+        max_depth: limits.max_depth,
+    }
+}
+
+fn limits_to_ffi(limits: &Limits) -> ActiveInfinityLimits {
+    ActiveInfinityLimits {
+        max_nodes: limits.max_nodes,
+        max_edges: limits.max_edges,
+        max_children: limits.max_children,
+        max_fields: limits.max_fields,
+        max_parts: limits.max_parts,
+        max_strings: limits.max_strings,
+        max_string_bytes: limits.max_string_bytes,
+        max_blobs: limits.max_blobs,
+        max_blob_bytes: limits.max_blob_bytes,
+        max_annotations: limits.max_annotations,
+        max_units: limits.max_units,
+        max_types: limits.max_types,
+        max_aux: limits.max_aux,
+        max_numbers: limits.max_numbers,
+        max_secrets: limits.max_secrets,
+        max_secret_bytes: limits.max_secret_bytes,
+        max_extensions: limits.max_extensions,
+        max_prov_bytes: limits.max_prov_bytes,
+        max_prov_entries: limits.max_prov_entries,
+        max_hashes: limits.max_hashes,
+        max_bindings: limits.max_bindings,
+        max_total_bytes: limits.max_total_bytes,
+        max_decoded_bytes: limits.max_decoded_bytes,
+        max_depth: limits.max_depth,
+    }
+}
+
+/// Read a caller-supplied limits pointer, or `Limits::default()` for null.
+///
+/// # Safety
+/// `limits` is null or points to a valid `ActiveInfinityLimits`.
+unsafe fn limits_or_default(limits: *const ActiveInfinityLimits) -> Limits {
+    if limits.is_null() {
+        Limits::default()
+    } else {
+        // SAFETY: the caller guarantees a valid struct for the call.
+        limits_from_ffi(unsafe { &*limits })
+    }
+}
+
+/// Fill `limits` with the library defaults (INF-FFI-02).
+///
+/// A binding builds a narrowed budget by calling this, then overriding the
+/// one ceiling it wants to tighten — it never has to hardcode the 24
+/// defaults, so a future default change cannot silently desync the binding.
+/// A null pointer is refused with `infinity/null-output`.
+///
+/// # Safety
+/// `limits` must point to a writable `ActiveInfinityLimits`.
+#[no_mangle]
+pub unsafe extern "C" fn active_infinity_limits_default(limits: *mut ActiveInfinityLimits) -> i32 {
+    guarded(|| {
+        if limits.is_null() {
+            set_error("infinity/null-output");
+            return INVALID;
+        }
+        // SAFETY: the caller guarantees a writable struct.
+        unsafe {
+            *limits = limits_to_ffi(&Limits::default());
+        }
+        set_error("infinity/ok");
+        OK
+    })
+}
+
+/// Validate an image under caller-supplied limits (INF-FFI-02).
+///
+/// The limits-parameterized form of `active_infinity_validate_canonical`:
+/// the stored hash is verified and the canonical form is re-proved, under
+/// the caller's budget instead of `Limits::default()`. A null `limits`
+/// pointer means the defaults. This is what makes the manifest's limit
+/// vectors reproducible through a binding: `limit` is refused with
+/// `infinity/limit` under `max_nodes: 1` and `too_deep` with
+/// `infinity/depth` under `max_depth: 8` — both are accepted under the
+/// defaults, because the budget is what makes them hostile.
+///
+/// # Safety
+/// `ptr` must point to `len` readable bytes (or be null when `len` is 0);
+/// `limits` is null or points to a valid `ActiveInfinityLimits`.
+#[no_mangle]
+pub unsafe extern "C" fn active_infinity_validate_with_limits(
+    ptr: *const u8,
+    len: usize,
+    limits: *const ActiveInfinityLimits,
+) -> i32 {
+    guarded(|| {
+        // SAFETY: forwarded caller contract.
+        let Some(bytes) = (unsafe { input(ptr, len) }) else {
+            set_error("infinity/null-input");
+            return INVALID;
+        };
+        // SAFETY: forwarded caller contract.
+        let limits = unsafe { limits_or_default(limits) };
+        match validate_canonical(bytes, limits) {
+            Ok(_) => {
+                set_error("infinity/ok");
+                OK
+            }
+            Err(error) => {
+                set_error(error.code());
+                INVALID
+            }
+        }
+    })
+}
+
+/// Validate, decode and re-encode under caller-supplied limits (INF-FFI-02).
+///
+/// The limits-parameterized form of `active_infinity_reencode`: the input
+/// is decoded leniently (the stored hash is still verified, only the
+/// canonical-form proof is skipped) under the caller's budget, re-encoded,
+/// and the OUTPUT is strict-validated under the same budget before it is
+/// returned, so the output is always canonical. A null `limits` pointer
+/// means the defaults. An image that exceeds the budget is refused with the
+/// same code the reference reports (`infinity/limit`, `infinity/depth`,
+/// ...). The canonical output is never larger than the input it repairs
+/// (slack only adds bytes), so an input that fits the budget always yields
+/// an output that fits it too.
+///
+/// # Safety
+/// `ptr`/`len` describe a readable image; `limits` is null or points to a
+/// valid `ActiveInfinityLimits`; `out`/`out_len` follow the calling
+/// convention in the crate docs.
+#[no_mangle]
+pub unsafe extern "C" fn active_infinity_decode_with_limits(
+    ptr: *const u8,
+    len: usize,
+    limits: *const ActiveInfinityLimits,
+    out: *mut u8,
+    out_len: *mut usize,
+) -> i32 {
+    guarded(|| {
+        // SAFETY: forwarded caller contract.
+        let Some(bytes) = (unsafe { input(ptr, len) }) else {
+            set_error("infinity/null-input");
+            return INVALID;
+        };
+        // SAFETY: forwarded caller contract.
+        let limits = unsafe { limits_or_default(limits) };
+        let lenient = DecodeOpts {
+            limits,
+            verify_canonical: false,
+            ..DecodeOpts::default()
+        };
+        match decode_with(bytes, lenient)
+            .and_then(|module| encode(&module))
+            .and_then(|canonical| validate_canonical(&canonical, limits).map(|_| canonical))
+        {
+            // SAFETY: forwarded caller contract for `out`/`out_len`.
+            Ok(canonical) => unsafe { write_output(&canonical, out, out_len) },
             Err(error) => {
                 set_error(error.code());
                 INVALID

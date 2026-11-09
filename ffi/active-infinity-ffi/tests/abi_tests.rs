@@ -3,10 +3,11 @@
 use std::ffi::CString;
 
 use active_infinity_ffi::{
-    active_infinity_abi_version, active_infinity_content_hash, active_infinity_from_active,
-    active_infinity_last_error, active_infinity_redacted_json, active_infinity_reencode,
-    active_infinity_validate, active_infinity_validate_canonical, EXPORTS, MAX_ALLOC_BYTES,
-    MAX_NAME_BYTES, MAX_SOURCE_BYTES,
+    active_infinity_abi_version, active_infinity_content_hash, active_infinity_decode_with_limits,
+    active_infinity_from_active, active_infinity_last_error, active_infinity_limits_default,
+    active_infinity_redacted_json, active_infinity_reencode, active_infinity_validate,
+    active_infinity_validate_canonical, active_infinity_validate_with_limits,
+    ActiveInfinityLimits, EXPORTS, MAX_ALLOC_BYTES, MAX_NAME_BYTES, MAX_SOURCE_BYTES,
 };
 
 fn vector(name: &str) -> Vec<u8> {
@@ -14,6 +15,23 @@ fn vector(name: &str) -> Vec<u8> {
         .join("../../tests/vectors/valid")
         .join(name);
     std::fs::read(path).expect("vector")
+}
+
+fn invalid_vector(name: &str) -> Vec<u8> {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/vectors/invalid")
+        .join(name);
+    std::fs::read(path).expect("invalid vector")
+}
+
+/// A limits struct filled by the library itself (INF-FFI-02): no test
+/// hardcodes the 24 defaults, so a default change cannot desync the test.
+fn default_limits() -> ActiveInfinityLimits {
+    // SAFETY: the export writes every field of the struct.
+    let mut limits = std::mem::MaybeUninit::<ActiveInfinityLimits>::uninit();
+    let status = unsafe { active_infinity_limits_default(limits.as_mut_ptr()) };
+    assert_eq!(status, 0, "{}", last_error());
+    unsafe { limits.assume_init() }
 }
 
 fn last_error() -> String {
@@ -518,18 +536,17 @@ fn a_hostile_length_is_refused_before_the_slice() {
 fn content_hash_matches_the_reference_for_any_valid_image() {
     use active_infinity_ffi::active_infinity_content_hash;
 
-    for name in ["full.ainf"] {
-        let bytes = vector(name);
-        let mut hash = [0u8; 32];
-        // SAFETY: the buffer is readable and `hash` is 32 writable bytes.
-        let status =
-            unsafe { active_infinity_content_hash(bytes.as_ptr(), bytes.len(), hash.as_mut_ptr()) };
-        assert_eq!(status, 0, "{name}: {}", last_error());
-        assert_eq!(
-            hash,
-            active_infinity::content_hash(&bytes).expect("reference")
-        );
-    }
+    let name = "full.ainf";
+    let bytes = vector(name);
+    let mut hash = [0u8; 32];
+    // SAFETY: the buffer is readable and `hash` is 32 writable bytes.
+    let status =
+        unsafe { active_infinity_content_hash(bytes.as_ptr(), bytes.len(), hash.as_mut_ptr()) };
+    assert_eq!(status, 0, "{name}: {}", last_error());
+    assert_eq!(
+        hash,
+        active_infinity::content_hash(&bytes).expect("reference")
+    );
     // The non-canonical vector is refused, not hashed: the FFI and the
     // reference agree on the refusal as well as on the value.
     let bytes = vector("non_canonical.ainf");
@@ -585,4 +602,142 @@ fn validate_canonical_accepts_every_canonical_vector() {
         let status = unsafe { active_infinity_validate_canonical(bytes.as_ptr(), bytes.len()) };
         assert_eq!(status, 0, "{name}: {}", last_error());
     }
+}
+
+/// `limits_default` fills every field with the library defaults (INF-FFI-02).
+/// The spot checks pin the values the conformance story depends on: the
+/// 1 GiB total budget and the 4096 depth ceiling.
+#[test]
+fn limits_default_reports_the_library_defaults() {
+    let limits = default_limits();
+    assert_eq!(limits.max_nodes, 1 << 22);
+    assert_eq!(limits.max_total_bytes, 1 << 30);
+    assert_eq!(limits.max_decoded_bytes, 256 << 20);
+    assert_eq!(limits.max_depth, 4096);
+    assert_eq!(limits.max_secret_bytes, 16 << 20);
+    // A null pointer is refused, not dereferenced.
+    let status = unsafe { active_infinity_limits_default(std::ptr::null_mut()) };
+    assert_eq!(status, -1);
+    assert_eq!(last_error(), "infinity/null-output");
+}
+
+/// The manifest's limit vectors are hostile only under a narrowed budget
+/// (INF-FFI-02): both are ACCEPTED under the defaults, and refused with
+/// their declared codes once the budget is tightened. This is the
+/// fail-before the audit could not run through any binding — the FFI had
+/// no limits parameter at all.
+#[test]
+fn validate_with_limits_refuses_the_limit_vectors() {
+    for (name, field, value, code) in [
+        ("limit.ainf", "max_nodes", 1u32, "infinity/limit"),
+        ("too_deep.ainf", "max_depth", 8u32, "infinity/depth"),
+    ] {
+        let bytes = invalid_vector(name);
+        // Under the defaults the vector is accepted: the budget, not the
+        // bytes, is what makes it hostile.
+        // SAFETY: the vector is a readable buffer; null means defaults.
+        let status = unsafe {
+            active_infinity_validate_with_limits(bytes.as_ptr(), bytes.len(), std::ptr::null())
+        };
+        assert_eq!(status, 0, "{name} under defaults: {}", last_error());
+        // Under the manifest's narrowed budget it is refused with exactly
+        // the code the manifest declares.
+        let mut limits = default_limits();
+        match field {
+            "max_nodes" => limits.max_nodes = value,
+            "max_depth" => limits.max_depth = value,
+            _ => unreachable!("{field}"),
+        }
+        // SAFETY: the vector is readable and `limits` is a valid struct.
+        let status = unsafe {
+            active_infinity_validate_with_limits(bytes.as_ptr(), bytes.len(), &limits)
+        };
+        assert_eq!(status, -1, "{name}");
+        assert_eq!(last_error(), code, "{name}");
+    }
+}
+
+/// The same two vectors through the decode path (INF-FFI-02): the refusal
+/// codes match `validate_with_limits`, and a canonical image re-encodes
+/// to its own bytes under the defaults.
+#[test]
+fn decode_with_limits_refuses_the_limit_vectors() {
+    for (name, field, value, code) in [
+        ("limit.ainf", "max_nodes", 1u32, "infinity/limit"),
+        ("too_deep.ainf", "max_depth", 8u32, "infinity/depth"),
+    ] {
+        let bytes = invalid_vector(name);
+        let mut limits = default_limits();
+        match field {
+            "max_nodes" => limits.max_nodes = value,
+            "max_depth" => limits.max_depth = value,
+            _ => unreachable!("{field}"),
+        }
+        let mut out = vec![0u8; 4096];
+        let mut out_len = out.len();
+        // SAFETY: buffers follow the contract.
+        let status = unsafe {
+            active_infinity_decode_with_limits(
+                bytes.as_ptr(),
+                bytes.len(),
+                &limits,
+                out.as_mut_ptr(),
+                &mut out_len,
+            )
+        };
+        assert_eq!(status, -1, "{name}");
+        assert_eq!(last_error(), code, "{name}");
+    }
+    // A canonical image decodes and re-encodes to its own bytes.
+    let bytes = vector("full.ainf");
+    let mut out = vec![0u8; bytes.len()];
+    let mut out_len = out.len();
+    // SAFETY: buffers follow the contract; null means defaults.
+    let status = unsafe {
+        active_infinity_decode_with_limits(
+            bytes.as_ptr(),
+            bytes.len(),
+            std::ptr::null(),
+            out.as_mut_ptr(),
+            &mut out_len,
+        )
+    };
+    assert_eq!(status, 0, "{}", last_error());
+    assert_eq!(out_len, bytes.len());
+    assert_eq!(&out[..out_len], &bytes[..]);
+}
+
+/// A zero ceiling is an argument error, not a limit the reader discovers
+/// later: `Limits::check` rejects it before any decoding happens.
+#[test]
+fn a_zero_ceiling_is_refused_as_an_invalid_argument() {
+    let bytes = vector("full.ainf");
+    let mut limits = default_limits();
+    limits.max_nodes = 0;
+    // SAFETY: the vector is readable and `limits` is a valid struct.
+    let status = unsafe {
+        active_infinity_validate_with_limits(bytes.as_ptr(), bytes.len(), &limits)
+    };
+    assert_eq!(status, -1);
+    assert_eq!(last_error(), "infinity/invalid-argument");
+}
+
+/// Under the defaults, `validate_with_limits` agrees with
+/// `validate_canonical` in both directions: it accepts a canonical image
+/// and refuses a non-canonical one with the same code.
+#[test]
+fn validate_with_limits_matches_validate_canonical_under_defaults() {
+    let good = vector("full.ainf");
+    // SAFETY: the vector is readable; null means defaults.
+    let status = unsafe {
+        active_infinity_validate_with_limits(good.as_ptr(), good.len(), std::ptr::null())
+    };
+    assert_eq!(status, 0, "{}", last_error());
+    let bad = invalid_vector("not_canonical.ainf");
+    // SAFETY: the vector is readable; null means defaults.
+    let status = unsafe {
+        active_infinity_validate_with_limits(bad.as_ptr(), bad.len(), std::ptr::null())
+    };
+    assert_eq!(status, -1);
+    assert_eq!(last_error(), "infinity/not-canonical");
 }

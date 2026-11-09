@@ -84,6 +84,40 @@ typedef enum active_infinity_status {
   ACTIVE_INFINITY_PANIC = -3
 } active_infinity_status;
 
+/* Caller-supplied budget (INF-FFI-02): one ceiling per field, in the same
+ * order as the Rust `Limits` struct. All ceilings are uint32_t except
+ * max_total_bytes and max_decoded_bytes (uint64_t). A ceiling of zero is
+ * refused with `infinity/invalid-argument`. Pass NULL to the
+ * `*_with_limits` functions for the library defaults; call
+ * `active_infinity_limits_default` to fill a struct with the defaults and
+ * then override the one ceiling to tighten. */
+typedef struct active_infinity_limits {
+  uint32_t max_nodes;
+  uint32_t max_edges;
+  uint32_t max_children;
+  uint32_t max_fields;
+  uint32_t max_parts;
+  uint32_t max_strings;
+  uint32_t max_string_bytes;
+  uint32_t max_blobs;
+  uint32_t max_blob_bytes;
+  uint32_t max_annotations;
+  uint32_t max_units;
+  uint32_t max_types;
+  uint32_t max_aux;
+  uint32_t max_numbers;
+  uint32_t max_secrets;
+  uint32_t max_secret_bytes;
+  uint32_t max_extensions;
+  uint32_t max_prov_bytes;
+  uint32_t max_prov_entries;
+  uint32_t max_hashes;
+  uint32_t max_bindings;
+  uint64_t max_total_bytes;
+  uint64_t max_decoded_bytes;
+  uint32_t max_depth;
+} active_infinity_limits;
+
 /* ABI version of the loaded library. */
 uint32_t active_infinity_abi_version(void);
 
@@ -113,6 +147,30 @@ int32_t active_infinity_validate(const uint8_t *ptr, size_t len);
  * `active_infinity_validate` already proves the canonical form; this
  * states the requirement explicitly. */
 int32_t active_infinity_validate_canonical(const uint8_t *ptr, size_t len);
+
+/* Fill a limits struct with the library defaults. Returns 0 on success,
+ * -1 for a null pointer. Build a narrowed budget by calling this, then
+ * overriding the one ceiling to tighten. */
+int32_t active_infinity_limits_default(active_infinity_limits *limits);
+
+/* Validate an image under caller-supplied limits (NULL = defaults). This
+ * is the limits-parameterized form of
+ * active_infinity_validate_canonical: the stored hash is verified and the
+ * canonical form is re-proved under the caller's budget. This is what makes
+ * the manifest's limit vectors reproducible through a binding: `limit` is
+ * refused with `infinity/limit` under max_nodes 1 and `too_deep` with
+ * `infinity/depth` under max_depth 8. */
+int32_t active_infinity_validate_with_limits(
+    const uint8_t *ptr, size_t len, const active_infinity_limits *limits);
+
+/* Validate, decode and re-encode under caller-supplied limits (NULL =
+ * defaults). The limits-parameterized form of active_infinity_reencode:
+ * the input is decoded leniently under the caller's budget, re-encoded,
+ * and the output is strict-validated under the same budget before it is
+ * returned. */
+int32_t active_infinity_decode_with_limits(const uint8_t *ptr, size_t len,
+                                           const active_infinity_limits *limits,
+                                           uint8_t *out, size_t *out_len);
 
 /* Compute the 32-byte Blake3 content hash of a canonical image. The value
  * is the byte identity: it equals the header's stored hash and the

@@ -434,6 +434,7 @@ fn the_store_refuses_a_non_canonical_image() {
             write_hash: true,
             mark_canonical: false,
             streamed: false,
+            drop_unreachable: false,
         },
     )
     .expect("encode without the canonical flag");

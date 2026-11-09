@@ -238,9 +238,13 @@ fn an_empty_payload_and_a_detached_blob_share_one_record() {
 fn empty_annotations_against_a_large_secret_table_are_charged() {
     let mut module = InfinityModule::new();
     for index in 0..3_000 {
-        module.push(Inode::Secret(SecretBytes::new(
+        let id = module.push(Inode::Secret(SecretBytes::new(
             format!("k{index}").into_bytes(),
         )));
+        // Reachable (INF-04): the secrets are the table the redaction scan
+        // charges against, so they must be roots — an unreachable secret
+        // would now be refused before the scan runs.
+        module.bind(format!("secret-{index}"), id);
     }
     let mut nodes = Vec::new();
     for index in 0..3_000 {

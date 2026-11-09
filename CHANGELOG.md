@@ -45,6 +45,25 @@
 
 ### Fixed
 
+- **Encode refuses unreachable nodes instead of silently dropping them (INF-04).**
+  `encode()` (and `encode_with` / `encode_into` / `encode_many` /
+  `encode_hashed`) now fails closed with `infinity/node` (reason
+  `unreachable node`) when a module holds a node no root reaches — including
+  an unreachable `Secret` — instead of dropping it and returning `Ok` with
+  different content. The in-memory and wire rules now agree: the wire
+  validator always refused unreachable nodes. Only the explicit opt-in
+  `EncodeOpts { drop_unreachable: true, .. }` drops them: the stream-delta
+  re-encodes (a delta leaves the replaced subtree orphaned on purpose) and
+  the merge canonicalize step (it keeps only the selected subtree). Callers
+  that build modules with scratch nodes must remove them or opt in.
+  `structurally_eq` (hence `PartialEq`) also sees an extra unreachable node:
+  two modules with different raw node counts are never equal. The *content*
+  of unreachable nodes is still not compared — no canonical numbering exists
+  for a node no root reaches — so same-count modules with different
+  unreachable content still compare equal; call `check_reachable` first when
+  that matters. Not hash-affecting: a fully reachable module encodes to
+  exactly the same bytes as before.
+
 - **Schemas are canonicalized on load (INF-SCHEMA-05).** `Schema::from_bytes`
   now decodes leniently, re-encodes, and decodes strictly, so the stored
   module is always the canonical form: `module()` never exposes slack, an

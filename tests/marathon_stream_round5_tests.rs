@@ -164,8 +164,11 @@ fn a_size_mismatch_is_a_hash_fault() {
 fn a_failed_delta_list_leaves_the_module_unchanged() {
     let base = base_module();
     let mut module = base.clone();
-    let replacement = module.push(Inode::Int(1));
+    // Encode the baseline before pushing the replacement (INF-04): the
+    // replacement is unreachable until the delta runs, and encode now
+    // refuses unreachable nodes.
     let before = encode(&module).expect("encode");
+    let replacement = module.push(Inode::Int(1));
     let error = apply_delta_in_place(
         &mut module,
         &[
@@ -175,7 +178,18 @@ fn a_failed_delta_list_leaves_the_module_unchanged() {
     )
     .expect_err("the dangling root is refused");
     assert_eq!(error.code(), "infinity/stream-delta", "{error}");
-    let after = encode(&module).expect("encode");
+    // The failed delta rolled the root back, but the pushed replacement node
+    // is still orphaned in the arena (INF-04), so the after-image opts in
+    // to the drop. It must equal the baseline: the failed list changed
+    // nothing reachable.
+    let after = active_infinity::encode_with(
+        &module,
+        active_infinity::layout::EncodeOpts {
+            drop_unreachable: true,
+            ..active_infinity::layout::EncodeOpts::default()
+        },
+    )
+    .expect("encode");
     assert_eq!(before, after, "the failed list mutated the module");
 }
 

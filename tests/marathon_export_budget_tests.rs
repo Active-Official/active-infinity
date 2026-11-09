@@ -283,12 +283,16 @@ fn a_binary_wrapped_interpolated_locator_is_promoted() {
     }
 
     // A public copy of the fragment is redacted by every export, because the
-    // in-memory secret table resolves the whole locator subtree.
+    // in-memory secret table resolves the whole locator subtree. The copy is
+    // added to the existing root table in place (INF-04): pushing a second
+    // root table would orphan the first one, and encode now refuses
+    // unreachable nodes.
     let copy = module.push(Inode::Str(format!("copy {literal} here")));
-    let root = module.push(Inode::Table {
-        fields: vec![("password".into(), secret), ("copy".into(), copy)],
-    });
-    module.set_root(Some(root));
+    if let Inode::Table { fields } = module.node_mut(root).expect("root table") {
+        fields.push(("copy".into(), copy));
+    } else {
+        panic!("root is not a table");
+    }
     let json = to_redacted_json(&module).expect("project");
     assert!(!json.contains(literal), "{json}");
     let lines = provenance_lines(&module).join("\n");
@@ -497,17 +501,23 @@ fn an_interpolated_one_byte_part_must_not_appear_in_metadata() {
 fn canonicalization_is_a_fixed_point_for_locator_fragments() {
     for shape in 0..3 {
         let mut module = InfinityModule::new();
-        let name = module.push(Inode::Str("svc".into()));
         let literal = "hunter2";
+        // Shape 0 has no `name` node (INF-04): pushing it unconditionally
+        // left it unreachable in that shape, and encode now refuses
+        // unreachable nodes. Shapes 1 and 2 use it as the locator's operand.
         let locator = match shape {
             0 => module.push(Inode::Str(literal.into())),
-            1 => module.push(Inode::Interpolate {
-                parts: vec![
-                    InterpPart::Literal("hunter-".into()),
-                    InterpPart::Expr(name),
-                ],
-            }),
+            1 => {
+                let name = module.push(Inode::Str("svc".into()));
+                module.push(Inode::Interpolate {
+                    parts: vec![
+                        InterpPart::Literal("hunter-".into()),
+                        InterpPart::Expr(name),
+                    ],
+                })
+            }
             _ => {
+                let name = module.push(Inode::Str("svc".into()));
                 let left = module.push(Inode::Str(literal.into()));
                 module.push(Inode::Binary {
                     op: active_infinity::BinOp::Add,

@@ -222,7 +222,11 @@ because in-place stream deltas replace a subtree and leave the previous one
 orphaned on purpose: compacting the arena on every patch would turn a linear
 patch into a full rebuild. An in-memory module may therefore hold orphaned
 nodes; `InfinityModule::check_reachable` reports them for callers that need the
-wire rule, and `encode` produces the image without them.
+wire rule. `encode` refuses an unreachable node by default (`infinity/node`,
+reason `unreachable node`) — a silently dropped node, above all a secret, is
+data loss the caller never sees (INF-04). Only the explicit opt-in
+`EncodeOpts::drop_unreachable` drops them: the stream-delta re-encodes and
+the merge canonicalize step, which replace a subtree without compacting.
 
 ### 3.2 Operator codes
 

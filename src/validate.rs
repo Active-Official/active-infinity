@@ -171,6 +171,10 @@ impl<'a> Validated<'a> {
                     write_hash: true,
                     mark_canonical: true,
                     streamed: header.flags & crate::layout::FLAG_STREAMED != 0,
+                    // The module comes from decode_validated, so it has no
+                    // unreachable nodes (the wire validator refuses them);
+                    // the default fail-closed rule applies (INF-04).
+                    drop_unreachable: false,
                 },
             )
             .map_err(|error| match error {

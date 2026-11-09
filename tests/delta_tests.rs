@@ -1,8 +1,9 @@
 //! C-3.3 delta canonicalization: an in-place fragment replacement changes the
 //! canonical hash exactly as the whole-image delta hash predicts.
 
+use active_infinity::layout::EncodeOpts;
 use active_infinity::stream::{apply_delta, apply_delta_in_place, delta_hash, DeltaOp};
-use active_infinity::{content_hash, encode, validate, InfinityModule, Inode};
+use active_infinity::{content_hash, encode, encode_with, validate, InfinityModule, Inode};
 
 fn base() -> (InfinityModule, active_infinity::ir::NodeId) {
     let mut module = InfinityModule::new();
@@ -31,7 +32,16 @@ fn delta_replacement_updates_the_hash_and_matches_the_projection() {
     }];
     let mut updated = base.clone();
     apply_delta_in_place(&mut updated, &ops).expect("in-place delta");
-    let image = encode(&updated).expect("encode");
+    // The delta orphans the replaced subtree on purpose (INF-04), so the
+    // post-delta encode opts in to the drop.
+    let image = encode_with(
+        &updated,
+        EncodeOpts {
+            drop_unreachable: true,
+            ..EncodeOpts::default()
+        },
+    )
+    .expect("encode");
     validate(&image).expect("validate");
     let new_hash = content_hash(&image).expect("hash");
     assert_ne!(
@@ -62,7 +72,15 @@ fn a_large_patch_keeps_the_rest_of_the_graph() {
     }];
     let mut updated = module.clone();
     apply_delta_in_place(&mut updated, &ops).expect("large delta");
-    let image = encode(&updated).expect("encode");
+    // The delta orphans the replaced subtree on purpose (INF-04).
+    let image = encode_with(
+        &updated,
+        EncodeOpts {
+            drop_unreachable: true,
+            ..EncodeOpts::default()
+        },
+    )
+    .expect("encode");
     validate(&image).expect("validate");
     assert_eq!(updated.node_count(), module.node_count() + 1);
 }

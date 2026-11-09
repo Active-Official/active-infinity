@@ -662,6 +662,17 @@ pub struct EncodeOpts {
     pub mark_canonical: bool,
     /// Preserve the `streamed` flag when re-encoding a reassembled module.
     pub streamed: bool,
+    /// Drop nodes unreachable from the module roots instead of refusing them.
+    ///
+    /// Default `false`: `encode()` fails closed on an unreachable node
+    /// (`infinity/node`, reason `unreachable node`), because a silently
+    /// dropped node — above all a secret — is data loss the caller never
+    /// sees. Only the paths that replace a subtree without compacting the
+    /// arena opt in: the stream-delta re-encodes (a delta leaves the
+    /// replaced subtree orphaned on purpose) and the merge canonicalize
+    /// step (it keeps only the selected subtree). Every other caller gets
+    /// the refusal and must either remove the orphan or opt in explicitly.
+    pub drop_unreachable: bool,
 }
 
 impl Default for EncodeOpts {
@@ -670,6 +681,7 @@ impl Default for EncodeOpts {
             write_hash: true,
             mark_canonical: true,
             streamed: false,
+            drop_unreachable: false,
         }
     }
 }

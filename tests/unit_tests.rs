@@ -375,9 +375,18 @@ fn streaming_delta_produces_the_whole_module_encoding() {
     let bytes = encoder.to_bytes();
     let streamed = stream::decode_stream(&bytes).unwrap_or_else(|e| panic!("decode stream: {e:?}"));
 
-    // Expected: the same ops applied to the base, canonicalized.
+    // Expected: the same ops applied to the base, canonicalized. The delta
+    // orphans the replaced node on purpose (INF-04), so this encode opts in
+    // to the drop, exactly as the stream's own re-encodes do.
     let expected = stream::apply_delta(&base, &ops).expect("apply delta");
-    let expected_image = encode(&expected).unwrap();
+    let expected_image = active_infinity::encode_with(
+        &expected,
+        EncodeOpts {
+            drop_unreachable: true,
+            ..EncodeOpts::default()
+        },
+    )
+    .unwrap();
     assert_eq!(streamed.image, expected_image);
     assert_eq!(
         streamed.content_hash,
@@ -587,7 +596,8 @@ fn validator_rejects_cycles_and_unreachable_nodes() {
     let error = encode(&module).unwrap_err();
     assert_eq!(error.code(), "infinity/cycle");
 
-    // Unreachable node: canonicalization drops it from the image.
+    // Unreachable node: encode refuses it (INF-04); only the explicit
+    // opt-in drops it from the image.
     let mut module = fixture();
     let _orphan = module.push(Inode::Str("orphan".into()));
     let previous_root = module.root().unwrap();
@@ -595,7 +605,16 @@ fn validator_rejects_cycles_and_unreachable_nodes() {
         fields: vec![("root".into(), previous_root)],
     });
     module.set_root(Some(root));
-    let bytes = encode(&module).unwrap();
+    let refused = encode(&module).unwrap_err();
+    assert_eq!(refused.code(), "infinity/node", "{refused:?}");
+    let bytes = active_infinity::encode_with(
+        &module,
+        EncodeOpts {
+            drop_unreachable: true,
+            ..EncodeOpts::default()
+        },
+    )
+    .unwrap();
     let decoded = decode(&bytes).unwrap();
     assert!(
         decoded.node_count() < module.node_count(),
@@ -642,6 +661,7 @@ fn encode_options_round_trip() {
             write_hash: true,
             mark_canonical: true,
             streamed: true,
+            drop_unreachable: false,
         },
     )
     .unwrap();

@@ -171,6 +171,8 @@ fn unreachable_nodes_are_reported_and_dropped_by_canonicalization() {
     // stream deltas replace a subtree and leave the old one orphaned, and
     // canonicalization drops it. The public `check_reachable` is the check for
     // callers that need the wire rule, and the wire validator always applies it.
+    // Since INF-04, `encode()` applies the wire rule too: it refuses the
+    // orphan, and only the explicit `drop_unreachable` opt-in drops it.
     let mut module = InfinityModule::new();
     let root = module.push(Inode::Int(1));
     module.set_root(Some(root));
@@ -184,7 +186,17 @@ fn unreachable_nodes_are_reported_and_dropped_by_canonicalization() {
         .expect_err("the orphan is reported by the explicit check");
     assert_eq!(error.code(), "infinity/node", "{error:?}");
 
-    let image = active_infinity::encode(&module).expect("encode");
+    let refused = active_infinity::encode(&module).expect_err("encode refuses an unreachable node");
+    assert_eq!(refused.code(), "infinity/node", "{refused:?}");
+
+    let image = active_infinity::encode_with(
+        &module,
+        active_infinity::layout::EncodeOpts {
+            drop_unreachable: true,
+            ..active_infinity::layout::EncodeOpts::default()
+        },
+    )
+    .expect("opt-in encode drops the orphan");
     let decoded = active_infinity::decode(&image).expect("decode");
     assert_eq!(
         decoded.node_count(),

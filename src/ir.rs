@@ -1403,6 +1403,17 @@ impl InfinityModule {
     ///
     /// This is what [`PartialEq`] implements; it is also available by name for
     /// readers who want the intent spelled out.
+    ///
+    /// Equality is over the canonical (reachable) form, plus the raw node
+    /// count: two modules with different numbers of nodes are never equal,
+    /// so an extra unreachable node is a difference (INF-04). The *content*
+    /// of unreachable nodes is still not compared — no canonical numbering
+    /// exists for a node no root reaches, so there is nothing order-free to
+    /// compare them by. Two modules with the same reachable form and the
+    /// same node count but different unreachable content compare equal; if
+    /// that matters, call [`Self::check_reachable`] first and compare the
+    /// raw arenas. `encode()` refuses an unreachable node by default, so an
+    /// unreachable node can only exist in a module that was never encoded.
     pub fn structurally_eq(&self, other: &Self) -> bool {
         let (Ok(left), Ok(right)) = (
             crate::canonical::prepare(self),
@@ -1410,7 +1421,11 @@ impl InfinityModule {
         ) else {
             return false;
         };
-        left.root == right.root
+        // Raw arena sizes, not prepared sizes: prepare() drops unreachable
+        // nodes, so without this an extra unreachable node would be
+        // invisible to the comparison (INF-04).
+        self.nodes.len() == other.nodes.len()
+            && left.root == right.root
             && left.extensions == right.extensions
             && left.bindings == right.bindings
             && left.annotations == right.annotations
@@ -1550,7 +1565,12 @@ impl InfinityModule {
     ///   (`validate::Validated`), which *does* refuse an unreachable node.
     ///
     /// Callers that hand-build a module and want the wire rule can call
-    /// [`Self::check_reachable`] explicitly.
+    /// [`Self::check_reachable`] explicitly — and `encode()` calls it by
+    /// default (INF-04), so a module with an unreachable node is refused at
+    /// the encode boundary unless the caller opts in with
+    /// `EncodeOpts::drop_unreachable`. This function stays a structural
+    /// well-formedness check: the encoder needs it before it normalizes,
+    /// and reachability is enforced separately at the encode boundary.
     ///
     /// Unit-table completeness, type-spec shape (an empty enum, a missing type),
     /// blob payload/size/hash agreement and extension uniqueness are enforced by
@@ -1679,8 +1699,10 @@ impl InfinityModule {
     /// Every node must be reachable from a root (module root, binding,
     /// annotation subject or constraint expression).
     ///
-    /// The wire validator refuses an unreachable node and canonicalization drops
-    /// one, so a module that passes every other check but hides a node would
+    /// The wire validator refuses an unreachable node, and `encode()` refuses
+    /// one too (INF-04) unless the caller opts in with
+    /// `EncodeOpts::drop_unreachable`, because canonicalization drops it: a
+    /// module that passes every other check but hides a node would otherwise
     /// encode to a *different* module — an orphan secret would vanish from the
     /// image while `structurally_eq` reported the two as equal. This check is
     /// linear and iterative.

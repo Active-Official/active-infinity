@@ -7,7 +7,10 @@
 //!
 //! 1. drops nodes unreachable from the module roots (root, bindings,
 //!    annotation subjects and their constraint expressions) — an image can
-//!    never hide data in an unreferenced node;
+//!    never hide data in an unreferenced node. `prepare` itself still drops
+//!    them; the fail-closed rule lives at the `encode` boundary, which
+//!    refuses an unreachable node unless `EncodeOpts::drop_unreachable` is
+//!    set (stream deltas, merge — INF-04);
 //! 2. numbers nodes in pre-order from the roots, visiting table fields in
 //!    key order, so arena construction order is irrelevant;
 //! 3. sorts table fields, strings, units, types, blobs, hashes, numbers,

@@ -34,8 +34,9 @@ use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::ir::{AnnotationKind, InfinityModule, Inode, NodeId, Provenance};
+use crate::layout::EncodeOpts;
 use crate::stream::merge_fragment;
-use crate::{decode, encode, Error, Result};
+use crate::{decode, encode, encode_with, Error, Result};
 
 /// Largest module this merge accepts, in nodes, and the most right-hand nodes
 /// it will import in total.
@@ -290,8 +291,17 @@ pub fn merge(
     apply_metadata(&mut merged, right, plan, &mut imported)?;
 
     // Canonicalize: this drops any fragment nodes the selected subtree does not
-    // reach and validates the result.
-    let image = encode(&merged)?;
+    // reach and validates the result. The drop is explicit here (INF-04): a
+    // merge keeps only the selected subtree, so the unselected fragment nodes
+    // are orphaned by design, and the default fail-closed encode would
+    // refuse them.
+    let image = encode_with(
+        &merged,
+        EncodeOpts {
+            drop_unreachable: true,
+            ..EncodeOpts::default()
+        },
+    )?;
     let module = decode(&image)?;
     // A clean merge imports at most one right-hand cone on top of the left
     // module, so the result can be twice an input. Keep the returned module

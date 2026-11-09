@@ -1411,8 +1411,18 @@ impl StreamDecoder {
                         .ok_or(Error::StreamState("no module to patch"))?;
                     let updated = apply_delta_with_limits(base, &self.pending_deltas, self.limits)
                         .map_err(delta_fault)?;
-                    let image =
-                        encode_with(&updated, EncodeOpts::default()).map_err(delta_fault)?;
+                    // The delta leaves the replaced subtree orphaned on
+                    // purpose, so this re-encode opts in to the drop
+                    // (INF-04): the default fail-closed encode would refuse
+                    // the orphaned nodes.
+                    let image = encode_with(
+                        &updated,
+                        EncodeOpts {
+                            drop_unreachable: true,
+                            ..EncodeOpts::default()
+                        },
+                    )
+                    .map_err(delta_fault)?;
                     if image.len() > estimate {
                         self.charge_generation(image.len() - estimate)?;
                     }
@@ -1659,8 +1669,15 @@ impl StreamEncoder {
     /// frame carrying the hash of the *whole* re-encoded module.
     pub fn push_delta(&mut self, base: &InfinityModule, ops: &[DeltaOp]) -> Result<()> {
         let updated = apply_delta(base, ops)?;
-        let image = encode_with(&updated, EncodeOpts::default())?;
-        if image == encode_with(base, EncodeOpts::default())? {
+        // Both sides opt in to the drop (INF-04): the delta orphans the
+        // replaced subtree on purpose, and the no-op check compares the
+        // canonical images, so both must be produced the same way.
+        let drop = EncodeOpts {
+            drop_unreachable: true,
+            ..EncodeOpts::default()
+        };
+        let image = encode_with(&updated, drop)?;
+        if image == encode_with(base, drop)? {
             // The decoder refuses a no-op generation; emitting one would produce
             // a stream the producer's own peer rejects.
             return Err(Error::StreamDelta("delta did not change the module"));
@@ -1848,7 +1865,14 @@ fn decode_fragment(
 /// Apply a list of delta operations and return the re-encoded hash.
 pub fn delta_hash(module: &InfinityModule, ops: &[DeltaOp]) -> Result<[u8; 32]> {
     let updated = apply_delta(module, ops)?;
-    let image = encode_with(&updated, EncodeOpts::default())?;
+    // The delta orphans the replaced subtree on purpose (INF-04).
+    let image = encode_with(
+        &updated,
+        EncodeOpts {
+            drop_unreachable: true,
+            ..EncodeOpts::default()
+        },
+    )?;
     hash_image(&image)
 }
 

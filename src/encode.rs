@@ -1,7 +1,14 @@
 //! Encoder: canonical module → `AINF` bytes.
 //!
 //! The encoder is a pure function of the canonical prepared module, so
-//! two logically equal modules always produce byte-identical images. Emission
+//! two logically equal modules always produce byte-identical images. It is
+//! fail-closed on unreachable nodes (INF-04): a node no root reaches is
+//! refused (`infinity/node`, reason `unreachable node`) instead of being
+//! silently dropped, because a dropped node — above all a secret — is data
+//! loss the caller never sees. Only the explicit opt-in
+//! `EncodeOpts::drop_unreachable` (stream deltas, merge) drops them.
+//!
+//! Emission
 //! is a single forward pass: every section is laid out in the fixed order
 //! declared by [`crate::layout::Section`], each starting on an 8-byte
 //! boundary, padded with zero bytes, and the content hash is computed over
@@ -67,6 +74,11 @@ struct NodeTables {
 }
 
 /// Encode a module with default options.
+///
+/// An unreachable node is refused (`infinity/node`, reason
+/// `unreachable node`); pass
+/// `EncodeOpts { drop_unreachable: true, ..EncodeOpts::default() }` to
+/// [`encode_with`] when the drop is intended (stream deltas, merge).
 pub fn encode(module: &InfinityModule) -> Result<Vec<u8>> {
     encode_with(module, EncodeOpts::default())
 }
@@ -88,11 +100,20 @@ pub fn encode_into(module: &InfinityModule, out: &mut Vec<u8>) -> Result<()> {
 }
 
 /// Encode into an existing buffer with explicit options.
+///
+/// An unreachable node is refused unless `opts.drop_unreachable` is set:
+/// canonicalization drops such a node, so encoding without this check would
+/// silently delete data — including secrets — and return `Ok` (INF-04).
+/// The wire validator refuses unreachable nodes for the same reason; the
+/// in-memory and wire rules now agree.
 pub fn encode_into_with(
     module: &InfinityModule,
     out: &mut Vec<u8>,
     opts: EncodeOpts,
 ) -> Result<()> {
+    if !opts.drop_unreachable {
+        module.check_reachable()?;
+    }
     let prepared = prepare(module)?;
     // Fail fast when the payloads alone cannot fit the 4 GiB address space.
     // The final `u32::try_from(image.len())` still guards the exact size; this

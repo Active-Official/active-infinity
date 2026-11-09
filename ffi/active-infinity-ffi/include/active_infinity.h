@@ -37,9 +37,20 @@
  * and a wrong length are each a no-op (the buffer is leaked at worst) instead
  * of heap corruption. Buffers are 8-byte aligned.
  *
- * A double free is a no-op only while the address has not been reused. If an
- * allocation between the two frees returned the same address, the stale free
- * releases that newer buffer. Always null the pointer after freeing it; using
+ * Generational free (INF-FFI-01): `active_infinity_alloc_gen` reports the
+ * allocation's generation through an out-pointer, and
+ * `active_infinity_free_gen` frees only when the generation passed back
+ * matches the generation recorded for that address. A stale free — the same
+ * address freed, reused under a newer generation, then freed again with the
+ * old generation — is refused with -1 and the live buffer survives. The
+ * legacy `active_infinity_free(ptr, len)` cannot carry a generation, so a
+ * double free through it is a no-op only while the address has not been
+ * reused: if an allocation between the two frees returned the same address,
+ * the stale free releases that newer buffer. (The header is validated
+ * before the address leaves the record, so a stale free with a different
+ * length no longer untracks the live buffer — only the same-length reuse
+ * case remains, for the legacy entry point alone.) New callers must use
+ * the generational pair. Always null the pointer after freeing it; using
  * a pointer after it was freed is undefined behaviour.
  *
  * `active_infinity_alloc` returns NULL on failure and does not set
@@ -134,6 +145,16 @@ const char *active_infinity_last_error(void);
  * library to own the allocation). Free with the same length; see above. */
 uint8_t *active_infinity_alloc(size_t len);
 void active_infinity_free(uint8_t *ptr, size_t len);
+
+/* Generational allocate/free (INF-FFI-01): the safe pair. `alloc_gen`
+ * writes the allocation's generation to *generation_out (a null out-pointer
+ * is refused with NULL) and `free_gen` frees only when the generation
+ * passed back matches the generation recorded for that address, returning
+ * 0 on success and -1 when the handle is stale, foreign, already freed, or
+ * the wrong length. A refused free never deallocates and never untracks the
+ * live buffer. Neither function changes last_error. */
+uint8_t *active_infinity_alloc_gen(size_t len, uint64_t *generation_out);
+int32_t active_infinity_free_gen(uint8_t *ptr, size_t len, uint64_t generation);
 
 /* Validate an AINF image. Returns 0 only for a structurally valid image
  * that is exactly the canonical encoding of its own content (INF-02):

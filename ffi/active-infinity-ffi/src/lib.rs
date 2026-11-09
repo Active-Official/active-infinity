@@ -28,13 +28,14 @@
 
 use std::alloc::Layout;
 use std::cell::RefCell;
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr;
 use std::slice;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use active_infinity::{
     content_hash, decode, decode_with, encode, validate, validate_canonical, DecodeOpts, Limits,
@@ -56,19 +57,44 @@ pub const MAX_SOURCE_BYTES: usize = 16 << 20;
 
 /// Allocation tag written ahead of every `alloc` buffer.
 const ALLOC_MAGIC: u64 = u64::from_le_bytes(*b"AINFALLO");
-/// Tag plus the stored length, both little-endian `u64`.
-const ALLOC_HEADER: usize = 16;
+/// Tag plus the stored length plus the stored generation, all little-endian
+/// `u64` (INF-FFI-01). The generation is what makes a stale free after
+/// address reuse detectable: a freed address handed out again carries a
+/// newer generation, so a free naming the old generation is refused instead
+/// of releasing the live buffer. The header is 24 bytes, still 8-aligned,
+/// so the user pointer stays 8-aligned.
+const ALLOC_HEADER: usize = 24;
 /// Alignment of every `alloc` buffer. `u64` fields need no more, and a fixed
 /// alignment makes the free layout explicit.
 const ALLOC_ALIGN: usize = 8;
 
-/// Every live allocation handed out by [`active_infinity_alloc`].
+/// Every live allocation handed out by [`active_infinity_alloc`], keyed by
+/// address with its generation (INF-FFI-01).
 ///
 /// A tag cannot prove an address: a caller can plant a matching tag wherever it
 /// likes. The registry is the authority, so a foreign pointer, a forged tag and
 /// a double free are each a no-op instead of a free of memory this library never
-/// allocated.
-static LIVE_ALLOCS: Mutex<BTreeSet<usize>> = Mutex::new(BTreeSet::new());
+/// allocated. The generation is the authority for reuse: a freed address
+/// handed out again is recorded under a newer generation, so a stale free
+/// naming the old generation is refused instead of releasing the live
+/// buffer — the legacy `(ptr, len)` handle cannot carry a generation, which
+/// is why [`active_infinity_free`] cannot close that case and the
+/// generational [`active_infinity_free_gen`] exists.
+static LIVE_ALLOCS: Mutex<BTreeMap<usize, u64>> = Mutex::new(BTreeMap::new());
+
+/// One generation per allocation, minted in order (INF-FFI-01). Generation 0
+/// is never handed out, so a zeroed header is never a valid generation.
+static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
+
+/// Mint the next generation, skipping 0 on wrap (a `u64` counter does not
+/// wrap in practice; the skip keeps 0 reserved either way).
+fn next_generation() -> u64 {
+    let mut generation = NEXT_GENERATION.fetch_add(1, Ordering::Relaxed);
+    if generation == 0 {
+        generation = NEXT_GENERATION.fetch_add(1, Ordering::Relaxed);
+    }
+    generation
+}
 
 /// Largest number of buffers this process may hold at once.
 ///
@@ -78,7 +104,7 @@ static LIVE_ALLOCS: Mutex<BTreeSet<usize>> = Mutex::new(BTreeSet::new());
 /// over-sized request.
 pub const MAX_LIVE_ALLOCATIONS: usize = 1 << 16;
 
-fn live_allocations() -> Option<std::sync::MutexGuard<'static, BTreeSet<usize>>> {
+fn live_allocations() -> Option<std::sync::MutexGuard<'static, BTreeMap<usize, u64>>> {
     // Fail closed: if the registry is poisoned its contents cannot be trusted,
     // and handing out or freeing an address it no longer tracks is worse than
     // refusing the call.
@@ -102,7 +128,9 @@ pub const EXPORTS: &[&str] = &[
     "active_infinity_ffi_version",
     "active_infinity_last_error",
     "active_infinity_alloc",
+    "active_infinity_alloc_gen",
     "active_infinity_free",
+    "active_infinity_free_gen",
     "active_infinity_validate",
     "active_infinity_validate_canonical",
     "active_infinity_validate_with_limits",
@@ -250,7 +278,7 @@ pub extern "C" fn active_infinity_last_error() -> *const c_char {
 #[no_mangle]
 pub extern "C" fn active_infinity_alloc(len: usize) -> *mut u8 {
     match catch_unwind(|| alloc_tagged(len)) {
-        Ok(pointer) => pointer,
+        Ok((pointer, _generation)) => pointer,
         Err(_) => {
             set_error("infinity/panic");
             ptr::null_mut()
@@ -258,52 +286,90 @@ pub extern "C" fn active_infinity_alloc(len: usize) -> *mut u8 {
     }
 }
 
-fn alloc_tagged(len: usize) -> *mut u8 {
+/// Allocate `len` zeroed bytes and report the allocation's generation.
+///
+/// The generational form of [`active_infinity_alloc`] (INF-FFI-01): the
+/// generation is written to `*generation_out` and must be passed back to
+/// [`active_infinity_free_gen`] with the pointer and the length. A stale
+/// free — the same address freed, reused under a newer generation, then
+/// freed again with the old generation — is refused instead of releasing
+/// the live buffer. A null `generation_out` is refused with a null return:
+/// without the generation the buffer cannot be freed generationally.
+/// Like `active_infinity_alloc`, a null return means "allocation failed"
+/// and `last_error` is unchanged.
+///
+/// # Safety
+/// `generation_out` must be a writable `u64` (or null, which is refused).
+#[no_mangle]
+pub unsafe extern "C" fn active_infinity_alloc_gen(len: usize, generation_out: *mut u64) -> *mut u8 {
+    if generation_out.is_null() {
+        return ptr::null_mut();
+    }
+    match catch_unwind(|| alloc_tagged(len)) {
+        Ok((pointer, generation)) => {
+            if pointer.is_null() {
+                return ptr::null_mut();
+            }
+            // SAFETY: `generation_out` is non-null (checked above) and the
+            // caller provided a writable `u64`.
+            unsafe { ptr::write(generation_out, generation) };
+            pointer
+        }
+        Err(_) => {
+            set_error("infinity/panic");
+            ptr::null_mut()
+        }
+    }
+}
+
+fn alloc_tagged(len: usize) -> (*mut u8, u64) {
     // `alloc` and `free` never touch `last_error`: a binding may call them
     // between a failed FFI call and its read of the code, and an internal
     // allocation must not overwrite the failure it is about to report. A null
     // return means "allocation failed" (the ceiling or the allocator).
     if len > MAX_ALLOC_BYTES {
-        return ptr::null_mut();
+        return (ptr::null_mut(), 0);
     }
     let Some(total) = len.checked_add(ALLOC_HEADER) else {
-        return ptr::null_mut();
+        return (ptr::null_mut(), 0);
     };
     let Ok(layout) = Layout::from_size_align(total, ALLOC_ALIGN) else {
-        return ptr::null_mut();
+        return (ptr::null_mut(), 0);
     };
     // SAFETY: `total` is non-zero and the layout is valid for the allocator.
     let base = unsafe { std::alloc::alloc_zeroed(layout) };
     if base.is_null() {
-        return ptr::null_mut();
+        return (ptr::null_mut(), 0);
     }
+    let generation = next_generation();
     // SAFETY: the allocation holds `ALLOC_HEADER` bytes at `base`.
     unsafe {
         ptr::copy_nonoverlapping(ALLOC_MAGIC.to_le_bytes().as_ptr(), base, 8);
         ptr::copy_nonoverlapping((len as u64).to_le_bytes().as_ptr(), base.add(8), 8);
+        ptr::copy_nonoverlapping(generation.to_le_bytes().as_ptr(), base.add(16), 8);
     }
     // SAFETY: the allocation is at least `ALLOC_HEADER` bytes.
     let pointer = unsafe { base.add(ALLOC_HEADER) };
     let Some(mut live) = live_allocations() else {
         // SAFETY: `base` came from `alloc_zeroed` with this layout.
         unsafe { std::alloc::dealloc(base, layout) };
-        return ptr::null_mut();
+        return (ptr::null_mut(), 0);
     };
     if live.len() >= MAX_LIVE_ALLOCATIONS {
         // One tenant's allocation storm must not exhaust memory for every
         // caller in the process (cross-cutting pass 3, #1).
         // SAFETY: `base` came from `alloc_zeroed` with this layout.
         unsafe { std::alloc::dealloc(base, layout) };
-        return ptr::null_mut();
+        return (ptr::null_mut(), 0);
     }
-    if !live.insert(pointer as usize) {
+    if live.insert(pointer as usize, generation).is_some() {
         // A fresh allocation cannot alias a live one; fail closed rather than
         // hand out two names for one buffer.
         // SAFETY: `base` came from `alloc_zeroed` with this layout.
         unsafe { std::alloc::dealloc(base, layout) };
-        return ptr::null_mut();
+        return (ptr::null_mut(), 0);
     }
-    pointer
+    (pointer, generation)
 }
 
 /// Release a buffer from [`active_infinity_alloc`].
@@ -312,8 +378,20 @@ fn alloc_tagged(len: usize) -> *mut u8 {
 /// `ptr` must come from `active_infinity_alloc(len)` and must not be used after.
 /// The same `len` must be passed. A foreign pointer, a different length or a
 /// double free is undefined behaviour in the C ABI; the tag makes a wrong
-/// length a no-op (the buffer is leaked rather than corrupting the heap) but
-/// cannot make a double free safe.
+/// length a no-op (the buffer is leaked rather than corrupting the heap).
+///
+/// A double free is a no-op only while the address has not been reused. If an
+/// allocation between the two frees returned the same address, the stale free
+/// releases that newer buffer: the `(ptr, len)` handle cannot name which
+/// generation it means, so no check inside this function can tell a stale
+/// free from a legitimate free of the reused address (INF-FFI-01). The
+/// header is validated BEFORE the address leaves the registry, so a stale
+/// free with a different length no longer untracks the live buffer — but
+/// the same-length reuse case is a residual risk of this legacy entry point.
+/// Use [`active_infinity_alloc_gen`] / [`active_infinity_free_gen`], which
+/// carry the generation and refuse a stale free outright. Always null the
+/// pointer after freeing it; using a pointer after it was freed is
+/// undefined behaviour.
 #[no_mangle]
 pub unsafe extern "C" fn active_infinity_free(ptr: *mut u8, len: usize) {
     // A panic must not unwind into C; `free` has no return code, so a caught
@@ -325,15 +403,12 @@ fn free_tagged(ptr: *mut u8, len: usize) {
     if ptr.is_null() {
         return;
     }
-    // Removing the address under the lock is what makes a foreign pointer, a
-    // forged tag and a double free a no-op: only an address this library
-    // recorded can be reconstructed, and only once.
     let Some(mut live) = live_allocations() else {
         // A poisoned registry cannot prove anything: leaking the buffer is the
         // safe failure (cross-cutting pass 3, #1).
         return;
     };
-    if !live.remove(&(ptr as usize)) {
+    if !live.contains_key(&(ptr as usize)) {
         // A foreign pointer or a double free: no-op. `free` never changes the
         // thread's code: a binding reads it after a failing call, and an
         // internal alloc/free between the failure and the read must not hide it.
@@ -347,8 +422,10 @@ fn free_tagged(ptr: *mut u8, len: usize) {
     let stored = u64::from_le_bytes(header[8..16].try_into().expect("8 bytes"));
     if magic != ALLOC_MAGIC || stored != len as u64 {
         // A wrong length cannot be freed with the right layout. The buffer is
-        // leaked, which is the safe failure, and it is no longer reachable
-        // through this API.
+        // leaked, which is the safe failure — and, since the address is still
+        // in the registry (INF-FFI-01: the header is checked BEFORE the
+        // remove), a later legitimate free of this buffer still succeeds
+        // instead of the buffer being untracked and leaked forever.
         return;
     }
     let Some(total) = len.checked_add(ALLOC_HEADER) else {
@@ -357,10 +434,88 @@ fn free_tagged(ptr: *mut u8, len: usize) {
     let Ok(layout) = Layout::from_size_align(total, ALLOC_ALIGN) else {
         return;
     };
+    // The header proves this is the live allocation at this address, so the
+    // remove and the deallocation are now safe.
+    live.remove(&(ptr as usize));
     // Clear the tag so a stale copy never looks valid.
     unsafe { ptr::write_bytes(base, 0, ALLOC_HEADER) };
     // SAFETY: `base` came from `alloc_zeroed` with exactly this layout.
     unsafe { std::alloc::dealloc(base, layout) };
+}
+
+/// Release a buffer from [`active_infinity_alloc_gen`], generationally.
+///
+/// # Safety
+/// `ptr` must come from `active_infinity_alloc_gen(len, generation_out)`
+/// with the generation that call returned, and must not be used after. The
+/// same `len` and the same generation must be passed. Returns 0 on success,
+/// -1 when the handle is stale (the address was freed and reused under a
+/// newer generation), foreign, already freed, or the wrong length. A refused
+/// free never deallocates and never untracks the live buffer. Like
+/// [`active_infinity_free`], this never changes `last_error`.
+#[no_mangle]
+pub unsafe extern "C" fn active_infinity_free_gen(
+    ptr: *mut u8,
+    len: usize,
+    generation: u64,
+) -> i32 {
+    // A panic must not unwind into C; a caught panic refuses the free (a
+    // leak) rather than aborting the caller.
+    match catch_unwind(AssertUnwindSafe(|| free_gen_tagged(ptr, len, generation))) {
+        Ok(code) => code,
+        Err(_) => INVALID,
+    }
+}
+
+/// Free only when the generation matches (INF-FFI-01).
+///
+/// Returns 0 on success, -1 when the handle is stale, foreign, already
+/// freed, or the wrong length. A refusal never removes the address from
+/// the registry and never deallocates, so a live buffer survives a stale
+/// free.
+fn free_gen_tagged(ptr: *mut u8, len: usize, generation: u64) -> i32 {
+    if ptr.is_null() || generation == 0 {
+        return INVALID;
+    }
+    let Some(mut live) = live_allocations() else {
+        // A poisoned registry cannot prove anything: leaking the buffer is the
+        // safe failure (cross-cutting pass 3, #1).
+        return INVALID;
+    };
+    let Some(&recorded) = live.get(&(ptr as usize)) else {
+        // A foreign pointer or a double free: refused.
+        return INVALID;
+    };
+    if recorded != generation {
+        // The address was freed and handed out again under a newer
+        // generation. This is the stale free INF-FFI-01 names: refuse it
+        // and leave the live buffer (and its registry entry) alone.
+        return INVALID;
+    }
+    // SAFETY: the registry proved this address came from `alloc_tagged`, so the
+    // header behind it was written by this library.
+    let base = unsafe { ptr.sub(ALLOC_HEADER) };
+    let header = unsafe { slice::from_raw_parts(base, ALLOC_HEADER) };
+    let magic = u64::from_le_bytes(header[..8].try_into().expect("8 bytes"));
+    let stored = u64::from_le_bytes(header[8..16].try_into().expect("8 bytes"));
+    let stored_generation = u64::from_le_bytes(header[16..24].try_into().expect("8 bytes"));
+    if magic != ALLOC_MAGIC || stored != len as u64 || stored_generation != generation {
+        // A wrong length, or a header that disagrees with the registry:
+        // refuse without removing, so the live buffer stays tracked.
+        return INVALID;
+    }
+    let Some(total) = len.checked_add(ALLOC_HEADER) else {
+        return INVALID;
+    };
+    let Ok(layout) = Layout::from_size_align(total, ALLOC_ALIGN) else {
+        return INVALID;
+    };
+    live.remove(&(ptr as usize));
+    // Clear the tag so a stale copy never looks valid.
+    unsafe { ptr::write_bytes(base, 0, ALLOC_HEADER) };
+    // SAFETY: `base` came from `alloc_zeroed` with exactly this layout.
+    unsafe { std::alloc::dealloc(base, layout) };
+    OK
 }
 
 /// Validate an AINF image. Returns 0 only for a structurally valid image

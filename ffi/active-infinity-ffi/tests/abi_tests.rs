@@ -3,11 +3,13 @@
 use std::ffi::CString;
 
 use active_infinity_ffi::{
-    active_infinity_abi_version, active_infinity_content_hash, active_infinity_decode_with_limits,
-    active_infinity_from_active, active_infinity_last_error, active_infinity_limits_default,
-    active_infinity_redacted_json, active_infinity_reencode, active_infinity_validate,
-    active_infinity_validate_canonical, active_infinity_validate_with_limits,
-    ActiveInfinityLimits, EXPORTS, MAX_ALLOC_BYTES, MAX_NAME_BYTES, MAX_SOURCE_BYTES,
+    active_infinity_abi_version, active_infinity_alloc, active_infinity_alloc_gen,
+    active_infinity_content_hash, active_infinity_decode_with_limits, active_infinity_free,
+    active_infinity_free_gen, active_infinity_from_active, active_infinity_last_error,
+    active_infinity_limits_default, active_infinity_redacted_json, active_infinity_reencode,
+    active_infinity_validate, active_infinity_validate_canonical,
+    active_infinity_validate_with_limits, ActiveInfinityLimits, EXPORTS, MAX_ALLOC_BYTES,
+    MAX_NAME_BYTES, MAX_SOURCE_BYTES,
 };
 
 fn vector(name: &str) -> Vec<u8> {
@@ -740,4 +742,124 @@ fn validate_with_limits_matches_validate_canonical_under_defaults() {
     };
     assert_eq!(status, -1);
     assert_eq!(last_error(), "infinity/not-canonical");
+}
+
+/// INF-FFI-01: a stale free after address reuse is refused and the live
+/// buffer survives. This is the W5 C harness (`w5_ffi01.c`) as a Rust test:
+/// alloc p1, free it, alloc p2 (the allocator reuses the address), then free
+/// the stale handle (p1, old generation) and prove p2 is untouched.
+#[test]
+fn free_gen_refuses_a_stale_free_after_address_reuse() {
+    let mut reused = false;
+    for _ in 0..20 {
+        let mut gen1 = 0u64;
+        // SAFETY: gen1 is a writable u64.
+        let p1 = unsafe { active_infinity_alloc_gen(64, &mut gen1) };
+        assert!(!p1.is_null(), "alloc_gen must succeed");
+        assert_ne!(gen1, 0, "generation 0 is never handed out");
+        // SAFETY: p1 is a live 64-byte allocation with generation gen1.
+        assert_eq!(unsafe { active_infinity_free_gen(p1, 64, gen1) }, 0);
+        let mut gen2 = 0u64;
+        // SAFETY: gen2 is a writable u64.
+        let p2 = unsafe { active_infinity_alloc_gen(64, &mut gen2) };
+        assert!(!p2.is_null(), "alloc_gen must succeed");
+        if p2 != p1 {
+            // The allocator did not reuse the address this round; free p2
+            // and retry. (Same-size alloc/free cycles reuse the address
+            // with overwhelming likelihood in both the system and WASM
+            // allocators, so 20 attempts is ample.)
+            // SAFETY: p2 is a live 64-byte allocation with generation gen2.
+            assert_eq!(unsafe { active_infinity_free_gen(p2, 64, gen2) }, 0);
+            continue;
+        }
+        reused = true;
+        assert_ne!(gen2, gen1, "a reused address carries a newer generation");
+        // SAFETY: p2 is a live 64-byte allocation.
+        unsafe { std::ptr::write_bytes(p2, 0xB2, 64) };
+        // The stale free: p1's generation names an allocation that no longer
+        // exists. It must be refused, and the live buffer must survive. The
+        // return-code assert runs first, so p2 is only read while it is
+        // provably still live (no use-after-free in the test itself).
+        // SAFETY: p1 is the same address as p2 with the stale generation.
+        assert_eq!(unsafe { active_infinity_free_gen(p1, 64, gen1) }, -1);
+        // SAFETY: p2 is still the live allocation (the stale free refused).
+        assert_eq!(unsafe { *p2 }, 0xB2, "the stale free must not touch the live buffer");
+        let mut gen3 = 0u64;
+        // SAFETY: gen3 is a writable u64.
+        let p3 = unsafe { active_infinity_alloc_gen(64, &mut gen3) };
+        assert!(!p3.is_null(), "alloc_gen must succeed");
+        assert_ne!(p3, p2, "the live buffer was not freed by the stale free");
+        // SAFETY: p2 and p3 are live allocations with their generations.
+        assert_eq!(unsafe { active_infinity_free_gen(p2, 64, gen2) }, 0);
+        assert_eq!(unsafe { active_infinity_free_gen(p3, 64, gen3) }, 0);
+        break;
+    }
+    assert!(reused, "the allocator never reused the freed address in 20 attempts");
+}
+
+/// INF-FFI-01: an immediate double free through the generational path is
+/// refused.
+#[test]
+fn free_gen_refuses_an_immediate_double_free() {
+    let mut generation = 0u64;
+    // SAFETY: generation is a writable u64.
+    let pointer = unsafe { active_infinity_alloc_gen(64, &mut generation) };
+    assert!(!pointer.is_null());
+    // SAFETY: pointer is a live 64-byte allocation with this generation.
+    assert_eq!(unsafe { active_infinity_free_gen(pointer, 64, generation) }, 0);
+    // SAFETY: pointer was already freed with this generation.
+    assert_eq!(unsafe { active_infinity_free_gen(pointer, 64, generation) }, -1);
+}
+
+/// INF-FFI-01: a generational free with the wrong length is refused and the
+/// buffer stays live (a later free with the right length still succeeds).
+#[test]
+fn free_gen_refuses_a_wrong_length_and_keeps_the_buffer_live() {
+    let mut generation = 0u64;
+    // SAFETY: generation is a writable u64.
+    let pointer = unsafe { active_infinity_alloc_gen(64, &mut generation) };
+    assert!(!pointer.is_null());
+    // SAFETY: pointer is a live 64-byte allocation; 63 is the wrong length.
+    assert_eq!(unsafe { active_infinity_free_gen(pointer, 63, generation) }, -1);
+    // The refusal must not untrack the buffer: the legitimate free works.
+    // SAFETY: pointer is still the live 64-byte allocation.
+    assert_eq!(unsafe { active_infinity_free_gen(pointer, 64, generation) }, 0);
+}
+
+/// INF-FFI-01: the legacy free validates the header BEFORE removing the
+/// address from the registry, so a wrong-length free no longer untracks
+/// the live buffer. Proof: after a wrong-length free and then a legitimate
+/// free, the address is reclaimed and a later same-size allocation reuses
+/// it (under the old order the buffer leaked untracked and its address
+/// could never come back).
+#[test]
+fn legacy_free_with_a_wrong_length_keeps_the_buffer_live() {
+    let pointer = active_infinity_alloc(64);
+    assert!(!pointer.is_null());
+    // SAFETY: pointer is a live 64-byte allocation; 63 is the wrong length.
+    unsafe { active_infinity_free(pointer, 63) };
+    // SAFETY: pointer is still the live 64-byte allocation.
+    unsafe { active_infinity_free(pointer, 64) };
+    let mut reused = false;
+    for _ in 0..20 {
+        let again = active_infinity_alloc(64);
+        assert!(!again.is_null());
+        if again == pointer {
+            reused = true;
+        }
+        // SAFETY: again is a live 64-byte allocation.
+        unsafe { active_infinity_free(again, 64) };
+        if reused {
+            break;
+        }
+    }
+    assert!(reused, "the freed address was never handed out again");
+}
+
+/// INF-FFI-01: `alloc_gen` refuses a null generation out-pointer.
+#[test]
+fn alloc_gen_refuses_a_null_generation_out() {
+    // SAFETY: a null out-pointer is the refused case.
+    let pointer = unsafe { active_infinity_alloc_gen(64, std::ptr::null_mut()) };
+    assert!(pointer.is_null(), "a null generation out-pointer is refused");
 }

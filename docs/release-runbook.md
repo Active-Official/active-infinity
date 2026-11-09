@@ -16,12 +16,16 @@ maturity release; the executed record lives in `STATUS.md`.
 
 ## The release workflow
 
-Pushing the tag runs `.github/workflows/release.yml`, which re-runs the format,
-clippy and test gates on the tagged commit, generates
-`dist/active-infinity-<version>.cdx.json` from `cargo metadata --locked`,
-verifies it with `scripts/sbom.py --check`, creates the GitHub Release if it does
-not exist, uploads the SBOM and asserts the asset is attached. The job can also
-be run for an existing tag with `workflow_dispatch`.
+Pushing the tag runs `.github/workflows/release.yml`, which first verifies the
+tag's SSH signature (`scripts/verify_tag.sh`), asserts the tag version equals
+the library version in `Cargo.toml`, and requires the CI workflow to be green
+for the tagged commit; then it re-runs the format, clippy and test gates on the
+tagged commit, generates `dist/active-infinity-<version>.cdx.json` from
+`cargo metadata --locked`, verifies it with `scripts/sbom.py --check`, creates
+the GitHub Release if it does not exist, uploads the SBOM (never replacing an
+existing asset) and asserts the asset is attached. The job can also be run for
+an existing tag with `workflow_dispatch` -- it checks out the tag itself, not
+the dispatch branch.
 
 Signing, attestation and the Sigstore spike: `docs/release-attestation.md`.
 
@@ -37,13 +41,13 @@ Signing, attestation and the Sigstore spike: `docs/release-attestation.md`.
    Both SHAs must equal the local `HEAD`.
 2. **Tag and push the tag.**
    ```text
-   git tag -a vX.Y.Z -m "active-infinity X.Y.Z"
+   git tag -s vX.Y.Z -m "active-infinity X.Y.Z"
    git push official vX.Y.Z
    git push ratio vX.Y.Z
    ```
    Tag pushes run the full CI, including the audit, deny and SBOM release gates.
-   A signed tag is produced when a signing key is available
-   (`git tag -s`).
+   The tag MUST be signed (`git tag -s`): the release job refuses unsigned
+   tags (`scripts/verify_tag.sh`), and an unsigned tag can never be released.
 3. **Publish the library.** `cargo publish`, waiting for the registry to report
    the version available.
 4. **Publish the CLI.** It pins the library version, so it must follow:

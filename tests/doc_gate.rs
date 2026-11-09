@@ -238,6 +238,48 @@ fn release_and_supply_chain_process_is_operational() {
 }
 
 #[test]
+fn release_workflow_verifies_the_tag_before_building_the_sbom() {
+    // R2-CI-02: the prose test above is phrase-matching — it never reads
+    // the workflow. This test guards the workflow text itself, and the
+    // ORDER of its steps, not mere string presence: a release that builds
+    // the SBOM before verifying the tag, or that never verifies it, must
+    // fail the gate. The needles are the executable lines, not the
+    // comments: the header and step comments also mention verify_tag.sh,
+    // --clobber and ref:, so a bare substring search would pass on prose.
+    let workflow = fs::read_to_string(repo_path(".github/workflows/release.yml"))
+        .expect("release workflow");
+    let verify = workflow
+        .find("run: scripts/verify_tag.sh")
+        .expect("release.yml must invoke scripts/verify_tag.sh");
+    let sbom = workflow
+        .find("python3 scripts/sbom.py")
+        .expect("release.yml must build the SBOM");
+    assert!(
+        verify < sbom,
+        "tag verification must run before the SBOM step"
+    );
+    assert!(
+        workflow.contains("ref: ${{ inputs.tag || github.ref_name }}"),
+        "release.yml must check out the tag itself (ref:), never the dispatch branch"
+    );
+    assert!(
+        workflow.contains("Cargo.toml"),
+        "release.yml must check the tag version against Cargo.toml"
+    );
+    let mut uploaded = false;
+    for line in workflow.lines() {
+        if line.contains("gh release upload") {
+            uploaded = true;
+            assert!(
+                !line.contains("--clobber"),
+                "release must never silently replace a release asset (--clobber)"
+            );
+        }
+    }
+    assert!(uploaded, "release.yml must upload the SBOM");
+}
+
+#[test]
 fn migration_comparison_and_compatibility_are_documented() {
     let migration =
         fs::read_to_string(repo_path("docs/hardening/MIGRATION.md")).expect("migration");

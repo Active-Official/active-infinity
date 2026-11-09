@@ -61,8 +61,13 @@ gcc -shared -fPIC -O2 \
   "${EXTRA_LIBS[@]}" -o "$OUT/$JNI_LIB"
 
 # On Windows the bridge links the shared library: copy the FFI `.dll` next
-# to it so the JVM run finds it (Windows searches the loading module's
-# directory for its dependencies).
+# to it, and put that directory on PATH for the JVM run. The copy alone is
+# NOT enough: a plain LoadLibrary (which System.loadLibrary uses) does not
+# search the loaded module's own directory for its dependencies, so without
+# PATH the JVM fails with "Can't find dependent libraries" (NF-XPL06-01,
+# found while verifying NF-INF02-01: the XPL-INF-06 Java run only worked
+# because a stale `active_infinity_ffi.dll` copy happened to sit in the
+# working directory).
 if [ "$JNI_OS" = "win32" ]; then
   cp "$ROOT/ffi/active-infinity-ffi/target/release/active_infinity_ffi.dll" "$OUT/"
 fi
@@ -72,4 +77,4 @@ mkdir -p "$OUT/classes"
 find "$OUT/src" -name '*.java' -print0 | xargs -0 javac --release 17 -d "$OUT/classes"
 
 cd "$ROOT"
-java -Djava.library.path="$OUT" -cp "$OUT/classes" ai.activeinfinity.Conformance
+PATH="$OUT:$PATH" java -Djava.library.path="$OUT" -cp "$OUT/classes" ai.activeinfinity.Conformance

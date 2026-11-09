@@ -17,16 +17,31 @@ local checked = 0
 for path, expected in manifest:gmatch('"path"%s*:%s*"([^"]+)".-"content_hash"%s*:%s*"([^"]+)"') do
   if path:find("/valid/", 1, true) then
     local image = read(path)
-    ai.validate(image)
-    local actual = ai.content_hash_hex(image)
-    if actual ~= expected then
-      error(string.format("%s: hash %s, want %s", path, actual, expected))
+    if path:find("non_canonical", 1, true) then
+      -- NF-INF02-01: validate and content_hash prove the canonical form
+      -- (INF-02), so a non-canonical image is refused; reencode is the
+      -- repair path.
+      local ok, message = pcall(function() ai.validate(image) end)
+      assert(not ok, "non-canonical image was validated")
+      assert(type(message) == "table" and message.code == "infinity/not-canonical",
+             "wrong code: " .. tostring(message.code))
+      local ok_hash, message_hash = pcall(function() ai.content_hash_hex(image) end)
+      assert(not ok_hash, "non-canonical image was hashed")
+      assert(type(message_hash) == "table" and message_hash.code == "infinity/not-canonical",
+             "wrong code: " .. tostring(message_hash.code))
+    else
+      ai.validate(image)
+      local actual = ai.content_hash_hex(image)
+      if actual ~= expected then
+        error(string.format("%s: hash %s, want %s", path, actual, expected))
+      end
     end
     local canonical = ai.reencode(image)
     if path:find("non_canonical", 1, true) then
       if canonical == image then
         error(path .. ": expected re-encoding to change bytes")
       end
+      ai.validate(canonical)
     elseif canonical ~= image then
       error(path .. ": canonical bytes changed")
     end

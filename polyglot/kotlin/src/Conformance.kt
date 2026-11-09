@@ -9,6 +9,12 @@ import java.io.File
  *   kotlinc -cp polyglot/java/classes -include-runtime -d conformance.jar \
  *       polyglot/kotlin/src/Conformance.kt
  *   java -Djava.library.path=polyglot/java -cp conformance.jar:polyglot/java/classes ConformanceKt
+ * On Windows the JVM also needs the bridge directory on PATH, so the
+ * bridge's own dependency (active_infinity_ffi.dll) is found:
+ *   PATH=polyglot/java:$PATH java -Djava.library.path=polyglot/java \
+ *       -cp conformance.jar:polyglot/java/classes ConformanceKt
+ * (NF-XPL06-01: a plain LoadLibrary does not search the loaded module's
+ * directory for its dependencies.)
  */
 fun main() {
     val root = File(".").absoluteFile
@@ -21,12 +27,31 @@ fun main() {
         val expected = match.groupValues[2]
         if (!path.contains("/valid/")) continue
         val image = File(root, path).readBytes()
-        ActiveInfinity.validate(image)
-        val actual = ActiveInfinity.contentHashHex(image)
-        check(actual == expected) { "$path: hash $actual, want $expected" }
+        if (path.contains("non_canonical")) {
+            // NF-INF02-01: validate and content_hash prove the canonical
+            // form (INF-02), so a non-canonical image is refused; reencode
+            // is the repair path.
+            try {
+                ActiveInfinity.validate(image)
+                error("$path: non-canonical image was validated")
+            } catch (e: ActiveInfinity.Error) {
+                check(e.code() == "infinity/not-canonical") { "$path: wrong code ${e.code()}" }
+            }
+            try {
+                ActiveInfinity.contentHashHex(image)
+                error("$path: non-canonical image was hashed")
+            } catch (e: ActiveInfinity.Error) {
+                check(e.code() == "infinity/not-canonical") { "$path: wrong code ${e.code()}" }
+            }
+        } else {
+            ActiveInfinity.validate(image)
+            val actual = ActiveInfinity.contentHashHex(image)
+            check(actual == expected) { "$path: hash $actual, want $expected" }
+        }
         val canonical = ActiveInfinity.reencode(image)
         if (path.contains("non_canonical")) {
             check(!canonical.contentEquals(image)) { "$path: expected changed bytes" }
+            ActiveInfinity.validate(canonical)
         } else {
             check(canonical.contentEquals(image)) { "$path: canonical bytes changed" }
         }

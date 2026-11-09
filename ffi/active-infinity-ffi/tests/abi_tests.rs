@@ -71,6 +71,52 @@ fn validate_hash_and_reencode_match_the_reference() {
 }
 
 #[test]
+fn reencode_repairs_a_non_canonical_image() {
+    // NF-INF02-01: `reencode` is the repair path. `validate` and
+    // `content_hash` prove the canonical form (INF-02), so they refuse the
+    // valid non-canonical vector with `infinity/not-canonical`; `reencode`
+    // decodes it leniently, re-encodes, and strict-validates the output.
+    // The vector is a non-canonical encoding of the same module as
+    // `simple.ainf`, so the repaired bytes are exactly `simple.ainf`.
+    let bytes = vector("non_canonical.ainf");
+    // SAFETY: the vector is readable.
+    let status = unsafe { active_infinity_validate(bytes.as_ptr(), bytes.len()) };
+    assert_eq!(status, -1);
+    assert_eq!(last_error(), "infinity/not-canonical");
+    let mut hash = [0u8; 32];
+    // SAFETY: the buffer is readable and `hash` is 32 writable bytes.
+    let status =
+        unsafe { active_infinity_content_hash(bytes.as_ptr(), bytes.len(), hash.as_mut_ptr()) };
+    assert_eq!(status, -1);
+    assert_eq!(last_error(), "infinity/not-canonical");
+
+    let mut out = vec![0u8; bytes.len()];
+    let mut out_len = out.len();
+    // SAFETY: out/out_len follow the calling convention.
+    let status = unsafe {
+        active_infinity_reencode(bytes.as_ptr(), bytes.len(), out.as_mut_ptr(), &mut out_len)
+    };
+    assert_eq!(status, 0, "{}", last_error());
+    out.truncate(out_len);
+    let simple = vector("simple.ainf");
+    assert_eq!(out, simple, "the repair must be the canonical encoding");
+    assert_ne!(out, bytes, "the repair must differ from the input");
+    // SAFETY: the repaired bytes are readable.
+    let status = unsafe { active_infinity_validate(out.as_ptr(), out.len()) };
+    assert_eq!(status, 0, "{}", last_error());
+    let mut repaired_hash = [0u8; 32];
+    // SAFETY: the buffer is readable and `repaired_hash` is 32 writable bytes.
+    let status = unsafe {
+        active_infinity_content_hash(out.as_ptr(), out.len(), repaired_hash.as_mut_ptr())
+    };
+    assert_eq!(status, 0, "{}", last_error());
+    assert_eq!(
+        repaired_hash,
+        active_infinity::content_hash(&simple).expect("reference hash")
+    );
+}
+
+#[test]
 fn a_small_buffer_reports_the_required_size() {
     let bytes = vector("full.ainf");
     let mut out_len = 0usize;

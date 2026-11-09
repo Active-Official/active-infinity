@@ -36,7 +36,9 @@ use std::ptr;
 use std::slice;
 use std::sync::Mutex;
 
-use active_infinity::{content_hash, decode, encode, validate, validate_canonical};
+use active_infinity::{
+    content_hash, decode, decode_with, encode, validate, validate_canonical, DecodeOpts,
+};
 
 /// ABI version. Bumped only for an incompatible layout or calling change.
 pub const ABI_VERSION: u32 = 1;
@@ -358,7 +360,14 @@ fn free_tagged(ptr: *mut u8, len: usize) {
     unsafe { std::alloc::dealloc(base, layout) };
 }
 
-/// Validate an AINF image. Returns 0 for a structurally valid image.
+/// Validate an AINF image. Returns 0 only for a structurally valid image
+/// that is exactly the canonical encoding of its own content (INF-02):
+/// the stored hash is verified and the canonical form is re-proved, so a
+/// structurally valid but non-canonical image — slack, or a missing
+/// canonical flag — is refused with `infinity/not-canonical`.
+/// `active_infinity_validate_canonical` states the same requirement
+/// explicitly; `active_infinity_reencode` is the repair path for an image
+/// this function refuses.
 ///
 /// # Safety
 /// `ptr` must point to `len` readable bytes (or be null when `len` is 0).
@@ -385,9 +394,11 @@ pub unsafe extern "C" fn active_infinity_validate(ptr: *const u8, len: usize) ->
 
 /// Prove that an image is the canonical encoding of its own content.
 ///
-/// `active_infinity_validate` checks structure and the stored hash; this also
-/// re-encodes and refuses a structurally valid image that is not canonical.
-/// Dedup and signature checks need this answer.
+/// `active_infinity_validate` already checks structure, the stored hash,
+/// and the canonical form; this states the canonical requirement explicitly
+/// (and, in the library, takes the limits as a parameter) and re-encodes,
+/// refusing a structurally valid image that is not canonical. Dedup and
+/// signature checks need this answer.
 ///
 /// # Safety
 /// `ptr` must point to `len` readable bytes (or be null when `len` is 0).
@@ -412,7 +423,13 @@ pub unsafe extern "C" fn active_infinity_validate_canonical(ptr: *const u8, len:
     })
 }
 
-/// Compute the Blake3 content hash of a valid image into `out32`.
+/// Compute the Blake3 content hash of a canonical image into `out32`.
+///
+/// The hash is computed only for an image that passes the same proof as
+/// `active_infinity_validate`: a structurally valid but non-canonical image
+/// is refused with `infinity/not-canonical` instead of being hashed, because
+/// the hash is the identity of the canonical form. Repair first with
+/// `active_infinity_reencode`, then hash the repaired bytes.
 ///
 /// # Safety
 /// `ptr`/`len` describe a readable image; `out32` must point to 32 writable bytes.
@@ -450,7 +467,19 @@ pub unsafe extern "C" fn active_infinity_content_hash(
 /// Validate, decode and re-encode an image into canonical bytes.
 ///
 /// This is the encode path for a binding that receives AINF from another
-/// producer: the output is byte-identical to what the reference encoder emits.
+/// producer, and the repair path for an image `active_infinity_validate`
+/// refuses: the input need not already be canonical. It is decoded
+/// leniently — the stored hash is still verified, only the canonical-form
+/// proof is skipped (`DecodeOpts { verify_canonical: false, .. }`, the
+/// deliberate opt-out the library documents for migration paths) —
+/// re-encoded, and the OUTPUT is strict-validated before it is returned,
+/// so the output is always canonical and byte-identical to what the
+/// reference encoder emits for that content. A non-canonical input
+/// therefore succeeds and the output differs from the input; that is the
+/// repair, not a failure. This mirrors the schema `from_bytes` pattern
+/// (lenient-decode, re-encode, strict-decode). (NF-INF02-01: the previous
+/// implementation decoded strictly, so it could only ever echo
+/// already-canonical bytes and the repair path was vacuous.)
 ///
 /// # Safety
 /// `ptr`/`len` describe a readable image; `out`/`out_len` follow the calling
@@ -468,7 +497,14 @@ pub unsafe extern "C" fn active_infinity_reencode(
             set_error("infinity/null-input");
             return INVALID;
         };
-        match decode(bytes).and_then(|module| encode(&module)) {
+        let lenient = DecodeOpts {
+            verify_canonical: false,
+            ..DecodeOpts::default()
+        };
+        match decode_with(bytes, lenient)
+            .and_then(|module| encode(&module))
+            .and_then(|canonical| validate(&canonical).map(|_| canonical))
+        {
             // SAFETY: forwarded caller contract for `out`/`out_len`.
             Ok(canonical) => unsafe { write_output(&canonical, out, out_len) },
             Err(error) => {
@@ -542,6 +578,10 @@ pub unsafe extern "C" fn active_infinity_from_active(
 ///
 /// Secret values become the redaction marker; this is the only JSON the library
 /// produces from a module with secrets. Bindings use it for redaction parity.
+/// The input must be canonical (INF-02): a non-canonical image is refused
+/// with `infinity/not-canonical`, the same as `active_infinity_validate`.
+/// Repair it first with `active_infinity_reencode`, then read the repaired
+/// bytes.
 ///
 /// # Safety
 /// `ptr`/`len` describe a readable image; `out`/`out_len` follow the calling

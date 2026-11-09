@@ -33,15 +33,42 @@ for (block in blocks) {
   expected <- captures[4]
 
   image <- readBin(file.path(root, path), "raw", file.size(file.path(root, path)))
-  ai_validate(image)
-  actual <- ai_content_hash_hex(image)
-  if (!identical(actual, expected)) {
-    stop(sprintf("%s: content hash %s, expected %s", name, actual, expected), call. = FALSE)
+  if (identical(name, "non_canonical")) {
+    # NF-INF02-01: validate and content_hash prove the canonical form
+    # (INF-02), so a non-canonical image is refused; reencode is the repair
+    # path.
+    refused <- tryCatch(
+      {
+        ai_validate(image)
+        FALSE
+      },
+      error = function(condition) {
+        grepl("infinity/not-canonical", condition$message, fixed = TRUE)
+      }
+    )
+    if (!isTRUE(refused)) stop("a non-canonical image was validated", call. = FALSE)
+    refused <- tryCatch(
+      {
+        ai_content_hash_hex(image)
+        FALSE
+      },
+      error = function(condition) {
+        grepl("infinity/not-canonical", condition$message, fixed = TRUE)
+      }
+    )
+    if (!isTRUE(refused)) stop("a non-canonical image was hashed", call. = FALSE)
+  } else {
+    ai_validate(image)
+    actual <- ai_content_hash_hex(image)
+    if (!identical(actual, expected)) {
+      stop(sprintf("%s: content hash %s, expected %s", name, actual, expected), call. = FALSE)
+    }
   }
   canonical <- ai_reencode(image)
   same <- identical(canonical, image)
   if (identical(name, "non_canonical")) {
     if (same) stop("a non-canonical image re-encoded unchanged", call. = FALSE)
+    ai_validate(canonical)
   } else if (!same) {
     stop(sprintf("%s: re-encode changed canonical bytes", name), call. = FALSE)
   }

@@ -23,12 +23,33 @@ object Conformance {
       val expected = m.group(2)
       if (path.contains("/valid/")) {
         val image = java.nio.file.Files.readAllBytes(root.toPath.resolve(path))
-        ActiveInfinity.validate(image)
-        val actual = ActiveInfinity.contentHashHex(image)
-        require(actual == expected, s"$path: hash $actual, want $expected")
+        if (path.contains("non_canonical")) {
+          // NF-INF02-01: validate and content_hash prove the canonical
+          // form (INF-02), so a non-canonical image is refused; reencode
+          // is the repair path.
+          try {
+            ActiveInfinity.validate(image)
+            throw new IllegalStateException(path + ": non-canonical image was validated")
+          } catch {
+            case error: ActiveInfinity.Error =>
+              require(error.code() == "infinity/not-canonical", s"$path: wrong code ${error.code()}")
+          }
+          try {
+            ActiveInfinity.contentHashHex(image)
+            throw new IllegalStateException(path + ": non-canonical image was hashed")
+          } catch {
+            case error: ActiveInfinity.Error =>
+              require(error.code() == "infinity/not-canonical", s"$path: wrong code ${error.code()}")
+          }
+        } else {
+          ActiveInfinity.validate(image)
+          val actual = ActiveInfinity.contentHashHex(image)
+          require(actual == expected, s"$path: hash $actual, want $expected")
+        }
         val canonical = ActiveInfinity.reencode(image)
         if (path.contains("non_canonical")) {
           require(!java.util.Arrays.equals(canonical, image), s"$path: expected changed bytes")
+          ActiveInfinity.validate(canonical)
         } else {
           require(java.util.Arrays.equals(canonical, image), s"$path: canonical bytes changed")
         }

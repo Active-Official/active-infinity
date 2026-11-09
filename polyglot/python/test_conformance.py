@@ -25,11 +25,29 @@ def main() -> int:
         if case["kind"] != "valid":
             continue
         image = ai.Image((ROOT / case["path"]).read_bytes())
-        image.validate()
-        assert image.content_hash_hex() == case["content_hash"], case["name"]
+        if case["name"] == "non_canonical":
+            # NF-INF02-01: validate and content_hash prove the canonical
+            # form (INF-02), so a non-canonical image is refused; reencode
+            # is the repair path.
+            try:
+                image.validate()
+            except ai.ActiveInfinityError as error:
+                assert error.code == "infinity/not-canonical", case["name"]
+            else:  # pragma: no cover
+                raise AssertionError("non-canonical image was validated")
+            try:
+                image.content_hash_hex()
+            except ai.ActiveInfinityError as error:
+                assert error.code == "infinity/not-canonical", case["name"]
+            else:  # pragma: no cover
+                raise AssertionError("non-canonical image was hashed")
+        else:
+            image.validate()
+            assert image.content_hash_hex() == case["content_hash"], case["name"]
         canonical = image.reencode()
         if case["name"] == "non_canonical":
             assert canonical != image.data
+            ai.Image(canonical).validate()
         else:
             assert canonical == image.data, case["name"]
         checked += 1

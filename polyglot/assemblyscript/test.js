@@ -2,7 +2,7 @@
  * AssemblyScript conformance test.
  *
  * Build the AS module first:
- *   npx --yes assemblyscript@0.27.31 asc \
+ *   npx --yes -p assemblyscript@0.27.31 asc \
  *     polyglot/assemblyscript/assembly/index.ts \
  *     -o polyglot/assemblyscript/build/conformance.wasm --optimize
  *
@@ -51,12 +51,21 @@ async function main() {
 		if (entry.kind !== "valid") continue;
 		const image = new Uint8Array(fs.readFileSync(path.join(ROOT, entry.path)));
 		const pointer = alloc(image);
-		assert.strictEqual(exports.validate(pointer, image.length), 0, entry.name);
-
 		const hash = exports.allocate(32);
-		assert.strictEqual(exports.contentHash(pointer, image.length, hash), 0);
-		const hex = Buffer.from(memory().slice(hash, hash + 32)).toString("hex");
-		assert.strictEqual(hex, entry.content_hash, entry.name);
+		if (entry.name === "non_canonical") {
+			// NF-INF02-01: validate and content_hash prove the canonical
+			// form (INF-02), so a non-canonical image is refused; reencode
+			// is the repair path.
+			assert.strictEqual(exports.validate(pointer, image.length), -1, entry.name);
+			assert.strictEqual(reference.lastError(), "infinity/not-canonical", entry.name);
+			assert.strictEqual(exports.contentHash(pointer, image.length, hash), -1, entry.name);
+			assert.strictEqual(reference.lastError(), "infinity/not-canonical", entry.name);
+		} else {
+			assert.strictEqual(exports.validate(pointer, image.length), 0, entry.name);
+			assert.strictEqual(exports.contentHash(pointer, image.length, hash), 0);
+			const hex = Buffer.from(memory().slice(hash, hash + 32)).toString("hex");
+			assert.strictEqual(hex, entry.content_hash, entry.name);
+		}
 
 		const capacity = image.length * 2 + 1024;
 		const outLength = exports.allocate(4);
@@ -76,6 +85,8 @@ async function main() {
 		const canonical = Buffer.from(memory().slice(output, output + written));
 		if (entry.name === "non_canonical") {
 			assert.notDeepStrictEqual(canonical, Buffer.from(image));
+			const repaired = alloc(canonical);
+			assert.strictEqual(exports.validate(repaired, canonical.length), 0, entry.name);
 		} else {
 			assert.deepStrictEqual(canonical, Buffer.from(image), entry.name);
 		}

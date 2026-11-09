@@ -3,7 +3,8 @@
  *
  * Compile and run from the repository root:
  *   npx -p typescript@5.7.2 tsc -p polyglot/ts/tsconfig.json
- *   node polyglot/ts/out/conformance.js
+ *   node polyglot/ts-build/conformance.js
+ * (tsconfig.json sets outDir to ../ts-build.)
  */
 
 declare const require: any;
@@ -47,15 +48,34 @@ async function main(): Promise<void> {
 	for (const entry of manifest.cases) {
 		if (entry.kind !== "valid") continue;
 		const image = new Uint8Array(fs.readFileSync(path.join(ROOT, entry.path)));
-		binding.validate(image);
-		const hash = Buffer.from(binding.contentHash(image)).toString("hex");
-		assert.strictEqual(hash, entry.content_hash, entry.name);
+		if (entry.name === "non_canonical") {
+			// NF-INF02-01: validate and content_hash prove the canonical
+			// form (INF-02), so a non-canonical image is refused; reencode
+			// is the repair path.
+			assert.throws(
+				() => binding.validate(image),
+				(error: unknown) =>
+					error instanceof ActiveInfinityError &&
+					error.code === "infinity/not-canonical",
+			);
+			assert.throws(
+				() => binding.contentHash(image),
+				(error: unknown) =>
+					error instanceof ActiveInfinityError &&
+					error.code === "infinity/not-canonical",
+			);
+		} else {
+			binding.validate(image);
+			const hash = Buffer.from(binding.contentHash(image)).toString("hex");
+			assert.strictEqual(hash, entry.content_hash, entry.name);
+		}
 		const canonical = Buffer.from(binding.reencode(image));
 		if (entry.name === "non_canonical") {
 			assert.notStrictEqual(
 				canonical.toString("hex"),
 				Buffer.from(image).toString("hex"),
 			);
+			binding.validate(canonical);
 		} else {
 			assert.deepStrictEqual(canonical, Buffer.from(image), entry.name);
 		}

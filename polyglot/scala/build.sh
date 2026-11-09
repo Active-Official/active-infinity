@@ -20,7 +20,12 @@ fi
 
 cd "$ROOT"
 rm -rf polyglot/scala/.scala-build
-"$SCALA_CLI" run polyglot/scala \
+# NF-XPL06-01: the JVM loads the JNI bridge via java.library.path, but the
+# bridge's own dependency (active_infinity_ffi.dll on Windows) is found
+# only via PATH — a plain LoadLibrary does not search the loaded module's
+# directory. Without this the run fails with "Can't find dependent
+# libraries".
+PATH="$JAVA_OUT:$PATH" "$SCALA_CLI" run polyglot/scala \
   --classpath "$JAVA_OUT/classes" \
   --java-opt "-Djava.library.path=$JAVA_OUT" \
   --main-class Conformance \

@@ -28,16 +28,39 @@ public final class Conformance {
                 continue;
             }
             byte[] image = Files.readAllBytes(root.resolve(path));
-            ActiveInfinity.validate(image);
-            String actual = ActiveInfinity.contentHashHex(image);
-            if (!actual.equals(expected)) {
-                throw new IllegalStateException(path + ": hash " + actual + ", want " + expected);
+            if (path.contains("non_canonical")) {
+                // NF-INF02-01: validate and content_hash prove the canonical
+                // form (INF-02), so a non-canonical image is refused;
+                // reencode is the repair path.
+                try {
+                    ActiveInfinity.validate(image);
+                    throw new IllegalStateException(path + ": non-canonical image was validated");
+                } catch (ActiveInfinity.Error error) {
+                    if (!error.code().equals("infinity/not-canonical")) {
+                        throw new IllegalStateException(path + ": wrong code " + error.code());
+                    }
+                }
+                try {
+                    ActiveInfinity.contentHashHex(image);
+                    throw new IllegalStateException(path + ": non-canonical image was hashed");
+                } catch (ActiveInfinity.Error error) {
+                    if (!error.code().equals("infinity/not-canonical")) {
+                        throw new IllegalStateException(path + ": wrong code " + error.code());
+                    }
+                }
+            } else {
+                ActiveInfinity.validate(image);
+                String actual = ActiveInfinity.contentHashHex(image);
+                if (!actual.equals(expected)) {
+                    throw new IllegalStateException(path + ": hash " + actual + ", want " + expected);
+                }
             }
             byte[] canonical = ActiveInfinity.reencode(image);
             if (path.contains("non_canonical")) {
                 if (Arrays.equals(canonical, image)) {
                     throw new IllegalStateException(path + ": expected changed bytes");
                 }
+                ActiveInfinity.validate(canonical);
             } else if (!Arrays.equals(canonical, image)) {
                 throw new IllegalStateException(path + ": canonical bytes changed");
             }

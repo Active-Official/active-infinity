@@ -29,12 +29,45 @@ foreach (JsonElement entry in manifest.RootElement.GetProperty("cases").Enumerat
     string name = entry.GetProperty("name").GetString()!;
     string path = Path.Combine(root, entry.GetProperty("path").GetString()!);
     Image image = Image.FromFile(path);
-    image.Validate();
-
-    string expected = entry.GetProperty("content_hash").GetString()!;
-    if (image.ContentHashHex() != expected)
+    if (name == "non_canonical")
     {
-        throw new Exception($"{name}: content hash mismatch");
+        // NF-INF02-01: validate and content_hash prove the canonical form
+        // (INF-02), so a non-canonical image is refused; reencode is the
+        // repair path.
+        try
+        {
+            image.Validate();
+            throw new Exception($"{name}: non-canonical image was validated");
+        }
+        catch (ActiveInfinityException error)
+        {
+            if (error.Code != "infinity/not-canonical")
+            {
+                throw new Exception($"{name}: wrong code {error.Code}");
+            }
+        }
+        try
+        {
+            image.ContentHashHex();
+            throw new Exception($"{name}: non-canonical image was hashed");
+        }
+        catch (ActiveInfinityException error)
+        {
+            if (error.Code != "infinity/not-canonical")
+            {
+                throw new Exception($"{name}: wrong code {error.Code}");
+            }
+        }
+    }
+    else
+    {
+        image.Validate();
+
+        string expected = entry.GetProperty("content_hash").GetString()!;
+        if (image.ContentHashHex() != expected)
+        {
+            throw new Exception($"{name}: content hash mismatch");
+        }
     }
 
     byte[] canonical = image.Reencode();
@@ -44,6 +77,7 @@ foreach (JsonElement entry in manifest.RootElement.GetProperty("cases").Enumerat
         {
             throw new Exception($"{name}: expected re-encoding to change bytes");
         }
+        new Image(canonical).Validate();
     }
     else if (!canonical.AsSpan().SequenceEqual(image.Bytes))
     {

@@ -35,9 +35,25 @@ async function main() {
 	for (const entry of manifest.cases) {
 		if (entry.kind !== "valid") continue;
 		const image = fs.readFileSync(path.join(ROOT, entry.path));
-		module.validate(image);
-		const hash = Buffer.from(module.contentHash(image)).toString("hex");
-		assert.strictEqual(hash, entry.content_hash, `${entry.name}: content hash`);
+		if (entry.name === "non_canonical") {
+			// NF-INF02-01: validate and content_hash prove the canonical
+			// form (INF-02), so a non-canonical image is refused; reencode
+			// is the repair path.
+			assert.throws(
+				() => module.validate(image),
+				(error) => error.code === "infinity/not-canonical",
+				`${entry.name}: validate must refuse a non-canonical image`,
+			);
+			assert.throws(
+				() => module.contentHash(image),
+				(error) => error.code === "infinity/not-canonical",
+				`${entry.name}: contentHash must refuse a non-canonical image`,
+			);
+		} else {
+			module.validate(image);
+			const hash = Buffer.from(module.contentHash(image)).toString("hex");
+			assert.strictEqual(hash, entry.content_hash, `${entry.name}: content hash`);
+		}
 
 		const canonical = Buffer.from(module.reencode(image));
 		if (entry.name === "non_canonical") {

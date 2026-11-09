@@ -33,15 +33,38 @@ foreach ($manifest['cases'] as $entry) {
         continue;
     }
     $image = file_get_contents($root . '/' . $entry['path']);
-    $binding->validate($image);
-    if ($binding->contentHashHex($image) !== $entry['content_hash']) {
-        throw new RuntimeException($entry['name'] . ': content hash mismatch');
+    if ($entry['name'] === 'non_canonical') {
+        // NF-INF02-01: validate and content_hash prove the canonical form
+        // (INF-02), so a non-canonical image is refused; reencode is the
+        // repair path.
+        try {
+            $binding->validate($image);
+            throw new RuntimeException($entry['name'] . ': non-canonical image was validated');
+        } catch (ActiveInfinityError $error) {
+            if ($error->errorCode !== 'infinity/not-canonical') {
+                throw new RuntimeException($entry['name'] . ': wrong code ' . $error->errorCode);
+            }
+        }
+        try {
+            $binding->contentHashHex($image);
+            throw new RuntimeException($entry['name'] . ': non-canonical image was hashed');
+        } catch (ActiveInfinityError $error) {
+            if ($error->errorCode !== 'infinity/not-canonical') {
+                throw new RuntimeException($entry['name'] . ': wrong code ' . $error->errorCode);
+            }
+        }
+    } else {
+        $binding->validate($image);
+        if ($binding->contentHashHex($image) !== $entry['content_hash']) {
+            throw new RuntimeException($entry['name'] . ': content hash mismatch');
+        }
     }
     $canonical = $binding->reencode($image);
     if ($entry['name'] === 'non_canonical') {
         if ($canonical === $image) {
             throw new RuntimeException($entry['name'] . ': expected changed bytes');
         }
+        $binding->validate($canonical);
     } elseif ($canonical !== $image) {
         throw new RuntimeException($entry['name'] . ': canonical bytes changed');
     }

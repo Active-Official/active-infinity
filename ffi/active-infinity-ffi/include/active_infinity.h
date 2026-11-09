@@ -101,20 +101,34 @@ const char *active_infinity_last_error(void);
 uint8_t *active_infinity_alloc(size_t len);
 void active_infinity_free(uint8_t *ptr, size_t len);
 
-/* Validate an AINF image. Returns 0 for a structurally valid image. */
+/* Validate an AINF image. Returns 0 only for a structurally valid image
+ * that is exactly the canonical encoding of its own content (INF-02):
+ * the stored hash is verified and the canonical form is re-proved, so a
+ * structurally valid but non-canonical image is refused with
+ * `infinity/not-canonical`. `active_infinity_reencode` is the repair path
+ * for an image this function refuses. */
 int32_t active_infinity_validate(const uint8_t *ptr, size_t len);
 
-/* Validate and prove the canonical form (re-encodes to the same bytes). */
+/* Validate and prove the canonical form (re-encodes to the same bytes).
+ * `active_infinity_validate` already proves the canonical form; this
+ * states the requirement explicitly. */
 int32_t active_infinity_validate_canonical(const uint8_t *ptr, size_t len);
 
-/* Compute the 32-byte Blake3 content hash of a valid image. The value is the
- * byte identity: it equals the header's stored hash and the reference
- * `content_hash(bytes)`. Canonical form is a separate question, answered by
- * active_infinity_validate_canonical and by signature verification. */
+/* Compute the 32-byte Blake3 content hash of a canonical image. The value
+ * is the byte identity: it equals the header's stored hash and the
+ * reference `content_hash(bytes)`. A non-canonical image is refused with
+ * `infinity/not-canonical` instead of being hashed, because the hash is
+ * the identity of the canonical form: repair first with
+ * `active_infinity_reencode`, then hash the repaired bytes. */
 int32_t active_infinity_content_hash(const uint8_t *ptr, size_t len,
                                      uint8_t out32[32]);
 
-/* Validate, decode and re-encode into canonical AINF bytes. */
+/* Validate, decode and re-encode into canonical AINF bytes. The input need
+ * not already be canonical: it is decoded leniently (the stored hash is
+ * still verified, only the canonical-form proof is skipped), re-encoded,
+ * and the output is strict-validated before it is returned, so the output
+ * is always canonical. A non-canonical input therefore succeeds and the
+ * output differs from the input: this is the repair path. */
 int32_t active_infinity_reencode(const uint8_t *ptr, size_t len, uint8_t *out,
                                  size_t *out_len);
 
@@ -124,7 +138,10 @@ int32_t active_infinity_from_active(const uint8_t *source, size_t source_len,
                                     const char *name, uint8_t *out,
                                     size_t *out_len);
 
-/* Redacted JSON projection: secret values become the redaction marker. */
+/* Redacted JSON projection: secret values become the redaction marker.
+ * The input must be canonical (INF-02): a non-canonical image is refused
+ * with `infinity/not-canonical`. Repair it first with
+ * `active_infinity_reencode`. */
 int32_t active_infinity_redacted_json(const uint8_t *ptr, size_t len,
                                       uint8_t *out, size_t *out_len);
 

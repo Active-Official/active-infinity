@@ -148,15 +148,38 @@ func main() throws {
               let name = entry["name"] as? String
         else { continue }
         let image = try Image.fromFile("\(root)/\(path)")
-        try image.validate()
-        if try image.contentHashHex() != expected {
-            throw ActiveInfinityError.failure(code: "infinity/\(name)-hash", status: -1)
+        if name == "non_canonical" {
+            // NF-INF02-01: validate and content_hash prove the canonical
+            // form (INF-02), so a non-canonical image is refused; reencode
+            // is the repair path.
+            do {
+                try image.validate()
+                throw ActiveInfinityError.failure(code: "infinity/accepted", status: -1)
+            } catch let error as ActiveInfinityError {
+                if case let .failure(code, _) = error, code != "infinity/not-canonical" {
+                    throw error
+                }
+            }
+            do {
+                _ = try image.contentHashHex()
+                throw ActiveInfinityError.failure(code: "infinity/accepted", status: -1)
+            } catch let error as ActiveInfinityError {
+                if case let .failure(code, _) = error, code != "infinity/not-canonical" {
+                    throw error
+                }
+            }
+        } else {
+            try image.validate()
+            if try image.contentHashHex() != expected {
+                throw ActiveInfinityError.failure(code: "infinity/\(name)-hash", status: -1)
+            }
         }
         let canonical = try image.reencode()
         if name == "non_canonical" {
             if canonical == image.bytes {
                 throw ActiveInfinityError.failure(code: "infinity/non-canonical", status: -1)
             }
+            try Image(bytes: canonical).validate()
         } else if canonical != image.bytes {
             throw ActiveInfinityError.failure(code: "infinity/\(name)-bytes", status: -1)
         }

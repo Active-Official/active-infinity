@@ -14,12 +14,30 @@ manifest["cases"].each do |entry|
   next unless entry["kind"] == "valid"
 
   image = ActiveInfinity::Image.from_file(File.join(root, entry["path"]))
-  image.validate
-  raise "#{entry['name']}: hash mismatch" unless image.content_hash_hex == entry["content_hash"]
+  if entry["name"] == "non_canonical"
+    # NF-INF02-01: validate and content_hash prove the canonical form
+    # (INF-02), so a non-canonical image is refused; reencode repairs it.
+    begin
+      image.validate
+      raise "#{entry['name']}: non-canonical image was validated"
+    rescue ActiveInfinity::Error => e
+      raise "#{entry['name']}: wrong code #{e.code}" unless e.code == "infinity/not-canonical"
+    end
+    begin
+      image.content_hash_hex
+      raise "#{entry['name']}: non-canonical image was hashed"
+    rescue ActiveInfinity::Error => e
+      raise "#{entry['name']}: wrong code #{e.code}" unless e.code == "infinity/not-canonical"
+    end
+  else
+    image.validate
+    raise "#{entry['name']}: hash mismatch" unless image.content_hash_hex == entry["content_hash"]
+  end
 
   canonical = image.reencode
   if entry["name"] == "non_canonical"
     raise "#{entry['name']}: expected changed bytes" if canonical == image.bytes
+    ActiveInfinity::Image.new(canonical).validate
   elsif canonical != image.bytes
     raise "#{entry['name']}: canonical bytes changed"
   end

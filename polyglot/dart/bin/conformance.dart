@@ -18,15 +18,34 @@ void main() {
   for (final entry in cases) {
     if (entry['kind'] != 'valid') continue;
     final image = Image.fromFile('$root/${entry['path']}');
-    image.validate();
-    if (image.contentHashHex() != entry['content_hash']) {
-      throw StateError('${entry['name']}: content hash mismatch');
+    if (entry['name'] == 'non_canonical') {
+      // NF-INF02-01: validate and content_hash prove the canonical form
+      // (INF-02), so a non-canonical image is refused; reencode is the
+      // repair path.
+      try {
+        image.validate();
+        throw StateError('${entry['name']}: non-canonical image was validated');
+      } on ActiveInfinityException catch (error) {
+        if (error.code != 'infinity/not-canonical') rethrow;
+      }
+      try {
+        image.contentHashHex();
+        throw StateError('${entry['name']}: non-canonical image was hashed');
+      } on ActiveInfinityException catch (error) {
+        if (error.code != 'infinity/not-canonical') rethrow;
+      }
+    } else {
+      image.validate();
+      if (image.contentHashHex() != entry['content_hash']) {
+        throw StateError('${entry['name']}: content hash mismatch');
+      }
     }
     final canonical = image.reencode();
     if (entry['name'] == 'non_canonical') {
       if (String.fromCharCodes(canonical) == String.fromCharCodes(image.bytes)) {
         throw StateError('${entry['name']}: expected changed bytes');
       }
+      Image(canonical).validate();
     } else if (!_equal(canonical, image.bytes)) {
       throw StateError('${entry['name']}: canonical bytes changed');
     }

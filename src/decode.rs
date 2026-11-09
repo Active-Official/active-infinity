@@ -20,7 +20,11 @@ use crate::ir::{
 use crate::layout::{DecodeOpts, ANN_KIND_AI_IMMUTABLE, ANN_KIND_CONSTRAINT, ANN_KIND_INTENT};
 use crate::validate::Validated;
 
-/// Decode with default options (hash verified, canonical form not re-proved).
+/// Decode with default options (hash verified, canonical form proved --
+/// INF-02). Use `decode_with(bytes, DecodeOpts { verify_canonical: false,
+/// ..Default::default() })` for the lenient path on trusted or migration
+/// input: the hash is still verified, only the canonical-form proof is
+/// skipped.
 pub fn decode(bytes: &[u8]) -> Result<InfinityModule> {
     decode_with(bytes, DecodeOpts::default())
 }

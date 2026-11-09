@@ -124,30 +124,34 @@ check-case.
         perform fail-now
     end-if
 
-    call static "active_infinity_validate" using
-        by reference ws-image
-        by value ws-image-length
-        returning ws-status
-    if ws-status not = 0
-        move "validate refused a valid vector" to ws-reason
-        perform fail-now
-    end-if
+    if ws-case-name(1:13) = "non_canonical"
+        perform check-non-canonical-refusals
+    else
+        call static "active_infinity_validate" using
+            by reference ws-image
+            by value ws-image-length
+            returning ws-status
+        if ws-status not = 0
+            move "validate refused a valid vector" to ws-reason
+            perform fail-now
+        end-if
 
-    call static "active_infinity_content_hash" using
-        by reference ws-image
-        by value ws-image-length
-        by reference ws-digest
-        returning ws-status
-    if ws-status not = 0
-        move "content_hash failed" to ws-reason
-        perform fail-now
-    end-if
-    call static "ai_cobol_hex32" using
-        by reference ws-digest
-        by reference ws-digest-hex
-    if ws-digest-hex not = ws-expected(1:64)
-        move "content hash mismatch" to ws-reason
-        perform fail-now
+        call static "active_infinity_content_hash" using
+            by reference ws-image
+            by value ws-image-length
+            by reference ws-digest
+            returning ws-status
+        if ws-status not = 0
+            move "content_hash failed" to ws-reason
+            perform fail-now
+        end-if
+        call static "ai_cobol_hex32" using
+            by reference ws-digest
+            by reference ws-digest-hex
+        if ws-digest-hex not = ws-expected(1:64)
+            move "content hash mismatch" to ws-reason
+            perform fail-now
+        end-if
     end-if
 
     move 0 to ws-out-cap
@@ -177,6 +181,14 @@ check-case.
             move "non-canonical image re-encoded unchanged" to ws-reason
             perform fail-now
         end-if
+        call static "active_infinity_validate" using
+            by reference ws-out
+            by value ws-out-cap
+            returning ws-status
+        if ws-status not = 0
+            move "repaired bytes do not validate" to ws-reason
+            perform fail-now
+        end-if
     else
         if ws-out-cap not = ws-image-length
             move "re-encode changed the canonical length" to ws-reason
@@ -186,6 +198,41 @@ check-case.
             move "re-encode changed canonical bytes" to ws-reason
             perform fail-now
         end-if
+    end-if.
+
+check-non-canonical-refusals.
+    *> NF-INF02-01: validate and content_hash prove the canonical form
+    *> (INF-02), so a non-canonical image is refused; reencode repairs it.
+    call static "active_infinity_validate" using
+        by reference ws-image
+        by value ws-image-length
+        returning ws-status
+    if ws-status = 0
+        move "non-canonical image was validated" to ws-reason
+        perform fail-now
+    end-if
+    call static "ai_cobol_last_error" using
+        by reference ws-error
+        by value ws-error-cap
+    if ws-error(1:22) not = "infinity/not-canonical"
+        move "validate refused with the wrong code" to ws-reason
+        perform fail-now
+    end-if
+    call static "active_infinity_content_hash" using
+        by reference ws-image
+        by value ws-image-length
+        by reference ws-digest
+        returning ws-status
+    if ws-status = 0
+        move "non-canonical image was hashed" to ws-reason
+        perform fail-now
+    end-if
+    call static "ai_cobol_last_error" using
+        by reference ws-error
+        by value ws-error-cap
+    if ws-error(1:22) not = "infinity/not-canonical"
+        move "content_hash refused with the wrong code" to ws-reason
+        perform fail-now
     end-if.
 
 check-from-active.

@@ -56,9 +56,16 @@ program conformance
     position = hash_at + 64
 
     call read_bytes(path, image)
-    status = ai_validate(c_loc(image), int(size(image), c_size_t))
-    if (status /= ai_ok) call fail("validate " // path)
-    if (hash_hex(image) /= expected) call fail("content hash " // path)
+    if (trim(name) == "non_canonical") then
+      ! NF-INF02-01: validate and content_hash prove the canonical form
+      ! (INF-02), so a non-canonical image is refused; reencode repairs it.
+      call expect_validate_refusal(image)
+      call expect_hash_refusal(image)
+    else
+      status = ai_validate(c_loc(image), int(size(image), c_size_t))
+      if (status /= ai_ok) call fail("validate " // path)
+      if (hash_hex(image) /= expected) call fail("content hash " // path)
+    end if
     call check_reencode(image, trim(name))
     checked = checked + 1
   end do
@@ -134,9 +141,32 @@ contains
     same = int(capacity) == size(data) .and. all(out(1:int(capacity)) == data)
     if (name == "non_canonical") then
       if (same) call fail("non-canonical image re-encoded unchanged")
+      status = ai_validate(c_loc(out), capacity)
+      if (status /= ai_ok) call fail("repaired bytes do not validate " // name)
     else if (.not. same) then
       call fail("re-encode changed canonical bytes: " // name)
     end if
+  end subroutine
+
+  subroutine expect_validate_refusal(data)
+    integer(c_int8_t), allocatable, target, intent(in) :: data(:)
+    integer(c_int32_t) :: status
+    character(len=:), allocatable :: code
+    status = ai_validate(c_loc(data), int(size(data), c_size_t))
+    if (status /= ai_invalid) call fail("non-canonical image was validated")
+    call last_error_text(code)
+    if (code /= "infinity/not-canonical") call fail("wrong code for validate: " // code)
+  end subroutine
+
+  subroutine expect_hash_refusal(data)
+    integer(c_int8_t), allocatable, target, intent(in) :: data(:)
+    integer(c_int8_t), target :: digest(32)
+    integer(c_int32_t) :: status
+    character(len=:), allocatable :: code
+    status = ai_content_hash(c_loc(data), int(size(data), c_size_t), c_loc(digest))
+    if (status /= ai_invalid) call fail("non-canonical image was hashed")
+    call last_error_text(code)
+    if (code /= "infinity/not-canonical") call fail("wrong code for content_hash: " // code)
   end subroutine
 
   subroutine check_from_active()

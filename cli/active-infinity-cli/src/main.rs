@@ -943,6 +943,19 @@ fn check_case(kind: &str, bytes: &[u8], case: &serde_json::Value) -> Result<(), 
             {
                 return Err("re-encode differs".to_string());
             }
+            if !canonical {
+                // NF-INF02-01: the non-canonical case must also prove the
+                // repair: re-encoding the leniently decoded module yields
+                // canonical bytes that differ from the input and pass the
+                // strict proof.
+                let repaired =
+                    encode(&decoded).map_err(|error| format!("{}: {error}", error.code()))?;
+                if repaired == bytes {
+                    return Err("non-canonical case re-encoded unchanged".to_string());
+                }
+                validate_with(&repaired, DecodeOpts::default())
+                    .map_err(|error| format!("repair did not validate: {}", error.code()))?;
+            }
             Ok(())
         }
         "invalid" => {

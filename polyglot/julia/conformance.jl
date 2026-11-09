@@ -26,12 +26,37 @@ function main()
     checked = 0
     for (name, path, expected) in cases
         data = read(joinpath(ROOT, path))
-        validate(data)
-        actual = content_hash_hex(data)
-        actual == expected || error("$name: content hash $actual, expected $expected")
+        if name == "non_canonical"
+            # NF-INF02-01: validate and content_hash prove the canonical
+            # form (INF-02), so a non-canonical image is refused; reencode
+            # is the repair path.
+            refused = false
+            try
+                validate(data)
+            catch failure
+                failure isa ActiveInfinityError || rethrow()
+                failure.code == "infinity/not-canonical" || error("$name: wrong code $(failure.code)")
+                refused = true
+            end
+            refused || error("$name: non-canonical image was validated")
+            refused = false
+            try
+                content_hash_hex(data)
+            catch failure
+                failure isa ActiveInfinityError || rethrow()
+                failure.code == "infinity/not-canonical" || error("$name: wrong code $(failure.code)")
+                refused = true
+            end
+            refused || error("$name: non-canonical image was hashed")
+        else
+            validate(data)
+            actual = content_hash_hex(data)
+            actual == expected || error("$name: content hash $actual, expected $expected")
+        end
         canonical = reencode(data)
         if name == "non_canonical"
             canonical == data && error("$name: a non-canonical image re-encoded unchanged")
+            validate(canonical)
         else
             canonical == data || error("$name: re-encode changed canonical bytes")
         end

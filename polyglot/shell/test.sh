@@ -49,11 +49,34 @@ rows=${rows//$'\r'/}
 checked=0
 while IFS=$'\t' read -r path expected_hash; do
   [ -n "$path" ] || continue
-  "$CLI" validate "$path" >/dev/null
-  actual_hash=$("$CLI" hash "$path" | tr -d '\r')
-  if [ "$actual_hash" != "$expected_hash" ]; then
-    echo "content hash mismatch for $path: expected $expected_hash, got $actual_hash" >&2
-    exit 1
+  if [[ "$path" == *non_canonical* ]]; then
+    # NF-INF02-01: validate and hash prove the canonical form (INF-02),
+    # so a non-canonical image is refused; the repair itself is proven by
+    # `conformance run` above, which checks the vector leniently and
+    # re-encodes it.
+    if out=$("$CLI" validate "$path" 2>&1); then
+      echo "non-canonical image was validated: $path" >&2
+      exit 1
+    fi
+    case "$out" in
+      *infinity/not-canonical*) ;;
+      *) echo "validate refused $path with the wrong code: $out" >&2; exit 1 ;;
+    esac
+    if out=$("$CLI" hash "$path" 2>&1); then
+      echo "non-canonical image was hashed: $path" >&2
+      exit 1
+    fi
+    case "$out" in
+      *infinity/not-canonical*) ;;
+      *) echo "hash refused $path with the wrong code: $out" >&2; exit 1 ;;
+    esac
+  else
+    "$CLI" validate "$path" >/dev/null
+    actual_hash=$("$CLI" hash "$path" | tr -d '\r')
+    if [ "$actual_hash" != "$expected_hash" ]; then
+      echo "content hash mismatch for $path: expected $expected_hash, got $actual_hash" >&2
+      exit 1
+    fi
   fi
   checked=$((checked + 1))
 done <<<"$rows"

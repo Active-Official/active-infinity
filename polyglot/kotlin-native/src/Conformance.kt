@@ -172,28 +172,51 @@ fun main() {
         val expected = match.groupValues[2]
         if (!path.contains("/valid/")) continue
         val image = readFile("$root/$path")
-        withInput(abi, image) { pointer, length ->
-            val status = abi.validate(pointer, length)
-            if (status != 0) failure(abi, status)
-        }
-
-        val hash = ByteArray(32)
-        withInput(abi, image) { pointer, length ->
-            hash.usePinned { pinned ->
-                val status = abi.hash(pointer, length, pinned.addressOf(0).reinterpret())
+        if (path.contains("non_canonical")) {
+            // NF-INF02-01: validate and content_hash prove the canonical
+            // form (INF-02), so a non-canonical image is refused; reencode
+            // is the repair path.
+            withInput(abi, image) { pointer, length ->
+                val status = abi.validate(pointer, length)
+                if (status == 0) error("$path: non-canonical image was validated")
+                check(lastError(abi) == "infinity/not-canonical") { "$path: wrong code ${lastError(abi)}" }
+            }
+            val hash = ByteArray(32)
+            withInput(abi, image) { pointer, length ->
+                hash.usePinned { pinned ->
+                    val status = abi.hash(pointer, length, pinned.addressOf(0).reinterpret())
+                    if (status == 0) error("$path: non-canonical image was hashed")
+                    check(lastError(abi) == "infinity/not-canonical") { "$path: wrong code ${lastError(abi)}" }
+                }
+            }
+        } else {
+            withInput(abi, image) { pointer, length ->
+                val status = abi.validate(pointer, length)
                 if (status != 0) failure(abi, status)
             }
+
+            val hash = ByteArray(32)
+            withInput(abi, image) { pointer, length ->
+                hash.usePinned { pinned ->
+                    val status = abi.hash(pointer, length, pinned.addressOf(0).reinterpret())
+                    if (status != 0) failure(abi, status)
+                }
+            }
+            val actual = hash.joinToString("") {
+                it.toInt().and(0xff).toString(16).padStart(2, '0')
+            }
+            check(actual == expected) { "$path: hash $actual, want $expected" }
         }
-        val actual = hash.joinToString("") {
-            it.toInt().and(0xff).toString(16).padStart(2, '0')
-        }
-        check(actual == expected) { "$path: hash $actual, want $expected" }
 
         val canonical = output(abi, image) { input, length, out, size ->
             abi.reencode(input, length, out, size)
         }
         if (path.contains("non_canonical")) {
             check(!canonical.contentEquals(image)) { "$path: expected changed bytes" }
+            withInput(abi, canonical) { pointer, length ->
+                val status = abi.validate(pointer, length)
+                if (status != 0) failure(abi, status)
+            }
         } else {
             check(canonical.contentEquals(image)) { "$path: canonical bytes changed" }
         }

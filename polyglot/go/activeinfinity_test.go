@@ -67,15 +67,31 @@ func TestConformance(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := instance.Validate(ctx, image); err != nil {
-			t.Fatalf("%s: %v", entry.Name, err)
-		}
-		hash, err := instance.ContentHashHex(ctx, image)
-		if err != nil {
-			t.Fatalf("%s: %v", entry.Name, err)
-		}
-		if hash != entry.ContentHash {
-			t.Fatalf("%s: hash %s, want %s", entry.Name, hash, entry.ContentHash)
+		if entry.Name == "non_canonical" {
+			// NF-INF02-01: validate and content_hash prove the canonical
+			// form (INF-02), so a non-canonical image is refused; reencode
+			// is the repair path.
+			if err := instance.Validate(ctx, image); err == nil {
+				t.Fatalf("%s: non-canonical image was validated", entry.Name)
+			} else if failure, ok := err.(*Error); !ok || failure.Code != "infinity/not-canonical" {
+				t.Fatalf("%s: wrong code %v", entry.Name, err)
+			}
+			if _, err := instance.ContentHashHex(ctx, image); err == nil {
+				t.Fatalf("%s: non-canonical image was hashed", entry.Name)
+			} else if failure, ok := err.(*Error); !ok || failure.Code != "infinity/not-canonical" {
+				t.Fatalf("%s: wrong code %v", entry.Name, err)
+			}
+		} else {
+			if err := instance.Validate(ctx, image); err != nil {
+				t.Fatalf("%s: %v", entry.Name, err)
+			}
+			hash, err := instance.ContentHashHex(ctx, image)
+			if err != nil {
+				t.Fatalf("%s: %v", entry.Name, err)
+			}
+			if hash != entry.ContentHash {
+				t.Fatalf("%s: hash %s, want %s", entry.Name, hash, entry.ContentHash)
+			}
 		}
 		canonical, err := instance.Reencode(ctx, image)
 		if err != nil {
@@ -84,6 +100,9 @@ func TestConformance(t *testing.T) {
 		if entry.Name == "non_canonical" {
 			if string(canonical) == string(image) {
 				t.Fatalf("%s: expected re-encoding to change bytes", entry.Name)
+			}
+			if err := instance.Validate(ctx, canonical); err != nil {
+				t.Fatalf("%s: repaired bytes do not validate: %v", entry.Name, err)
 			}
 		} else if string(canonical) != string(image) {
 			t.Fatalf("%s: canonical bytes changed", entry.Name)

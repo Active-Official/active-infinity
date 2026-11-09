@@ -19,3 +19,9 @@ active-infinity = { path = "../..", version = "2.3.0", features = ["active-core"
 # `active-core` reaches getrandom 0.2. The custom backend keeps the WASM module
 # free of wasm-bindgen glue: the host supplies one `active_random_fill` import.
 getrandom = { version = "0.2", features = ["custom"] }
+
+[lints.rust]
+# `cfg(fuzzing)` is set by cargo-fuzz (`--cfg fuzzing` in its RUSTFLAGS);
+# declare it so stable builds do not warn `unexpected_cfgs` on the
+# Windows fuzz-build `main` fallback shim (`active_infinity_ffi_main_shim`) in src/lib.rs (INF-POLY-05).
+unexpected_cfgs = { level = "allow", check-cfg = ['cfg(fuzzing)'] }

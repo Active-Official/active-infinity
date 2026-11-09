@@ -35,10 +35,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "active-infinity-cli"
+version = "0.3.1"
+dependencies = [
+ "active-infinity",
+ "serde_json",
+ "sha2",
+ "zeroize",
+]
+
+[[package]]
+name = "active-infinity-ffi"
+version = "0.1.0"
+dependencies = [
+ "active-infinity",
+ "getrandom 0.2.17",
+]
+
+[[package]]
 name = "active-infinity-fuzz"
 version = "0.0.0"
 dependencies = [
+ "active-core",
  "active-infinity",
+ "active-infinity-cli",
+ "active-infinity-ffi",
  "libfuzzer-sys",
 ]
 

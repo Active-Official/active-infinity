@@ -823,6 +823,14 @@ jobs:
             fuzz_schema \
             fuzz_delta_frames \
             fuzz_merge \
+            fuzz_from_active_source \
+            fuzz_train_dictionary \
+            fuzz_store \
+            fuzz_proof_verify_schema \
+            fuzz_ffi_boundary \
+            fuzz_cli_args \
+            fuzz_redact_image \
+            fuzz_stream_opts \
             fuzz_compressed_frame; do
             echo "== $target =="
             cargo fuzz run "$target" -- -runs=2000 -timeout=10 -rss_limit_mb=2048 -print_final_stats=1

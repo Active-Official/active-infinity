@@ -1041,3 +1041,35 @@ mod wasm_random {
 
     getrandom::register_custom_getrandom!(fill);
 }
+
+// INF-POLY-05: fallback `main` for Windows fuzz builds (see build.rs).
+//
+// cargo-fuzz links every crate with `/include:main` under ASan on Windows,
+// and a cdylib has no `main`, so the FFI DLL link fails with LNK2001
+// (unresolved external symbol main) / LNK1120 — every native Windows fuzz
+// build of the fuzz crate failed at this crate for that reason. (The crate
+// is built with crate-type cdylib + staticlib + rlib, and cargo builds all
+// three for a dependency in one rustc invocation, so the DLL link cannot
+// be skipped; the staticlib needs no link step and the rlib links fine.)
+// The fallback is a plain `main` symbol ONLY as a last resort: build.rs
+// emits `/alternatename:main=active_infinity_ffi_main_shim`, so the linker
+// uses this shim only if `main` is otherwise undefined — a real `main`
+// (libFuzzer's, in the fuzz binaries) always wins.
+//
+// A plain `fn main` here is WRONG and was the first attempt: with
+// `-Ccodegen-units=1` the shim and the FFI code are one object, so the
+// fuzz binary's link resolved `main` to it and the binary ran this empty
+// function instead of libFuzzer — exiting silently with a garbage code
+// (0xDC4D07A8, uninitialised EAX) on every input, including empty ones.
+// (Proven 2026-11-09 by a diagnostic main that printed a marker and
+// returned 42: the binary printed the marker and exited 42.)
+// The shim is never called and never shipped: `cfg(fuzzing)` is set by
+// cargo-fuzz (`--cfg fuzzing` in its RUSTFLAGS, for every crate in the
+// fuzz build), so this exists only in fuzz builds, and the DLL produced
+// there is a scratch artifact under fuzz/target/ — the shipped DLLs are
+// built without cargo-fuzz, where this function does not exist.
+// (`cfg(sanitize)` cannot be used here: it is experimental and needs
+// `#![feature(cfg_sanitize)]`, which stable rustc rejects.)
+#[cfg(all(windows, fuzzing))]
+#[no_mangle]
+pub extern "C" fn active_infinity_ffi_main_shim() {}

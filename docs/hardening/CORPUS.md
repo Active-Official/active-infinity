@@ -39,6 +39,14 @@ size limit, short count, trailing bytes, not canonical, secret entry.
 | `fuzz_unit_discriminants` | `fuzz_targets/fuzz_unit_discriminants.rs` | `bad_unit.ainf`, `unit_ref.ainf`, generated unknown unit | unknown units are `infinity/unknown-unit`; out-of-range is `infinity/unit-ref` |
 | `fuzz_projection_agreement` | `fuzz_targets/fuzz_projection_agreement.rs` | `full.ainf`, `extensions.ainf`, generated secret module | JSON and Protobuf agree on redaction, marker, determinism and hash |
 | `fuzz_compressed_frame` | `fuzz_targets/fuzz_compressed_frame.rs` | generated zstd frames, a 1 MiB expansion bomb, dictionary splits | a decode never exceeds its ceiling; the bomb is refused at 64 bytes and fits a large ceiling; round trip is the identity |
+| `fuzz_from_active_source` | `fuzz_targets/fuzz_from_active_source.rs` | a valid Active source | hostile text parses or refuses; a parsed module encodes, validates and evaluates inside its budget |
+| `fuzz_train_dictionary` | `fuzz_targets/fuzz_train_dictionary.rs` | repetitive sample text | a trained dictionary round-trips every sample and refuses a too-small ceiling |
+| `fuzz_store` | `fuzz_targets/fuzz_store.rs` | a valid image | a put object reads back byte-identical; unsigned refuses verified reads; signed verifies |
+| `fuzz_proof_verify_schema` | `fuzz_targets/fuzz_proof_verify_schema.rs` | a valid proof + image + schema | a mismatch in any of the three refuses with `infinity/proof`; an issued proof verifies |
+| `fuzz_ffi_boundary` | `fuzz_targets/fuzz_ffi_boundary.rs` | a valid image + an alloc/free op script | hostile alloc/free sequences fail closed; a stale `free_gen` leaves the buffer live; every pure function matches Rust |
+| `fuzz_cli_args` | `fuzz_targets/fuzz_cli_args.rs` | a `validate` argv over a valid image | hostile argv stays total, touches only the tempdir, and decides deterministically |
+| `fuzz_redact_image` | `fuzz_targets/fuzz_redact_image.rs` | a secret-bearing image | no redacted output carries a secret literal; redaction is idempotent |
+| `fuzz_stream_opts` | `fuzz_targets/fuzz_stream_opts.rs` | a valid image, chunk 64 | every chunk size and `EncodeOpts` flag round-trips or refuses with a codec code |
 
 All targets live in `fuzz/fuzz_targets/`; `common.rs` holds shared fixture and
 wire-layout helpers but is not a target. `fuzz/Cargo.toml` declares each binary.
@@ -56,6 +64,14 @@ wire-layout helpers but is not a target. `fuzz/Cargo.toml` declares each binary.
 | `fuzz/corpus/fuzz_unit_discriminants` | 5 |
 | `fuzz/corpus/fuzz_projection_agreement` | 4 |
 | `fuzz/corpus/fuzz_compressed_frame` | 5 |
+| `fuzz/corpus/fuzz_from_active_source` | 1 |
+| `fuzz/corpus/fuzz_train_dictionary` | 1 |
+| `fuzz/corpus/fuzz_store` | 1 |
+| `fuzz/corpus/fuzz_proof_verify_schema` | 1 |
+| `fuzz/corpus/fuzz_ffi_boundary` | 1 |
+| `fuzz/corpus/fuzz_cli_args` | 1 |
+| `fuzz/corpus/fuzz_redact_image` | 1 |
+| `fuzz/corpus/fuzz_stream_opts` | 1 |
 
 `fuzz/target` and `fuzz/artifacts` remain ignored.
 
@@ -130,3 +146,19 @@ Interpretation:
 - `fuzz_delta_frames`: untrusted-input target added in the I-16 re-audit.
 
 - `fuzz_merge`: untrusted-input target added in the I-16 re-audit.
+
+- `fuzz_from_active_source`: untrusted-input target added in the INF-POLY-05 fix.
+
+- `fuzz_train_dictionary`: untrusted-input target added in the INF-POLY-05 fix.
+
+- `fuzz_store`: untrusted-input target added in the INF-POLY-05 fix.
+
+- `fuzz_proof_verify_schema`: untrusted-input target added in the INF-POLY-05 fix.
+
+- `fuzz_ffi_boundary`: untrusted-input target added in the INF-POLY-05 fix.
+
+- `fuzz_cli_args`: untrusted-input target added in the INF-POLY-05 fix.
+
+- `fuzz_redact_image`: untrusted-input target added in the INF-POLY-05 fix.
+
+- `fuzz_stream_opts`: untrusted-input target added in the INF-POLY-05 fix.

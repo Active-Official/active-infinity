@@ -13,6 +13,12 @@ libfuzzer-sys = "0.4"
 # The fuzz build must be the shipped default set: a panic in the default
 # `active-core` bridge or in the signature envelope is otherwise unfuzzable.
 active-infinity = { path = "..", version = "2.3.0", features = ["json", "zstd", "signatures"] }
+# INF-POLY-05: the FFI boundary target links the shim; the CLI target links
+# the CLI library (its parser lives there so it can be fuzzed in-process);
+# the Active-source target needs the evaluator's Budget type.
+active-infinity-ffi = { path = "../ffi/active-infinity-ffi", version = "0.1.0" }
+active-infinity-cli = { path = "../cli/active-infinity-cli", version = "0.3.1" }
+active-core = "1.4.0"
 
 [[bin]]
 name = "fuzz_decode_infinity"
@@ -108,6 +114,62 @@ bench = false
 [[bin]]
 name = "fuzz_merge"
 path = "fuzz_targets/fuzz_merge.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_from_active_source"
+path = "fuzz_targets/fuzz_from_active_source.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_train_dictionary"
+path = "fuzz_targets/fuzz_train_dictionary.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_store"
+path = "fuzz_targets/fuzz_store.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_proof_verify_schema"
+path = "fuzz_targets/fuzz_proof_verify_schema.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_ffi_boundary"
+path = "fuzz_targets/fuzz_ffi_boundary.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_cli_args"
+path = "fuzz_targets/fuzz_cli_args.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_redact_image"
+path = "fuzz_targets/fuzz_redact_image.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_stream_opts"
+path = "fuzz_targets/fuzz_stream_opts.rs"
 test = false
 doc = false
 bench = false

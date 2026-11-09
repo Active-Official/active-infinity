@@ -1,6 +1,6 @@
 # Fuzzing
 
-Fourteen targets cover the untrusted-input surface. Every target drives the
+Twenty-two targets cover the untrusted-input surface. Every target drives the
 shipped public API and asserts a semantic invariant, not only "did not crash".
 
 | Target | Surface | Invariant |
@@ -66,6 +66,14 @@ the artifact is attached to the issue with the input that produced it.
 | `fuzz_schema` | `Schema::from_bytes`, `validate_bytes` | both steps are total and refuse with an `infinity/*` code |
 | `fuzz_delta_frames` | an attacker Delta frame after a real Begin | the delta applies into a valid canonical image, or the stream refuses it |
 | `fuzz_merge` | `merge` of two decoded modules | total and deterministic; a clean merge encodes and validates |
+| `fuzz_from_active_source` | `from_active_source`, `evaluate` | hostile Active text parses or refuses with a codec code; a parsed module encodes, validates and evaluates inside its budget |
+| `fuzz_train_dictionary` | `train_dictionary`, `compress_with_dictionary`, `decompress_with_dictionary` | a trained dictionary round-trips every sample and refuses a too-small ceiling |
+| `fuzz_store` | `Store::open/put/get/get_verified`, `put_signed` | a put object reads back byte-identical; an unsigned object refuses verified reads; a signed object verifies |
+| `fuzz_proof_verify_schema` | `Proof::verify_with_schema`, `issue_with_schema` | a mismatch in sidecar, image or schema refuses with `infinity/proof`; an issued proof verifies |
+| `fuzz_ffi_boundary` | every `active_infinity_*` C export | hostile alloc/free sequences fail closed; a stale `free_gen` leaves the buffer live; every pure function matches the Rust API |
+| `fuzz_cli_args` | `active_infinity_cli::run` (the whole parser) | hostile argv stays total, touches only the tempdir, and decides deterministically |
+| `fuzz_redact_image` | `redact_image`, `redact_module`, the redacted JSON projections | no redacted output carries a secret literal; redaction is idempotent |
+| `fuzz_stream_opts` | `encode_stream_with`, `StreamEncoder`, `encode_many` | every chunk size and `EncodeOpts` flag round-trips or refuses with a codec code |
 
 `fuzz/examples/gen_seeds.rs` writes the deterministic positive seeds
 (`valid-envelope`, `valid-proof.json`, `schema.ainf`) and asserts that each one

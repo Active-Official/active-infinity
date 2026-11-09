@@ -36,13 +36,26 @@ TARGETS = [
     "fuzz_schema",
     "fuzz_delta_frames",
     "fuzz_merge",
+    "fuzz_from_active_source",
+    "fuzz_train_dictionary",
+    "fuzz_store",
+    "fuzz_proof_verify_schema",
+    "fuzz_ffi_boundary",
+    "fuzz_cli_args",
+    "fuzz_redact_image",
+    "fuzz_stream_opts",
 ]
 
 
 def run(
     cmd: list[str], cwd: Path, timeout: int | None = None
 ) -> subprocess.CompletedProcess:
-    return subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout)
+    # Targets print binary to stdout (e.g. `encode` writes the image when
+    # no --output is given), so undecodable bytes must not kill the
+    # harness: replace them instead of raising UnicodeDecodeError.
+    return subprocess.run(
+        cmd, cwd=cwd, capture_output=True, text=True, errors="replace", timeout=timeout
+    )
 
 
 def cargo_targets(manifest: Path) -> list[str]:

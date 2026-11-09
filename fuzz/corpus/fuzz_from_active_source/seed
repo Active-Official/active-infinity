@@ -1,0 +1,5 @@
+[app]
+name = "service-0"
+host = "node-0.internal"
+port = 8000
+ratio = 5%

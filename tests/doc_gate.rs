@@ -246,8 +246,8 @@ fn release_workflow_verifies_the_tag_before_building_the_sbom() {
     // fail the gate. The needles are the executable lines, not the
     // comments: the header and step comments also mention verify_tag.sh,
     // --clobber and ref:, so a bare substring search would pass on prose.
-    let workflow = fs::read_to_string(repo_path(".github/workflows/release.yml"))
-        .expect("release workflow");
+    let workflow =
+        fs::read_to_string(repo_path(".github/workflows/release.yml")).expect("release workflow");
     let verify = workflow
         .find("run: scripts/verify_tag.sh")
         .expect("release.yml must invoke scripts/verify_tag.sh");

@@ -10,7 +10,7 @@
 //! additive extension; the wire kinds already reserve them.
 
 use crate::ir::{InfinityModule, Inode, NodeId, SchemaFieldSpec, TypeSpec};
-use crate::{decode, encode, Error, Result};
+use crate::{decode, decode_with, encode, DecodeOpts, Error, Result};
 
 /// A validated companion schema module.
 #[derive(Clone, Debug)]
@@ -46,10 +46,30 @@ impl Schema {
         Ok(Self { module, closed })
     }
 
-    /// Read a schema from a canonical AINF schema module.
+    /// Read a schema from an AINF schema module.
+    ///
+    /// The input need not be canonical: it is canonicalized on load, so the
+    /// stored module is always the canonical form (INF-SCHEMA-05). A stored
+    /// schema image may carry slack or a cleared canonical flag (written
+    /// before canonical enforcement, or by a lenient writer); decoding it
+    /// leniently, re-encoding, and decoding strictly normalizes it, and the
+    /// strict decode proves the stored form is canonical. The lenient decode
+    /// is the only place this path opts out of the INF-02 default, and it is
+    /// immediately followed by canonicalization, so no non-canonical module
+    /// is ever stored. The secret/blob refusal below still runs on the
+    /// as-decoded module, so an unreachable secret or blob node is refused
+    /// exactly as before (canonicalization would otherwise drop it).
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
-        // `decode` validates the image; a second `validate` would double the work.
-        let module = decode(bytes)?;
+        // `decode_with` validates the image; a second `validate` would double
+        // the work. Lenient here: canonicalization below is what guarantees
+        // the stored form, not the input form.
+        let module = decode_with(
+            bytes,
+            DecodeOpts {
+                verify_canonical: false,
+                ..DecodeOpts::default()
+            },
+        )?;
         if module.nodes().iter().any(|node| {
             matches!(
                 node,
@@ -60,6 +80,12 @@ impl Schema {
             // channel inside the pinned schema hash with no meaning to a reader.
             return Err(Error::Schema("schema carries secret or blob nodes"));
         }
+        // Canonicalize: re-encode the decoded module (the encoder always
+        // emits canonical bytes) and decode strictly, so the stored module
+        // is the canonical form and `module()` never exposes slack, an
+        // unflagged image, or dropped unreachable nodes as if canonical.
+        let canonical_bytes = encode(&module)?;
+        let module = decode(&canonical_bytes)?;
         let root = module
             .root()
             .ok_or(Error::Schema("schema module has no root"))?;

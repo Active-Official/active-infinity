@@ -88,3 +88,37 @@ fn schema_never_changes_the_instance_hash() {
     let after = content_hash(&encode(&instance).expect("encode")).expect("hash");
     assert_eq!(before, after);
 }
+
+#[test]
+fn schema_from_bytes_canonicalizes_non_canonical_input() {
+    // INF-SCHEMA-05: a schema image that is not the canonical encoding of its
+    // content still loads, and the stored module is the canonical form. The
+    // unflagged variant below is the W5/INF-02 flag-cleared shape; the W4 probe
+    // used a slack string (376 in vs 368 out) -- both go through the same
+    // lenient-decode, re-encode, strict-decode path in `from_bytes`.
+    let schema = schema(true);
+    let canonical = schema.to_bytes().expect("schema encode");
+    let unflagged = active_infinity::encode::encode_with(
+        schema.module(),
+        active_infinity::layout::EncodeOpts {
+            write_hash: true,
+            mark_canonical: false,
+            streamed: false,
+        },
+    )
+    .expect("encode without the canonical flag");
+    assert_ne!(canonical, unflagged, "the unflagged variant must differ");
+    let loaded = Schema::from_bytes(&unflagged).expect("non-canonical schema loads");
+    assert_eq!(
+        loaded.to_bytes().expect("schema encode"),
+        canonical,
+        "the stored schema re-encodes to the canonical bytes"
+    );
+    assert_eq!(
+        encode(loaded.module()).expect("module encode"),
+        canonical,
+        "module() is the canonical form, not the input form"
+    );
+    assert!(loaded.is_closed());
+    assert_eq!(loaded.field_names().expect("names"), vec!["name", "port"]);
+}

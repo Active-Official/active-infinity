@@ -4,6 +4,14 @@
 
 ### Fixed
 
+- **Schemas are canonicalized on load (INF-SCHEMA-05).** `Schema::from_bytes`
+  now decodes leniently, re-encodes, and decodes strictly, so the stored
+  module is always the canonical form: `module()` never exposes slack, an
+  unflagged image, or dropped unreachable nodes as if canonical, and
+  `to_bytes()` always equals the canonical encoding. A non-canonical schema
+  image still loads (it is normalized, not refused); the secret/blob
+  refusal still runs on the as-decoded module.
+
 - **Canonical form is proven by default (INF-02, INF-CLI-01, NF-W5-01).**
   `DecodeOpts::default()` now sets `verify_canonical: true`, so `decode`,
   `validate`, `decode_provenance`, `decode_annotations` and `content_hash`

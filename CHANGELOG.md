@@ -45,6 +45,20 @@
 
 ### Fixed
 
+- **Stream Delta `PutNode` fragments are charged for their decoded payload bytes (INF-05).**
+  The decoder's decoded-bytes charge for a fragment was `node_count x
+  (size_of::<Inode>() + 32) + table_entries x 40`, which counts nodes and
+  table fields but not string/blob/secret payload bytes: a fragment whose
+  image is ~150 KiB but decodes to ~128 MiB (one 64 KiB string shared by
+  2000 `Str` nodes) was charged only 272,136, so a decoder with an 8 MiB
+  total budget accepted it. The charge now adds the fragment's decoded
+  payload bytes, counted per reference (`InfinityModule::
+  decoded_payload_bytes`) — the same per-use accounting the INF-01
+  decoded-bytes budget enforces, since decode clones each payload per
+  referencing node. The fragment above now charges ~131 MB and is refused
+  under a strict budget, while it still decodes under the default 1 GiB
+  budget. Not hash-affecting.
+
 - **Encode refuses unreachable nodes instead of silently dropping them (INF-04).**
   `encode()` (and `encode_with` / `encode_into` / `encode_many` /
   `encode_hashed`) now fails closed with `infinity/node` (reason

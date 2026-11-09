@@ -1334,9 +1334,15 @@ impl StreamDecoder {
                 for _ in 0..count {
                     let op = DeltaOp::decode(&frame.payload, &mut cursor, self.limits)?;
                     if let DeltaOp::PutNode { fragment, .. } = &op {
-                        // A fragment is a full module; its decoded nodes and
-                        // field entries are the memory this delta buys (a table
-                        // of a million fields is two nodes).
+                        // A fragment is a full module; its decoded nodes,
+                        // field entries and payload bytes are the memory this
+                        // delta buys (a table of a million fields is two
+                        // nodes). The payload bytes are the dominant term: a
+                        // 64 KiB string shared by 2000 nodes decodes to
+                        // ~128 MiB while the node count charges ~272 KiB
+                        // (INF-05) — charging nodes alone let a fragment buy
+                        // ~470x its charge in decoded state. The payload is
+                        // counted per reference, as decode materialises it.
                         let entries: u64 = fragment
                             .nodes()
                             .iter()
@@ -1350,7 +1356,8 @@ impl StreamDecoder {
                             .fold(0u64, |total, count| total.saturating_add(count));
                         let decoded_nodes = (fragment.node_count() as u64)
                             .saturating_mul(std::mem::size_of::<crate::ir::Inode>() as u64 + 32)
-                            .saturating_add(entries.saturating_mul(40));
+                            .saturating_add(entries.saturating_mul(40))
+                            .saturating_add(fragment.decoded_payload_bytes());
                         self.pending_decoded_bytes =
                             self.pending_decoded_bytes.saturating_add(decoded_nodes);
                         let held = self

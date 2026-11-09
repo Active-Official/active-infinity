@@ -1891,6 +1891,108 @@ impl InfinityModule {
         total
     }
 
+    /// Total decoded payload bytes this module holds, counted per reference.
+    ///
+    /// Every owned payload byte, once per node (or binding, annotation,
+    /// provenance entry, extension) that holds it: a string referenced by N
+    /// nodes is charged N times, a blob payload once per `Blob` node that
+    /// carries it, a secret once per `Secret` node. That is the same per-use
+    /// accounting `decode::check_decoded_budget` enforces on the wire form
+    /// (INF-01) — decode clones each payload per reference, so the decoded
+    /// module really holds this many bytes. Lengths only, no cloning (unlike
+    /// [`Inode::strings`], which materialises the strings): this runs on
+    /// untrusted fragments in the stream delta charge (INF-05) and must not
+    /// allocate proportional to the payload it measures.
+    ///
+    /// The string-carrying arms mirror `Inode::strings` plus the cases it
+    /// does not cover (`Quantity` units, `Secret` bytes, `Blob` payloads,
+    /// extension payloads); keep the two in sync when a payload-carrying
+    /// variant is added.
+    pub fn decoded_payload_bytes(&self) -> u64 {
+        let mut total = 0u64;
+        for node in &self.nodes {
+            total = total.saturating_add(match node {
+                Inode::Str(text) | Inode::Ident(text) => text.len() as u64,
+                Inode::Table { fields } | Inode::SchemaTable { fields, .. } => fields
+                    .iter()
+                    .fold(0u64, |sum, (name, _)| sum.saturating_add(name.len() as u64)),
+                Inode::Env { name, .. } => name.len() as u64,
+                Inode::Quantity {
+                    unit: UnitTag::Named(name),
+                    ..
+                } => name.len() as u64,
+                Inode::Quantity { .. } => 0,
+                Inode::Interpolate { parts } => parts.iter().fold(0u64, |sum, part| match part {
+                    InterpPart::Literal(text) => sum.saturating_add(text.len() as u64),
+                    InterpPart::Expr(_) => sum,
+                }),
+                Inode::Constrained { constraint, .. } => match constraint {
+                    Constraint::Enum(items) => items
+                        .iter()
+                        .fold(0u64, |sum, item| sum.saturating_add(item.len() as u64)),
+                    Constraint::Pattern(text) | Constraint::Custom(text) => text.len() as u64,
+                    Constraint::MinMax { .. } | Constraint::Odd => 0,
+                },
+                Inode::Patch(op) => match op {
+                    PatchOp::Set { path, .. } | PatchOp::Remove { path } => path.len() as u64,
+                    PatchOp::Rename { from, to } => {
+                        (from.len() as u64).saturating_add(to.len() as u64)
+                    }
+                },
+                Inode::SchemaField(spec) => {
+                    let mut sum = 0u64;
+                    if let TypeSpec::Enum(items) = &spec.typ {
+                        sum = items
+                            .iter()
+                            .fold(sum, |total, item| total.saturating_add(item.len() as u64));
+                    }
+                    if let Some(deprecated) = &spec.deprecated {
+                        sum = sum.saturating_add(deprecated.len() as u64);
+                    }
+                    sum
+                }
+                Inode::Blob {
+                    media_type,
+                    payload,
+                    ..
+                } => (media_type.len() as u64)
+                    .saturating_add(payload.as_ref().map_or(0, |bytes| bytes.len() as u64)),
+                Inode::Secret(bytes) => bytes.len() as u64,
+                _ => 0,
+            });
+        }
+        total = total.saturating_add(
+            self.bindings
+                .iter()
+                .fold(0u64, |sum, (name, _)| sum.saturating_add(name.len() as u64)),
+        );
+        for annotation in &self.annotations {
+            total = total.saturating_add(match &annotation.kind {
+                AnnotationKind::Intent(text) => text.len() as u64,
+                AnnotationKind::Constraint { source, .. } => source.len() as u64,
+                AnnotationKind::AiImmutable(_) => 0,
+            });
+        }
+        if let Some(provenance) = &self.provenance {
+            for text in [
+                provenance.producer.as_deref(),
+                provenance.model.as_deref(),
+                provenance.tool.as_deref(),
+            ] {
+                total = total.saturating_add(text.map_or(0, |text| text.len() as u64));
+            }
+            for entry in &provenance.entries {
+                total = total.saturating_add(entry.key.len() as u64);
+                if let ProvValue::Text(text) = &entry.value {
+                    total = total.saturating_add(text.len() as u64);
+                }
+            }
+        }
+        for (_, payload) in &self.extensions {
+            total = total.saturating_add(payload.len() as u64);
+        }
+        total
+    }
     /// Rebuild a module from decoded parts (used by the decoder and the
     /// stream reassembler).
     pub fn from_parts(

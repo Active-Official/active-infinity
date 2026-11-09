@@ -60,6 +60,15 @@ jobs:
         run: cargo clippy --locked --all-targets --all-features -- -D warnings
       - name: Clippy (no default features)
         run: cargo clippy --locked --all-targets --no-default-features -- -D warnings
+      - name: Enable Developer Mode (symlink privilege for store tests)
+        # XPL-INF-07: three store tests plant symlinks; on Windows that
+        # needs Developer Mode or SeCreateSymbolicLinkPrivilege. The tests
+        # fall back to a non-privileged fixture when the privilege is
+        # absent, but the symlink leg is the sharper case and must run in
+        # CI. Takes effect immediately; no reboot. The runner is ephemeral.
+        shell: powershell
+        run: |
+          New-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock' -Name AllowDevelopmentWithoutDevLicense -Value 1 -PropertyType DWord -Force | Out-Null
       - name: Tests
         run: cargo test --locked --all-features
       - name: Invariant gate (secret canary and capability authority)

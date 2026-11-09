@@ -117,7 +117,6 @@ fn put_refuses_an_oversized_occupant_with_the_store_code() {
     assert_eq!(error.code(), "infinity/store", "{error}");
 }
 
-#[cfg(unix)]
 #[test]
 fn get_refuses_a_symlinked_object() {
     let directory = tempfile::tempdir().expect("tempdir");
@@ -127,11 +126,27 @@ fn get_refuses_a_symlinked_object() {
     let path = object_path(directory.path(), &hash);
     let elsewhere = directory.path().join("elsewhere.bin");
     fs::rename(&path, &elsewhere).expect("move");
-    std::os::unix::fs::symlink(&elsewhere, &path).expect("symlink");
-    assert!(fs::symlink_metadata(&path)
-        .expect("link")
-        .file_type()
-        .is_symlink());
+    // XPL-INF-07: the test exists on every platform. On Windows a symlink
+    // needs Developer Mode or the SeCreateSymbolicLinkPrivilege privilege;
+    // without it a directory at the object path exercises the same refusal
+    // (`read_bounded` refuses any non-regular file) — the symlink leg runs
+    // wherever it can be created.
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(&elsewhere, &path).expect("symlink");
+        assert!(fs::symlink_metadata(&path)
+            .expect("link")
+            .file_type()
+            .is_symlink());
+    }
+    #[cfg(windows)]
+    {
+        if std::os::windows::fs::symlink_file(&elsewhere, &path).is_err() {
+            fs::create_dir(&path).expect("directory fixture");
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
+    fs::create_dir(&path).expect("directory fixture");
 
     let error = store.get(&hash).expect_err("a symlinked object is refused");
     assert_eq!(error.code(), "infinity/store", "{error}");
@@ -150,6 +165,72 @@ fn plant_link(target: &Path, link: &Path) {
     std::os::unix::fs::symlink(target, link).expect("symlink");
     #[cfg(windows)]
     fs::hard_link(target, link).expect("hard link");
+}
+
+/// SIDs that grant access to anyone beyond the owner, SYSTEM and
+/// Administrators: Everyone, BUILTIN\Users, Authenticated Users. SIDs are
+/// locale-independent — the account name "Everyone" is localized (e.g.
+/// "Todos" on a Spanish install), so the ACL is always read in SID form
+/// (XPL-INF-07).
+#[cfg(windows)]
+const BROAD_SIDS: [&str; 3] = ["S-1-1-0", "S-1-5-32-545", "S-1-5-11"];
+
+/// The SIDs holding an ACE on `path`, via PowerShell (XPL-INF-07). Panics
+/// when PowerShell cannot run or the query fails: a test that cannot inspect
+/// the ACL must fail closed, not pass vacuously.
+#[cfg(windows)]
+fn acl_sids(path: &Path) -> Vec<String> {
+    let script = format!(
+        "(Get-Acl -LiteralPath '{}').Access | ForEach-Object {{ $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value }}",
+        path.display()
+    );
+    let output = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+        .output()
+        .expect("spawn powershell");
+    assert!(
+        output.status.success(),
+        "Get-Acl failed for {}: {}",
+        path.display(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// No ACE on `path` may grant access to anyone beyond the owner, SYSTEM and
+/// Administrators: the Windows equivalent of the Unix 0700/0600 modes
+/// (XPL-INF-07).
+#[cfg(windows)]
+fn assert_no_broad_ace(path: &Path) {
+    for sid in acl_sids(path) {
+        assert!(
+            !BROAD_SIDS.contains(&sid.as_str()),
+            "{} grants access to {sid}; the store must be owner-only",
+            path.display()
+        );
+    }
+}
+
+/// Grant Everyone full control on `path` (Windows only). SID form, as in
+/// the CLI tests' `grant_everyone_read` (XPL-INF-07).
+#[cfg(windows)]
+fn grant_everyone_full_control(path: &Path) {
+    let output = std::process::Command::new("icacls")
+        .arg(path)
+        .arg("/grant")
+        .arg("*S-1-1-0:F")
+        .output()
+        .expect("spawn icacls");
+    assert!(
+        output.status.success(),
+        "icacls grant failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]
@@ -237,35 +318,63 @@ fn put_does_not_write_through_a_planted_scratch_path() {
     assert_eq!(store.get(&hash).expect("get"), image);
 }
 
-#[cfg(unix)]
 #[test]
 fn store_objects_and_directory_are_private() {
-    use std::os::unix::fs::PermissionsExt;
-
     let directory = tempfile::tempdir().expect("tempdir");
     let root = directory.path().join("private");
     let store = Store::open(&root).expect("store");
     let image = encode(&module()).expect("encode");
     let hash = store.put(&image).expect("put");
 
-    let directory_mode = fs::metadata(&root).expect("metadata").permissions().mode() & 0o777;
-    assert_eq!(directory_mode, 0o700, "store directory is owner-only");
-    let object_mode = fs::metadata(object_path(&root, &hash))
-        .expect("metadata")
-        .permissions()
-        .mode()
-        & 0o777;
-    assert_eq!(object_mode, 0o600, "objects are owner-only");
+    // XPL-INF-07: the test exists on every platform. Unix asserts the mode
+    // bits; Windows asserts the equivalent — no ACE grants access to
+    // anyone beyond the owner, SYSTEM and Administrators.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let directory_mode = fs::metadata(&root).expect("metadata").permissions().mode() & 0o777;
+        assert_eq!(directory_mode, 0o700, "store directory is owner-only");
+        let object_mode = fs::metadata(object_path(&root, &hash))
+            .expect("metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(object_mode, 0o600, "objects are owner-only");
+    }
+    #[cfg(windows)]
+    {
+        assert_no_broad_ace(&root);
+        assert_no_broad_ace(&object_path(&root, &hash));
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        // No permission model visible to std on this platform; the store
+        // still creates the directory and the object as regular files.
+        assert!(root.is_dir(), "store directory exists");
+        assert!(object_path(&root, &hash).is_file(), "object exists");
+    }
 }
 
-#[cfg(unix)]
 #[test]
 fn open_refuses_a_symlinked_root() {
     let directory = tempfile::tempdir().expect("tempdir");
     let victim = directory.path().join("victim");
     fs::create_dir(&victim).expect("victim dir");
     let root = directory.path().join("store");
+    // XPL-INF-07: the test exists on every platform. On Windows a symlink
+    // needs Developer Mode or the privilege; without it a file at the root
+    // path exercises the same refusal (`open` refuses any root that is not
+    // a directory) — the symlink leg runs wherever it can be created.
+    #[cfg(unix)]
     std::os::unix::fs::symlink(&victim, &root).expect("symlink root");
+    #[cfg(windows)]
+    {
+        if std::os::windows::fs::symlink_dir(&victim, &root).is_err() {
+            fs::write(&root, b"not a directory").expect("file fixture");
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
+    fs::write(&root, b"not a directory").expect("file fixture");
 
     let error = Store::open(&root).expect_err("a symlinked root is refused");
     assert_eq!(error.code(), "infinity/store", "{error}");
@@ -275,25 +384,53 @@ fn open_refuses_a_symlinked_root() {
         .is_none());
 }
 
-#[cfg(unix)]
 #[test]
 fn a_group_or_world_writable_root_is_refused() {
-    use std::os::unix::fs::PermissionsExt;
-
     let directory = tempfile::tempdir().expect("tempdir");
     let root = directory.path().join("shared");
     fs::create_dir(&root).expect("create");
-    fs::set_permissions(&root, fs::Permissions::from_mode(0o777)).expect("chmod");
-    let error = Store::open(&root).expect_err("a writable-by-others root is refused");
-    assert_eq!(error.code(), "infinity/store", "{error}");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o777)).expect("chmod");
+        let error = Store::open(&root).expect_err("a writable-by-others root is refused");
+        assert_eq!(error.code(), "infinity/store", "{error}");
 
-    // Readable by others is allowed (the at-rest exposure is documented); only
-    // writability lets another user plant or replace objects.
-    fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).expect("chmod");
-    Store::open(&root).expect("a 0755 root is accepted");
+        // Readable by others is allowed (the at-rest exposure is documented); only
+        // writability lets another user plant or replace objects.
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).expect("chmod");
+        Store::open(&root).expect("a 0755 root is accepted");
+    }
+    #[cfg(windows)]
+    {
+        // XPL-INF-07: Windows has no std-visible writability check — the
+        // store accepts the root by design, and Windows ACL enforcement is
+        // tracked separately (XPL-INF-02). This arm pins that boundary so
+        // the gap cannot drift silently: the root really is broadened
+        // (Everyone holds full control, verified in SID form), the store
+        // still opens and round-trips, and if XPL-INF-02 ever adds the
+        // refusal this test must flip to assert it.
+        grant_everyone_full_control(&root);
+        assert!(
+            acl_sids(&root).iter().any(|sid| sid == "S-1-1-0"),
+            "the icacls grant did not land; the tripwire is vacuous"
+        );
+        let store = Store::open(&root).expect("a broadened root is accepted on Windows");
+        let image = encode(&module()).expect("encode");
+        let hash = store.put(&image).expect("put");
+        assert_eq!(store.get(&hash).expect("get"), image);
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        // No writability model visible to std on this platform; the store
+        // still opens and round-trips.
+        let store = Store::open(&root).expect("open");
+        let image = encode(&module()).expect("encode");
+        let hash = store.put(&image).expect("put");
+        assert_eq!(store.get(&hash).expect("get"), image);
+    }
 }
 
-#[cfg(unix)]
 #[test]
 fn a_root_swapped_for_a_symlink_is_refused_on_write() {
     let directory = tempfile::tempdir().expect("tempdir");
@@ -307,7 +444,20 @@ fn a_root_swapped_for_a_symlink_is_refused_on_write() {
     fs::rename(&root, &moved).expect("move");
     let elsewhere = directory.path().join("elsewhere");
     fs::create_dir(&elsewhere).expect("elsewhere");
+    // XPL-INF-07: the test exists on every platform. On Windows a symlink
+    // needs Developer Mode or the privilege; without it a fresh directory
+    // at the path exercises the same `ensure_root` refusal — via the root
+    // pin on Windows (XPL-INF-03), via the device/inode pair on Unix.
+    #[cfg(unix)]
     std::os::unix::fs::symlink(&elsewhere, &root).expect("symlink");
+    #[cfg(windows)]
+    {
+        if std::os::windows::fs::symlink_dir(&elsewhere, &root).is_err() {
+            fs::create_dir(&root).expect("fresh directory fixture");
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
+    fs::create_dir(&root).expect("fresh directory fixture");
 
     let second = encode(&{
         let mut module = InfinityModule::new();

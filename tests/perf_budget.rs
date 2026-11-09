@@ -63,6 +63,10 @@ fn hostile_rejection_is_bounded() {
     );
 }
 
+/// Resident set size of this process, in KiB. XPL-INF-07: the test exists
+/// on every platform — Linux reads /proc, Windows reads the Working Set,
+/// macOS reads `ps`. A helper that cannot measure must fail closed, not
+/// return a number that would pass vacuously.
 #[cfg(target_os = "linux")]
 fn rss_kib() -> u64 {
     let statm = std::fs::read_to_string("/proc/self/statm").expect("statm");
@@ -70,7 +74,53 @@ fn rss_kib() -> u64 {
     pages * 4
 }
 
-#[cfg(target_os = "linux")]
+/// Working Set — the Windows RSS equivalent — of this process, in KiB.
+#[cfg(target_os = "windows")]
+fn rss_kib() -> u64 {
+    let script = format!("(Get-Process -Id {}).WorkingSet64", std::process::id());
+    let output = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+        .output()
+        .expect("spawn powershell");
+    assert!(
+        output.status.success(),
+        "Get-Process failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let bytes: u64 = String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse()
+        .expect("WorkingSet64 is a number");
+    bytes / 1024
+}
+
+/// Resident set size of this process, in KiB (`ps` reports KiB already).
+#[cfg(target_os = "macos")]
+fn rss_kib() -> u64 {
+    let output = std::process::Command::new("ps")
+        .args(["-o", "rss=", "-p", &std::process::id().to_string()])
+        .output()
+        .expect("spawn ps");
+    assert!(
+        output.status.success(),
+        "ps failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse()
+        .expect("rss is a number")
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
+fn rss_kib() -> u64 {
+    // No memory query exists for this platform; fail closed with the
+    // documented reason rather than returning a number that would pass.
+    panic!(
+        "XPL-INF-07: no RSS measurement exists for this target; the growth budget is untested here"
+    );
+}
+
 #[test]
 fn repeated_validation_does_not_grow_rss() {
     let image = encode(&wide(2_000)).expect("image");

@@ -20,10 +20,10 @@ use crate::encode::{hash_image, NodeRec};
 use crate::error::{Error, Result};
 use crate::ir::{NodeId, ProvValue, Provenance};
 use crate::layout::{
-    align8, dialect_hash, read_u32, read_u64, Header, Limits, Meta, Section, BLOB_ENTRY_SIZE,
-    EXT_DIR_SIZE, FIELD_SIZE, FLAG_ANNOTATIONS, FLAG_EXTENSIONS, FLAG_PROVENANCE, FLAG_SECRETS,
-    HEADER_SIZE, NODE_FLAG_0, NODE_FLAG_1, NODE_FLAG_KNOWN, NODE_RECORD_SIZE, PROV_ENTRY_SIZE,
-    PROV_HEADER_SIZE, SECTION_COUNT,
+    align8, is_accepted_dialect, read_u32, read_u64, Header, Limits, Meta, Section,
+    BLOB_ENTRY_SIZE, EXT_DIR_SIZE, FIELD_SIZE, FLAG_ANNOTATIONS, FLAG_EXTENSIONS, FLAG_PROVENANCE,
+    FLAG_SECRETS, HEADER_SIZE, NODE_FLAG_0, NODE_FLAG_1, NODE_FLAG_KNOWN, NODE_RECORD_SIZE,
+    PROV_ENTRY_SIZE, PROV_HEADER_SIZE, SECTION_COUNT,
 };
 use crate::unit::{UnitTag, UNIT_NAMED};
 
@@ -59,7 +59,13 @@ impl<'a> Validated<'a> {
     pub fn new(buf: &'a [u8], opts: crate::layout::DecodeOpts) -> Result<Self> {
         opts.limits.check()?;
         let header = Header::parse(buf)?;
-        if header.dialect_hash != dialect_hash() {
+        // The accepted set is the current dialect plus the legacy 1.0 dialect
+        // (INF-03 / BND-F1 / R2-VER-03): a stored 1.0 image passes the dialect
+        // gate under a 1.1 decoder instead of dying here with no recovery path.
+        // It is structurally valid (lenient options accept it) but not canonical
+        // under 1.1, so the default canonical proof still reports it and the
+        // migration is re-encode; see `validate_canonical`.
+        if !is_accepted_dialect(header.dialect_hash) {
             return Err(Error::DialectMismatch(header.dialect_hash));
         }
         let limits = opts.limits;

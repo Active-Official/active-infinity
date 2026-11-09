@@ -333,7 +333,16 @@ fn main() {
 
     // A valid image that is not canonical: an unreferenced string.
     let non_canonical = add_unused_string(&encode(&simple()).expect("encode"));
-    let meta = validate(&non_canonical).expect("structurally valid");
+    // `validate()` proves canonical form by default (INF-02), so the
+    // non-canonical vector needs the lenient structural check here.
+    let meta = active_infinity::validate_with(
+        &non_canonical,
+        DecodeOpts {
+            verify_canonical: false,
+            ..DecodeOpts::default()
+        },
+    )
+    .expect("structurally valid");
     fs::write(valid_dir.join("non_canonical.ainf"), &non_canonical).expect("write");
     index.push_str(&format!(
         "non_canonical {} {} {} {} {} canonical=no\n",
@@ -671,6 +680,16 @@ fn main() {
     frame_kind[5] = 0xfe;
     stream_vectors.push(("frame_kind", "infinity/stream-frame-kind", frame_kind));
 
+    // Unknown frame flags: refused before the declared length is even read,
+    // so the absurd length below never matters — the flags check wins
+    // (`Frame::parse` reads flags first). Restored 2026-11-08: this vector
+    // existed in the checked-in set but the generator never produced it, so a
+    // regeneration silently dropped it from the index (INF-03 fallout).
+    let mut frame_flags = valid_stream.clone();
+    frame_flags[6] = 1;
+    frame_flags[16..20].copy_from_slice(&u32::MAX.to_le_bytes());
+    stream_vectors.push(("frame_flags", "infinity/stream-flags", frame_flags));
+
     let mut frame_len = valid_stream.clone();
     patch_u32(&mut frame_len, 16, u32::MAX);
     stream_vectors.push(("frame_len", "infinity/stream-frame-len", frame_len));
@@ -760,6 +779,28 @@ fn main() {
                 module
             },
             int_fields(&[("alpha", 1)]),
+        ),
+        (
+            // Both sides add the same binding name with different values:
+            // a `<bindings>` KindMismatch conflict. Restored 2026-11-08: this
+            // case existed in the checked-in set but the generator never
+            // produced it, so a regeneration silently dropped it (INF-03
+            // fallout). The modules are recovered from the 1.0 vectors
+            // (base: table {alpha: 1}; each side binds "extra" to 100 / 200).
+            "binding",
+            int_fields(&[("alpha", 1)]),
+            {
+                let mut module = int_fields(&[("alpha", 1)]);
+                let extra = module.push(Inode::Int(100));
+                module.bind("extra", extra);
+                module
+            },
+            {
+                let mut module = int_fields(&[("alpha", 1)]);
+                let extra = module.push(Inode::Int(200));
+                module.bind("extra", extra);
+                module
+            },
         ),
     ];
     let mut merge_index = String::from("# name base left right expected\n");

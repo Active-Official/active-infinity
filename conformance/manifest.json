@@ -1,7 +1,7 @@
 {
   "format": "active-conformance/1",
   "version": "2026-10-29",
-  "generated": "2026-10-31T01:29:29Z",
+  "generated": "2026-11-09T05:19:01Z",
   "base": "..",
   "cases": [
     {
@@ -9,8 +9,8 @@
       "name": "empty",
       "path": "tests/vectors/valid/empty.ainf",
       "options": {},
-      "content_hash": "c88757d688a39ad85bc3e0c6a034adf472e92690e4d8ddaaf946e530a6e92b01",
-      "sha256": "7dd252faa856722f6b5135e885dbbfa06bb0ef94cc674694c3398201176ce0dd",
+      "content_hash": "d44c0f174982888b526a8aee742df538241772e8305b314f6d319f795e27ba3a",
+      "sha256": "488af008447ce1f2fe2ddf8669a2ff003da7eddf23674117b9a8854bb49fb65d",
       "size": 232
     },
     {
@@ -18,8 +18,8 @@
       "name": "extensions",
       "path": "tests/vectors/valid/extensions.ainf",
       "options": {},
-      "content_hash": "012b468eb96caef323707af7f40bce65ebed4c7467628b77902fea5387c0908b",
-      "sha256": "bf958c8f09d7c32a45e026332e2221b89f1441204dcba6557196ab96e55ceae6",
+      "content_hash": "a5d2127d1736b1f5ee4f39aa41a85093ceca4c6ed5a370767224fe32e7342e94",
+      "sha256": "b1fffecd0828b91e4d2e1f4f7682779d06e39b8c75ca9a86745c7d499f3d06b7",
       "size": 488
     },
     {
@@ -27,8 +27,8 @@
       "name": "full",
       "path": "tests/vectors/valid/full.ainf",
       "options": {},
-      "content_hash": "83ccd859c5612acb087826eea302dc8c2f04218b13ee306cd1d5c7af8302aad0",
-      "sha256": "2e226c50178b642c8ac0a55f7ee7063da9d8ff8c5c939d6719119bfa7dea7622",
+      "content_hash": "b5354c80839be88028b9579dd7bcab2df5d8c2a480313c30c30bb4c03179548c",
+      "sha256": "3e5ebe53c7e3eb51b26a15e4b6e861a461bca22743df4505c25d2c1635e9f8b2",
       "size": 1248
     },
     {
@@ -36,8 +36,8 @@
       "name": "simple",
       "path": "tests/vectors/valid/simple.ainf",
       "options": {},
-      "content_hash": "38f031c72022c7907a694ddab7903083be882afa0418f046d1723dea7b2ed2f7",
-      "sha256": "0ae01e9215048ee89b099d882fad49708cc56a7275543f9c367e5f6c1dc12bfe",
+      "content_hash": "84554c05e0762ebeafd926d4a77238443a5e1c4cba14b70514e130ed495d8154",
+      "sha256": "4ca4740493bfdab7b473e7736de0b999358bcadd172c1624a67dd62790eca235",
       "size": 416
     },
     {
@@ -47,8 +47,8 @@
       "options": {
         "canonical": "no"
       },
-      "content_hash": "8d311d44597e9663027285d916194c8c890436ccb75fef1981ca73f0c70065e8",
-      "sha256": "5dc697814fed10e6893c3a0cd948ae54b303e22866959ce3767ddb00abafbb79",
+      "content_hash": "1ec3cd5bd23ef08779d9db2f5f58c0c004e0a020290c18ecd8e854d25fdc7de7",
+      "sha256": "11dd8bf12ba67e1411b78aa3d8bf813e515f0a5472d44bb69dc789565ab85cc6",
       "size": 424
     },
     {
@@ -57,7 +57,7 @@
       "path": "tests/vectors/invalid/bad_magic.ainf",
       "options": {},
       "expected_code": "infinity/magic",
-      "sha256": "1b3c18d7439cc9a0a3c4db24c60ce3c855aaa2ea1fec6ec6ec03e525b45c6b4e",
+      "sha256": "108993372955ea908080630db3819c650421d47d17a412dd2cca1431e85eb87e",
       "size": 1248
     },
     {
@@ -66,7 +66,7 @@
       "path": "tests/vectors/invalid/bad_major.ainf",
       "options": {},
       "expected_code": "infinity/version-major",
-      "sha256": "443c795206af08ef59bc5aa9a1c1ef7a02fb6977825e899a23dad550e8689d87",
+      "sha256": "36c644d48ab34f331a6cf4bc095b285a0156b53511cd99c8083c03b8df01a172",
       "size": 1248
     },
     {
@@ -75,7 +75,7 @@
       "path": "tests/vectors/invalid/bad_minor.ainf",
       "options": {},
       "expected_code": "infinity/version-minor",
-      "sha256": "652393074ec08ff06c2f4c1b5cb0b700c31a472c2f46679a8b3c57fb4216c1c6",
+      "sha256": "7e56557ed4d7ddc417c8ebd2ffc5c3cef8a7313dc255d4d6c7a096691cba7adb",
       "size": 1248
     },
     {
@@ -84,7 +84,7 @@
       "path": "tests/vectors/invalid/header_truncated.ainf",
       "options": {},
       "expected_code": "infinity/header-truncated",
-      "sha256": "e13afde4e13cf7000d6136cf6f49845f3afd9310d4283978a319c16c5714e312",
+      "sha256": "407fb2d7107c0e39970dfc48247835bed11ce1b32c0715bda7902b49a9e20d23",
       "size": 100
     },
     {
@@ -93,7 +93,7 @@
       "path": "tests/vectors/invalid/bad_header_size.ainf",
       "options": {},
       "expected_code": "infinity/header-size",
-      "sha256": "ce0eda9e78d298701269e8a541cb1d5034c5af381f55744fc934d58028523c77",
+      "sha256": "b2c3c89eecc5b28d0596f8020a2d05e13e14d74b01ee230af1151ec42da030f9",
       "size": 1248
     },
     {
@@ -102,7 +102,7 @@
       "path": "tests/vectors/invalid/bad_flags.ainf",
       "options": {},
       "expected_code": "infinity/flags",
-      "sha256": "a62b5b8d0f58b8ce415956ef11509b78460c8565853075f4119bc64a892cba66",
+      "sha256": "d5aaa8c3496ce5252f4f96cf7f5b55f97e4f493e0ae1c71bb8585a866c12c948",
       "size": 1248
     },
     {
@@ -111,7 +111,7 @@
       "path": "tests/vectors/invalid/reserved.ainf",
       "options": {},
       "expected_code": "infinity/reserved",
-      "sha256": "d7eb7a4fa19e05d4e1e6a6fff2171db6346a9ae211a1c7ff064fce8625f8385c",
+      "sha256": "7ad3e094fcf12853b39dc5b866c08b722f5e2303119439d26a74d7fa40b037f9",
       "size": 1248
     },
     {
@@ -120,7 +120,7 @@
       "path": "tests/vectors/invalid/bad_dialect.ainf",
       "options": {},
       "expected_code": "infinity/dialect",
-      "sha256": "68daef15ba09d718dfd2cef5b945c2918d034e245914bae18a7cde1612ca4c42",
+      "sha256": "14228b17beeec6a0cc6ce0283c4ae0a54d37fde4cdfbb6d7e0c5e690a5aca8f5",
       "size": 1248
     },
     {
@@ -129,7 +129,7 @@
       "path": "tests/vectors/invalid/truncated.ainf",
       "options": {},
       "expected_code": "infinity/truncated",
-      "sha256": "a1d97a96238ec1242c2b2f806ca2b67633568b4465cd400a9b706e6a5c9d31b9",
+      "sha256": "a929d7989ec7f7a2cc97addd70b0c7eb97120b594282c0d160cbfda49f2430c6",
       "size": 1240
     },
     {
@@ -138,7 +138,7 @@
       "path": "tests/vectors/invalid/trailing.ainf",
       "options": {},
       "expected_code": "infinity/trailing-bytes",
-      "sha256": "b2cbcec32a66d81e74c3af7a9d06a003143ca536932d3e54bae78d65de4025e1",
+      "sha256": "cb53bb8b89e73807abcdfe6a9ccfeb48c30eb178143c4d29d42875f66f0bd04e",
       "size": 1256
     },
     {
@@ -147,7 +147,7 @@
       "path": "tests/vectors/invalid/bad_hash.ainf",
       "options": {},
       "expected_code": "infinity/hash-mismatch",
-      "sha256": "95094ce312a62139615b9e9a664d6b512f5080880a073387db1ae907a956a82b",
+      "sha256": "937fce50e064b3a8899f26e3b061ca6f1cb7adb92ded69310118264baa14552c",
       "size": 1248
     },
     {
@@ -156,7 +156,7 @@
       "path": "tests/vectors/invalid/count_bomb.ainf",
       "options": {},
       "expected_code": "infinity/count",
-      "sha256": "30c8f9ce835ae71fc844ed3c038e6ea6e02b408e6132a829d016a672ac046bcb",
+      "sha256": "2b8aac70d80e224c7a7b37709bfffb3515b6d3f3aed413d77e03f8300ced4ed9",
       "size": 1248
     },
     {
@@ -165,7 +165,7 @@
       "path": "tests/vectors/invalid/short_count.ainf",
       "options": {},
       "expected_code": "infinity/count",
-      "sha256": "8eacf5b4a972d09d3894a20d7488f87ac6e232fdd3431870ed49d5bcacf15c85",
+      "sha256": "5ba021c472a6b580bf48ba695368a1e9ecef5359e8203f7fb49a17593a87cd26",
       "size": 1248
     },
     {
@@ -174,7 +174,7 @@
       "path": "tests/vectors/invalid/bad_offset.ainf",
       "options": {},
       "expected_code": "infinity/offset",
-      "sha256": "4e8839f45908038d6b235ead92b8b8284ffa811bfb75a7b0e648e050533e3300",
+      "sha256": "4ba7269defaf42d2269a9fb3526ba75447a9af4780403f00f7c9247942540472",
       "size": 1248
     },
     {
@@ -185,7 +185,7 @@
         "limits": "max_nodes:1"
       },
       "expected_code": "infinity/limit",
-      "sha256": "0ae01e9215048ee89b099d882fad49708cc56a7275543f9c367e5f6c1dc12bfe",
+      "sha256": "4ca4740493bfdab7b473e7736de0b999358bcadd172c1624a67dd62790eca235",
       "size": 416
     },
     {
@@ -194,7 +194,7 @@
       "path": "tests/vectors/invalid/bad_padding.ainf",
       "options": {},
       "expected_code": "infinity/padding",
-      "sha256": "20e0df5878620f93a4855d0c1aa9172fc5866063db0194784216642259a3f40a",
+      "sha256": "3f8cf1ce1ab84ab4cd4541fcca637eafee25338bee051baf3890bdd3c7f728de",
       "size": 1248
     },
     {
@@ -203,7 +203,7 @@
       "path": "tests/vectors/invalid/bad_unit.ainf",
       "options": {},
       "expected_code": "infinity/unknown-unit",
-      "sha256": "a3151e345322515733ac72ebc44c1fab1f81a05a44af549fa6583de8a1d46bb0",
+      "sha256": "69c01fbf096e1102576d8ebb278184c706974dedfd8677de1f18de34573f7128",
       "size": 1248
     },
     {
@@ -212,7 +212,7 @@
       "path": "tests/vectors/invalid/unit_ref.ainf",
       "options": {},
       "expected_code": "infinity/unit-ref",
-      "sha256": "27033f3a49a2965b6b244a9af62823946c905488f9cd11ead8d8e7b2bace55a5",
+      "sha256": "2f45fa8117c6fc249055de2a2001e90a1008699d64b002bbfe6e45e956802f93",
       "size": 1248
     },
     {
@@ -221,7 +221,7 @@
       "path": "tests/vectors/invalid/bad_type.ainf",
       "options": {},
       "expected_code": "infinity/type",
-      "sha256": "732fbc38fbe45a5c9128088b1a8acb15bd79cee87b7cba0e8f98dba1bda4e7c4",
+      "sha256": "031b091dc68b00182bad7a5ca967f13c5735bbb5d17bef475baabedf16e41c77",
       "size": 1248
     },
     {
@@ -230,7 +230,7 @@
       "path": "tests/vectors/invalid/secret_entry.ainf",
       "options": {},
       "expected_code": "infinity/secret-entry",
-      "sha256": "6d23ad98ead0dcbeadf3024bc98d3015c0e076b62f27d2a5c525e09da88379b6",
+      "sha256": "4c2959fe59a87d4fbaf06e5e799f1211a1eb365b7666ed1650ce24b7946ebf01",
       "size": 1248
     },
     {
@@ -239,7 +239,7 @@
       "path": "tests/vectors/invalid/string_ref.ainf",
       "options": {},
       "expected_code": "infinity/string-ref",
-      "sha256": "e2dde0daaf6aff76dfadf3558714e0117c403fbd94976ef3b30283a3a6aef74a",
+      "sha256": "6d0086eb7cd890930e6bc19d5be597a7910720c4758798d0d051a6c34115eaa0",
       "size": 1248
     },
     {
@@ -248,7 +248,7 @@
       "path": "tests/vectors/invalid/node_ref.ainf",
       "options": {},
       "expected_code": "infinity/node-ref",
-      "sha256": "229a6a4c868fb5f5756f21124f4ce65c525d1acfb8d0e1b0010238a4cce3b949",
+      "sha256": "3d95a1d4ceb521ec41350e9a702e82d9ae2ac4cd11f6134ec048798d17db77e9",
       "size": 304
     },
     {
@@ -257,7 +257,7 @@
       "path": "tests/vectors/invalid/bad_node.ainf",
       "options": {},
       "expected_code": "infinity/node",
-      "sha256": "c2626813c291249c6809e7adf3d33a17c3f1031e4de210cc8a5c21c790ae8c37",
+      "sha256": "a6dd26aca4098c18706eb42a8e0525318676fde22ea2d16f7f609e2499b9710f",
       "size": 1248
     },
     {
@@ -266,7 +266,7 @@
       "path": "tests/vectors/invalid/bad_utf8.ainf",
       "options": {},
       "expected_code": "infinity/utf8",
-      "sha256": "2c7fa0ba10705797179f86c5ec39b7c8ba9546b3dba9ff790a74376e64a2d00d",
+      "sha256": "dd7c4f7a156bf233b501acaed30e309775609660e9fb5d1346e7f646e81b4cb1",
       "size": 432
     },
     {
@@ -275,7 +275,7 @@
       "path": "tests/vectors/invalid/bad_edge.ainf",
       "options": {},
       "expected_code": "infinity/edge",
-      "sha256": "1ce5b645478ad340efae52d5c2538cb331bdff3b2ab15f3372a5dcc91ac08dd8",
+      "sha256": "4b2673e196701cb652730c3df90f4094e95157e2dac237891dcbeb4e93aea1b6",
       "size": 1248
     },
     {
@@ -284,7 +284,7 @@
       "path": "tests/vectors/invalid/cycle.ainf",
       "options": {},
       "expected_code": "infinity/cycle",
-      "sha256": "368e1b49921296464aaf3651a1b344982ffb328721e9f9482137d20be097e9f7",
+      "sha256": "ebef23f57e18bfb429ededb0b9ad078096abf3c9c8a0d648d15e35b8af9f8843",
       "size": 312
     },
     {
@@ -293,7 +293,7 @@
       "path": "tests/vectors/invalid/duplicate_field.ainf",
       "options": {},
       "expected_code": "infinity/duplicate-field",
-      "sha256": "3187751b263f9516b52982b09e94e245aaedb1c44fa49a0069de4ec906268d1f",
+      "sha256": "69824ea442356c4f14a09f4f9af4719074e1ec3d1ecf1e048f13e8747388f1f1",
       "size": 416
     },
     {
@@ -302,7 +302,7 @@
       "path": "tests/vectors/invalid/duplicate_binding.ainf",
       "options": {},
       "expected_code": "infinity/duplicate-binding",
-      "sha256": "60fa8032e8a6f012bf98ef7aef1c2ce1d96df9ab86ff3c46554df4bc31f98eb9",
+      "sha256": "532754af22a8735a263248e96e454fea7210ecffd528a70a17c91d21ddfe3aa5",
       "size": 480
     },
     {
@@ -311,7 +311,7 @@
       "path": "tests/vectors/invalid/bad_annotation.ainf",
       "options": {},
       "expected_code": "infinity/annotation",
-      "sha256": "df19824643613f7b3387a64d86d785421b1ac535127102a4d110c55aba2183a2",
+      "sha256": "e759d9647c663986e07274f29d2efd6b453d6d5349420f44e2784f37aef0466e",
       "size": 1248
     },
     {
@@ -320,7 +320,7 @@
       "path": "tests/vectors/invalid/bad_provenance.ainf",
       "options": {},
       "expected_code": "infinity/provenance",
-      "sha256": "91167731dd8ce1c3187a1104fb17cb5514d24a3293355b037518c5bf5a2b8b34",
+      "sha256": "355c49f582a12d1faa28b7d0aeaffc9e0fc9bf6fefe0ecd99739cc557b93acbb",
       "size": 1248
     },
     {
@@ -329,7 +329,7 @@
       "path": "tests/vectors/invalid/bad_extension.ainf",
       "options": {},
       "expected_code": "infinity/extension",
-      "sha256": "5b253e9d0e4fadf10675368e2581220f49df17a57662168639781e9271977d7c",
+      "sha256": "d92457acd7678d4b90eef63e8a1ae670696a648b77e10419dfac74e196793b04",
       "size": 488
     },
     {
@@ -338,7 +338,7 @@
       "path": "tests/vectors/invalid/bad_extension_gap.ainf",
       "options": {},
       "expected_code": "infinity/extension",
-      "sha256": "3e0fe6396326fb406021900f43199c33bf1ea1b220ee8aae496c08b04f631633",
+      "sha256": "3fa18b1186ed6491695ca3eb4a5f8c7c5669024aadd02244dcec6cecd2287c05",
       "size": 488
     },
     {
@@ -349,7 +349,7 @@
         "limits": "max_depth:8"
       },
       "expected_code": "infinity/depth",
-      "sha256": "8ae8b7287d41b891b6c90049c83eab499a05972121eee5e4181e9c5c7eb365e3",
+      "sha256": "6fa031c969cb8e812718ac138d133c51719138674901c3c09a01d54672257da9",
       "size": 2824
     },
     {
@@ -358,7 +358,7 @@
       "path": "tests/vectors/invalid/bad_blob.ainf",
       "options": {},
       "expected_code": "infinity/blob",
-      "sha256": "2c90e80e2c928392dad7e6862fd62eff2cafe78994c4e77b6ba948462902c22c",
+      "sha256": "cfddc17d4809b5f325182135184400c71fbb6b5fa8992332822c6c5c72917bbf",
       "size": 344
     },
     {
@@ -369,7 +369,7 @@
         "verify": "canonical"
       },
       "expected_code": "infinity/not-canonical",
-      "sha256": "5dc697814fed10e6893c3a0cd948ae54b303e22866959ce3767ddb00abafbb79",
+      "sha256": "11dd8bf12ba67e1411b78aa3d8bf813e515f0a5472d44bb69dc789565ab85cc6",
       "size": 424
     },
     {
@@ -378,7 +378,7 @@
       "path": "tests/vectors/invalid_stream/frame_magic.ainf",
       "options": {},
       "expected_code": "infinity/stream-magic",
-      "sha256": "23e02f350c8f71fb11ffe81cd5d00cd0c199365ce8f74ec700b3e20fe2266a25",
+      "sha256": "9c277e3e2dae28b6949835b01a2cd50fd848daa82f0f8f74dcc36d010b09e2ce",
       "size": 1012
     },
     {
@@ -387,7 +387,7 @@
       "path": "tests/vectors/invalid_stream/frame_version.ainf",
       "options": {},
       "expected_code": "infinity/stream-version",
-      "sha256": "61b752c583a60de4a854d98a4358a69fa51f3718504eff556877cf50871c52b1",
+      "sha256": "a40c648349b6b011d218c99793a6498116282384af1fd1beb86a36ef9cacc54a",
       "size": 1012
     },
     {
@@ -396,7 +396,7 @@
       "path": "tests/vectors/invalid_stream/frame_kind.ainf",
       "options": {},
       "expected_code": "infinity/stream-frame-kind",
-      "sha256": "b6b1c4198eff3c2646f88abe8a99e2042ba4860a167ec8f3b65a58365893101f",
+      "sha256": "39cb7783e30666d2d9339fb3fe22fc9b4463d5f424d2fd8e89bd44a1e2a4b293",
       "size": 1012
     },
     {
@@ -405,7 +405,7 @@
       "path": "tests/vectors/invalid_stream/frame_flags.ainf",
       "options": {},
       "expected_code": "infinity/stream-flags",
-      "sha256": "9f50ec504e444d3be069ee99e73d885402e9dd3b0d5556ae9bbda81b60254fd2",
+      "sha256": "b6a4794d808c67e2ef1b3a532bd6f099ab8fb91c74e3b05bf6f9c544673b0f10",
       "size": 1012
     },
     {
@@ -414,7 +414,7 @@
       "path": "tests/vectors/invalid_stream/frame_len.ainf",
       "options": {},
       "expected_code": "infinity/stream-frame-len",
-      "sha256": "f73e5eab1e7999677933855ab9cba4b223d38e9bb7e6dea40ce205c9b8cf70da",
+      "sha256": "8142967104c32f95248a7d23f30633006a177f4008ca286fe1c84fd4562581b2",
       "size": 1012
     },
     {
@@ -423,7 +423,7 @@
       "path": "tests/vectors/invalid_stream/sequence.ainf",
       "options": {},
       "expected_code": "infinity/stream-sequence",
-      "sha256": "decebfba37fdee7c172cdfb7d5f2f72cd6d380f1cfb1e04e0d3802292651dc44",
+      "sha256": "f5df3d2253a1a599235e6c1a9134afda6ebf3f56f73016b3bd273775455a0bf7",
       "size": 1012
     },
     {
@@ -432,7 +432,7 @@
       "path": "tests/vectors/invalid_stream/state.ainf",
       "options": {},
       "expected_code": "infinity/stream-state",
-      "sha256": "91644967fa9b47f6784dd19eb4d136bdf8e4caaa27c6c6458afe253b7289701b",
+      "sha256": "d445e71ac7ed478771682ad3e46d0da54e4dc5b9bed8937bdfd624f9b77bd5ea",
       "size": 72
     },
     {
@@ -441,7 +441,7 @@
       "path": "tests/vectors/invalid_stream/hash.ainf",
       "options": {},
       "expected_code": "infinity/stream-hash",
-      "sha256": "ca6e1fa09c1bbdb8ee48576229fb8c6f0cbe6b58332a7dea28a79f152c62bb7b",
+      "sha256": "bb781c1ceebb019f79796a8ae1f8a52b6b4ca3a08d0220bf5534a5b6a9c6dd3c",
       "size": 1012
     },
     {
@@ -450,7 +450,7 @@
       "path": "tests/vectors/invalid_stream/delta.ainf",
       "options": {},
       "expected_code": "infinity/stream-delta",
-      "sha256": "5717eb8393c4e042c2a98f87a3739af69e77201cf6bc763ba6fbc6921bea64e7",
+      "sha256": "8042f9d82a2fb4001d77f3f0057f7e731bd090ecc4453f11fcde523a8e73ae39",
       "size": 1049
     },
     {
@@ -459,7 +459,7 @@
       "path": "tests/vectors/invalid_stream/unterminated.ainf",
       "options": {},
       "expected_code": "infinity/stream-unterminated",
-      "sha256": "cfed6fc40c5de5e7410d204c36999b7ffa4964901a17d3ae715563090ae1e92f",
+      "sha256": "24724977aa28becbdee399b71fcae1f476e6cb33bfe14cf4b7eadcb1a48bf873",
       "size": 940
     }
   ]

@@ -1178,7 +1178,12 @@ impl StreamDecoder {
                     });
                 }
                 let dialect = read_u64(&frame.payload, 8)?;
-                if dialect != crate::layout::dialect_hash() {
+                // The same accepted set as the image path
+                // (`validate::Validated::new`): the current dialect plus the
+                // legacy 1.0 dialect (INF-03 / BND-F1 / R2-VER-03). The two
+                // paths must agree, or a stream a peer accepts as a file is
+                // refused as a stream (and vice versa).
+                if !crate::layout::is_accepted_dialect(dialect) {
                     return Err(Error::DialectMismatch(dialect));
                 }
                 let size = read_u64(&frame.payload, 16)?;

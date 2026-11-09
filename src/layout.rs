@@ -18,7 +18,11 @@ pub const STREAM_MAGIC: [u8; 4] = *b"AINS";
 /// Major format version implemented by this crate.
 pub const FORMAT_MAJOR: u16 = 1;
 /// Minor format version implemented by this crate.
-pub const FORMAT_MINOR: u16 = 0;
+///
+/// Format 1.1 is the dialect-versioned format (INF-03 / BND-F1 / R2-VER-03):
+/// the dialect hash no longer covers the minor, so a reader at 1.1 accepts
+/// 1.0 images (see [`DIALECT_HASH_GOLDEN_1_0`]).
+pub const FORMAT_MINOR: u16 = 1;
 /// Fixed header size in bytes.
 pub const HEADER_SIZE: usize = 224;
 /// Fixed node record size in bytes.
@@ -761,8 +765,9 @@ pub fn pad8(out: &mut Vec<u8>) {
     }
 }
 
-/// The dialect this build implements: a hash over the format version and the
-/// Highest node kind this dialect defines.
+/// The dialect this build implements: a hash over the format major, the
+/// dialect version, and the semantic tables (node kinds, aux tags, unit
+/// discriminants) plus the canonical-form rules.
 ///
 /// A new kind is a dialect change: bump this, the preimage text below and the
 /// golden hash together, and treat the wire format as a new minor version.
@@ -784,21 +789,76 @@ pub const DIALECT_KINDS_TEXT: &str = "node-kinds:0..=24";
 /// The aux-tag fragment of the dialect preimage.
 pub const DIALECT_AUX_TAGS_TEXT: &str = "aux-tags:0,1,2,3,4,10,11,12,20,21,22,23,24,25,26,30,31";
 
+/// The dialect version this build implements: the version of the canonical-form
+/// rules covered by the dialect hash.
+///
+/// A hash-affecting canonical-form change bumps this (and `FORMAT_MINOR` with
+/// it) — never in a patch release (INF-03). The wire minor is a header field,
+/// not a hash input, so a minor bump no longer re-addresses every stored image
+/// the way R2-VER-03 proved a naive bump would.
+pub const DIALECT_VERSION: u64 = 1;
+
+/// The canonical-form rules the dialect hash covers, as a frozen descriptor.
+///
+/// Each clause names a rule as implemented by `canonical::prepare` at dialect
+/// version 1: roots are numbered in content order, bindings by name, tied
+/// subjects are ordered by the framed (injective) render plus the redacted
+/// annotation multiset plus sorted secret digests, the annotation signature
+/// length-prefixes every part, and enum members are sorted before interning.
+/// Change any of these and the dialect version must move with it: update this
+/// text, bump [`DIALECT_VERSION`], and record the re-addressing event in the
+/// changelog.
+pub const DIALECT_CANONICAL_TEXT: &str = "canonical:1;roots-content-order;bindings-by-name;ties-framed-render+redacted-annotation-multiset+secret-digests;signature-parts-length-prefixed;enum-members-sorted";
+
 /// The dialect hash every image carries at this format version.
 ///
 /// Pinned by a test: changing the value changes every image, so it is a format
 /// decision with a version bump, never a side effect of an edit.
-pub const DIALECT_HASH_GOLDEN: u64 = 0x7782_d0ea_5e28_b75d;
+pub const DIALECT_HASH_GOLDEN: u64 = 0x23f9_4360_a471_a63e;
 
-/// Dialect identity: format version plus the semantic tables (unit
-/// discriminants, node kinds, aux tags). Stored in every header so a peer can
-/// refuse a module produced by an incompatible build before parsing a single
-/// record.
+/// The dialect hash format 1.0 images carry: the golden value before the
+/// dialect was versioned (INF-03 / BND-F1 / R2-VER-03).
+///
+/// The 1.0 preimage baked `FORMAT_MINOR` (0) into the hash, so every stored
+/// 1.0 image carries this value. It stays accepted by [`is_accepted_dialect`]
+/// so a store full of 1.0 images keeps loading under a 1.1 decoder; a 1.0
+/// image is valid but not canonical under 1.1, and migrates by re-encoding.
+/// Remove this acceptance only at a future major version, never silently.
+pub const DIALECT_HASH_GOLDEN_1_0: u64 = 0x7782_d0ea_5e28_b75d;
+
+/// Dialect identity: format major plus the dialect version plus the semantic
+/// tables (unit discriminants, node kinds, aux tags) plus the canonical-form
+/// rules. Stored in every header so a peer can refuse a module produced by an
+/// incompatible build before parsing a single record.
+///
+/// The wire minor is deliberately NOT an input: a minor bump must not
+/// re-address stored images (R2-VER-03 — the minor-acceptance branch in
+/// `Header::parse` was dead exactly because the hash covered the minor).
+/// A hash-affecting canonical-form change moves [`DIALECT_VERSION`] instead.
 pub fn dialect_hash() -> u64 {
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"active-infinity/dialect");
     hasher.update(&FORMAT_MAJOR.to_le_bytes());
-    hasher.update(&FORMAT_MINOR.to_le_bytes());
+    hasher.update(&DIALECT_VERSION.to_le_bytes());
+    hasher.update(&crate::unit::UNIT_MAX_BUILTIN.to_le_bytes());
+    hasher.update(DIALECT_KINDS_TEXT.as_bytes());
+    hasher.update(DIALECT_AUX_TAGS_TEXT.as_bytes());
+    hasher.update(DIALECT_CANONICAL_TEXT.as_bytes());
+    let digest = hasher.finalize();
+    let mut bytes = [0u8; 8];
+    bytes.copy_from_slice(&digest.as_bytes()[..8]);
+    u64::from_le_bytes(bytes)
+}
+
+/// The format-1.0 dialect hash, recomputed from the frozen 1.0 preimage
+/// (major, minor 0, unit limit, kind and aux tables) — not a literal, so the
+/// preimage and the pinned golden cannot drift apart silently. Pinned by a
+/// test against [`DIALECT_HASH_GOLDEN_1_0`].
+pub fn dialect_hash_1_0() -> u64 {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"active-infinity/dialect");
+    hasher.update(&FORMAT_MAJOR.to_le_bytes());
+    hasher.update(&0u16.to_le_bytes());
     hasher.update(&crate::unit::UNIT_MAX_BUILTIN.to_le_bytes());
     hasher.update(DIALECT_KINDS_TEXT.as_bytes());
     hasher.update(DIALECT_AUX_TAGS_TEXT.as_bytes());
@@ -806,6 +866,14 @@ pub fn dialect_hash() -> u64 {
     let mut bytes = [0u8; 8];
     bytes.copy_from_slice(&digest.as_bytes()[..8]);
     u64::from_le_bytes(bytes)
+}
+
+/// Whether a stored dialect hash is one this build accepts: the current
+/// dialect, or the legacy 1.0 dialect (the migration acceptance — see
+/// [`DIALECT_HASH_GOLDEN_1_0`]). The image and stream paths must both use
+/// this one predicate, or they diverge again (R2-VER-03).
+pub fn is_accepted_dialect(hash: u64) -> bool {
+    hash == dialect_hash() || hash == DIALECT_HASH_GOLDEN_1_0
 }
 
 #[cfg(test)]

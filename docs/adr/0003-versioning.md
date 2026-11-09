@@ -26,6 +26,11 @@
    the real publish, then the same tag pushed to both organizations' remotes.
 5. A published version is never yanked without an ADR; withdrawal breaks content
    addressing for every replica that already stored modules.
+6. A hash-affecting canonical-form change bumps the dialect version
+   (`DIALECT_VERSION`, covered by `dialect_hash()`) and the format minor
+   with it — never in a patch release (INF-03, format 1.1). The wire minor
+   is a header field, not a hash input, so a minor bump does not re-address
+   stored images; the legacy 1.0 dialect stays accepted until a future major.
 
 ## Consequences
 

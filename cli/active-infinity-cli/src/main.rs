@@ -903,25 +903,35 @@ fn check_case(kind: &str, bytes: &[u8], case: &serde_json::Value) -> Result<(), 
     let limits = limits_from(case)?;
     match kind {
         "valid" => {
-            validate_with(
+            // The manifest's `canonical: "no"` marks a vector that is valid
+            // but not canonical: it must be checked leniently, not refused
+            // by the default canonical proof (INF-02 made the default prove
+            // canonical form, which left this flag consulted only after the
+            // refusal — the non-canonical case could never pass).
+            let canonical = case["options"]["canonical"].as_str() != Some("no");
+            // The validated meta carries the stored hash, already proved
+            // against the bytes (`verify_hash` is on by default) — using it
+            // instead of `content_hash_hex` matters for the non-canonical
+            // case, whose hash helper refuses it under the default proof.
+            let meta = validate_with(
                 bytes,
                 DecodeOpts {
                     limits,
+                    verify_canonical: canonical,
                     ..DecodeOpts::default()
                 },
             )
             .map_err(|error| format!("{}: {error}", error.code()))?;
-            let actual =
-                content_hash_hex(bytes).map_err(|error| format!("{}: {error}", error.code()))?;
+            let actual = active_infinity::ir::hash_hex(&meta.content_hash);
             let expected = case["content_hash"].as_str().unwrap_or("");
             if actual != expected {
                 return Err(format!("hash {actual} != {expected}"));
             }
-            let canonical = case["options"]["canonical"].as_str() != Some("no");
             let decoded = decode_with(
                 bytes,
                 DecodeOpts {
                     limits,
+                    verify_canonical: canonical,
                     ..DecodeOpts::default()
                 },
             )

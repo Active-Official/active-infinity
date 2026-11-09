@@ -1,4 +1,4 @@
-# Active Infinity wire layout (`AINF`, format 1.0)
+# Active Infinity wire layout (`AINF`, format 1.1)
 
 **Status:** normative. This document is the contract: an implementation that
 disagrees with it is wrong, and the repository's `tests/doc_gate.rs` fails the
@@ -11,7 +11,7 @@ children, never stored independently, so a module cannot carry a graph that
 disagrees with its nodes.
 
 - The magic is `AINF`.
-- The format version is 1, with the minor number currently 0.
+- The format version is 1, with the minor number currently 1.
 - The fixed header size is 224 bytes.
 - The content hash is Blake3-256 over the whole canonical image with the hash
   field zeroed.
@@ -27,7 +27,7 @@ disagrees with its nodes.
 |-------:|-----:|-------|
 | 0 | 4 | magic `41 49 4E 46` (`AINF`) |
 | 4 | 2 | format major version (`1`) |
-| 6 | 2 | format minor version (`0`) |
+| 6 | 2 | format minor version (`1`) |
 | 8 | 2 | header flags |
 | 10 | 2 | header size (`224`) |
 | 12 | 4 | reserved (zero) |
@@ -62,27 +62,38 @@ without its section, is `infinity/annotation`, `infinity/provenance`,
 ### 1.2 Dialect hash
 
 `dialect_hash = first 8 bytes of Blake3("active-infinity/dialect" || major ||
-minor || unit-table-limit || node-kind-range || aux-tag-set)`.
+dialect-version || unit-table-limit || node-kind-range || aux-tag-set ||
+canonical-form)`.
 
 The preimage is byte-exact and independent of host endianness or language:
-`major` and `minor` are 2-byte little-endian, `unit-table-limit` is 4-byte
-little-endian (`max(UNIT_MAX_BUILTIN)`, currently 66), and the two fragments are
-ASCII with no terminator:
+`major` is 2-byte little-endian, `dialect-version` is 8-byte little-endian
+(currently 1), `unit-table-limit` is 4-byte little-endian
+(`max(UNIT_MAX_BUILTIN)`, currently 66), and the three fragments are ASCII
+with no terminator:
 
 ```text
 node-kinds:0..=24
 aux-tags:0,1,2,3,4,10,11,12,20,21,22,23,24,25,26,30,31
+canonical:1;roots-content-order;bindings-by-name;ties-framed-render+redacted-annotation-multiset+secret-digests;signature-parts-length-prefixed;enum-members-sorted
 ```
 
 The tag list is in ascending order, comma-separated, with no spaces. The
 constants that produce it (`NODE_KIND_MAX`, `AUX_TAGS`, `DIALECT_KINDS_TEXT`,
-`DIALECT_AUX_TAGS_TEXT`) and the golden value `0x7782_d0ea_5e28_b75d` are pinned
+`DIALECT_AUX_TAGS_TEXT`, `DIALECT_VERSION`, `DIALECT_CANONICAL_TEXT`) and the
+golden value `0x23f9_4360_a471_a63e` are pinned
 by `tests/marathon_layout_tests.rs`, which fails if a tag or kind is added
-without updating the preimage.
+without updating the preimage. The canonical-form fragment names the rules
+the dialect covers; changing any of them moves the dialect version (see §10).
 
-A reader refuses a different dialect with `infinity/dialect` before parsing any
-record. The dialect changes only when the meaning of an existing id changes,
-which the versioning rules forbid (§10).
+The wire minor is deliberately NOT part of the preimage: a minor bump must
+not re-address stored images. A reader accepts the current dialect and the
+legacy format-1.0 dialect `0x7782_d0ea_5e28_b75d` (whose preimage baked the
+minor in), and refuses any other dialect with `infinity/dialect` before
+parsing any record. A 1.0 image is structurally valid but not canonical
+under 1.1: it migrates by re-encoding, which writes the 1.1 header and a new
+content hash. The dialect changes only when the meaning of an existing id
+changes, which the versioning rules forbid (§10), or when a canonical-form
+rule changes, which moves the dialect version instead.
 
 ### 1.3 Content hash
 
@@ -675,8 +686,16 @@ this is an encoder-side error rather than a wire error.
   codes are never reused or renumbered.
 - New units are added as named units until the built-in table is revised in a
   major version.
-- The dialect hash pins the exact semantic tables, so a peer refuses a module
-  from an incompatible build before parsing a single record.
+- The dialect hash pins the exact semantic tables and the canonical-form rules,
+  so a peer refuses a module from an incompatible build before parsing a
+  single record.
+- The **dialect version** (`DIALECT_VERSION`, covered by the dialect hash)
+  changes whenever a hash-affecting canonical-form rule changes. That change
+  bumps `FORMAT_MINOR` with it and is never shipped in a patch release: the
+  2.4.0/2.4.1/2.4.2 same-day re-addressing (INF-03) is the failure this rule
+  exists to prevent.
+- A reader accepts the current dialect and the legacy 1.0 dialect; the legacy
+  acceptance is removed only at a future major version.
 
 ---
 

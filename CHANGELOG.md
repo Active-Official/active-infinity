@@ -2,6 +2,42 @@
 
 ## Unreleased
 
+### Changed (hash-affecting — re-encode required)
+
+- **The dialect is versioned; the format is now 1.1 (INF-03, BND-F1, R2-VER-03).**
+  `dialect_hash()` no longer covers `FORMAT_MINOR`: it covers the format major,
+  a new explicit `DIALECT_VERSION` (currently 1) and the canonical-form rules
+  (`DIALECT_CANONICAL_TEXT`). A reader at 1.1 accepts 1.0 images — the 1.0
+  dialect (`0x7782_d0ea_5e28_b75d`) stays accepted in `validate` and in the
+  stream Begin handler — so the first minor bump no longer bricks every stored
+  image: before this fix a 1.1 decoder refused every 1.0 image with
+  `infinity/dialect`, because the minor-acceptance branch could never succeed.
+  The 1.1 dialect is `0x23f9_4360_a471_a63e`. A 1.0 image is structurally valid
+  but not canonical under 1.1: migrate by decoding leniently
+  (`DecodeOpts { verify_canonical: false, .. }`), re-encoding, and storing the
+  1.1 image, which has a new content hash. Any future hash-affecting
+  canonical-form change must bump `DIALECT_VERSION` (and `FORMAT_MINOR` with
+  it), never ship in a patch release.
+
+- **Canonical form**: enum members (in a schema type and in an `Enum`
+  constraint) are sorted before interning, so two modules that differ only in
+  member order encode to the same bytes and share one content hash. Images
+  produced before this change with unsorted members still validate leniently
+  but fail `validate_canonical`; re-encode them to migrate.
+
+- **Canonical form**: annotation subjects and constraint expressions are numbered
+  in *content* order (a depth-limited, id-free rendering of the subtree) instead
+  of the order `annotate` was called, so the call order can no longer change the
+  bytes. Hash-affecting only for modules whose annotation-only subjects were
+  added out of content order.
+
+- **Canonical form**: node numbering orders bindings by name. Ordering the binding
+  roots by numeric node id let arena construction order leak into the image, so
+  two modules with the same content could hash differently. A module whose
+  binding-only nodes were pushed in an order other than their names re-encodes
+  to a different (correct) hash; `validate_canonical` reports the old bytes as
+  not canonical.
+
 ### Fixed
 
 - **Schemas are canonicalized on load (INF-SCHEMA-05).** `Schema::from_bytes`
@@ -44,102 +80,6 @@
   The walk is iterative and budgeted, so a hand-built cyclic arena is refused
   rather than walked forever (DeepSeek F-05).
 
-## 2.4.0 - 2026-11-03
-
-### Added
-
-- **`interop::Redactor`**: a handle for one module's secret literals that
-  rewrites a derived module (a cone, a restricted subtree, an evaluation copy)
-  until no text carries a secret. It covers every surface the codec interns —
-  string, identifier, `Env` name, table and schema field names, interpolated
-  literals, blob media type, deprecation notes, enum members and constraint
-  pattern/custom text, patch paths, annotations, provenance and binding names —
-  and refuses a redaction that would collapse two names onto one key.
-- **`interop::redact_module` / `interop::redact_image`**: the same rule applied
-  to a whole module or image. This is the projection rule applied to the bytes:
-  a plain `Str` that copies a secret literal is redacted too, because the codec
-  has no way to tell a copy from data.
-- **`infinity/stream-checksum`**: a frame checksum fault now has its own code;
-  `infinity/stream-hash` is reserved for an `End`-frame module-hash mismatch.
-- **`MAX_PROTOBUF_WORK`**: the protobuf projection charges every nested copy and
-  refuses past 64 MiB of copying (`infinity/limit`), so a deep chain over a
-  large shared string is a refusal instead of a 15-second stall.
-
-### Fixed
-
-- **Canonical form**: two roots that render identically (equal integers, two
-  secrets, identical constraint expressions) were ordered by arena id, so the
-  same logical module built in another order produced other bytes and another
-  hash. The tie-break now orders them by the redacted annotation multiset
-  attached to the root and by a digest of each secret in the subtree.
-- **Validation**: a secret entry must be named by exactly one node, in node
-  order; an aliased entry and an unreferenced trailing entry are
-  `infinity/secret-entry` instead of covert bytes `decode` never reports.
-- **Merge**: a conflict path (a field name) is redacted against every secret in
-  the three inputs before it reaches the report.
-- **Graph labels**: two nodes that would receive the same redacted path now take
-  an id label instead, so `why`/`impact` no longer silently drop one.
-- **Store**: an over-sized planted object and an absent one answer the same
-  code, `infinity/store`.
-- **Bridge**: lowering an arbitrary `CoreModule` refuses a reference cycle
-  (`infinity/cycle`) and a chain past 256 levels (`infinity/limit`) instead of
-  recursing until the stack aborts.
-- **Projection depth**: capped at 256 (was 1024) so the recursive projection
-  walk cannot abort the process on a legal module.
-
-## 2.4.1 - 2026-11-03
-
-### Fixed
-
-- **Canonical form**: the tie-break signature added in 2.4.0 rendered a
-  constraint's expression by node id, which the encode remaps, so an image with
-  several identical constraint subjects was not a fixed point. The expression is
-  rendered by content now.
-## 2.4.2 - 2026-11-03
-
-### Fixed
-
-- **Redaction**: a custom unit name (`Quantity { unit: Named }`) is text and is
-  redacted; a derived module whose binary surface (provenance parent, a hash
-  entry, an extension, a blob payload or hash) copies a secret is refused, and
-  a parent or hash entry that copies one is dropped.
-- **Redaction labels**: a name (identifier, `Env` name, field, binding, unit,
-  media type) replaces the occurrence it contains, as the projections do; only
-  data text collapses whole. Two names that differ outside a secret stay
-  distinct.
-- **Canonical form**: the tie-break signature length-prefixes every part, so an
-  annotation text containing the join separators can no longer collide with a
-  different annotation set and fall back to arena order.
-- **Canonical form**: the secret-digest walk is charged against the annotation
-  key budget.
-- **Bridge**: a deeply nested literal is refused with `infinity/limit` instead of
-  aborting the stack.
-- **Value paths**: a binding label is charged against the export cap and never
-  shares another node's label.
-- **Merge**: annotation, provenance and extension keys share one cumulative
-  redaction budget.
-- **Codes**: `StreamChecksum` is preserved through the delta path; every fault a
-  planted object raises in `Store::get` is `infinity/store`.
-## Unreleased
-
-### Fixed
-
-- **Canonical form**: enum members (in a schema type and in an `Enum`
-  constraint) are sorted before interning, so two modules that differ only in
-  member order encode to the same bytes and share one content hash. Images
-  produced before this change with unsorted members still `validate` but fail
-  `validate_canonical`; re-encode them to migrate.
-- **Canonical form**: annotation subjects and constraint expressions are numbered
-  in *content* order (a depth-limited, id-free rendering of the subtree) instead
-  of the order `annotate` was called, so the call order can no longer change the
-  bytes. Hash-affecting only for modules whose annotation-only subjects were
-  added out of content order.
-- **Canonical form**: node numbering orders bindings by name. Ordering the binding
-  roots by numeric node id let arena construction order leak into the image, so
-  two modules with the same content could hash differently. A module whose
-  binding-only nodes were pushed in an order other than their names re-encodes
-  to a different (correct) hash; `validate_canonical` reports the old bytes as
-  not canonical.
 - **Validation** (`validate.rs`): node reserved bytes must be zero; the
   `children`/`fields`/`parts` tables must be packed sequentially in node order;
   every aux entry must be referenced exactly once; a table type's flag must agree
@@ -290,6 +230,92 @@
   calling `format!` per byte: 4.1 µs to 126 ns per 32-byte digest on the
   benchmark host, one allocation instead of 32. Output is byte-identical
   (lowercase hex) and `parse_hash_hex` round-trips unchanged.
+
+## 2.4.0 - 2026-11-03
+
+### Added
+
+- **`interop::Redactor`**: a handle for one module's secret literals that
+  rewrites a derived module (a cone, a restricted subtree, an evaluation copy)
+  until no text carries a secret. It covers every surface the codec interns —
+  string, identifier, `Env` name, table and schema field names, interpolated
+  literals, blob media type, deprecation notes, enum members and constraint
+  pattern/custom text, patch paths, annotations, provenance and binding names —
+  and refuses a redaction that would collapse two names onto one key.
+- **`interop::redact_module` / `interop::redact_image`**: the same rule applied
+  to a whole module or image. This is the projection rule applied to the bytes:
+  a plain `Str` that copies a secret literal is redacted too, because the codec
+  has no way to tell a copy from data.
+- **`infinity/stream-checksum`**: a frame checksum fault now has its own code;
+  `infinity/stream-hash` is reserved for an `End`-frame module-hash mismatch.
+- **`MAX_PROTOBUF_WORK`**: the protobuf projection charges every nested copy and
+  refuses past 64 MiB of copying (`infinity/limit`), so a deep chain over a
+  large shared string is a refusal instead of a 15-second stall.
+
+### Fixed
+
+- **Canonical form**: two roots that render identically (equal integers, two
+  secrets, identical constraint expressions) were ordered by arena id, so the
+  same logical module built in another order produced other bytes and another
+  hash. The tie-break now orders them by the redacted annotation multiset
+  attached to the root and by a digest of each secret in the subtree.
+- **Validation**: a secret entry must be named by exactly one node, in node
+  order; an aliased entry and an unreferenced trailing entry are
+  `infinity/secret-entry` instead of covert bytes `decode` never reports.
+- **Merge**: a conflict path (a field name) is redacted against every secret in
+  the three inputs before it reaches the report.
+- **Graph labels**: two nodes that would receive the same redacted path now take
+  an id label instead, so `why`/`impact` no longer silently drop one.
+- **Store**: an over-sized planted object and an absent one answer the same
+  code, `infinity/store`.
+- **Bridge**: lowering an arbitrary `CoreModule` refuses a reference cycle
+  (`infinity/cycle`) and a chain past 256 levels (`infinity/limit`) instead of
+  recursing until the stack aborts.
+- **Projection depth**: capped at 256 (was 1024) so the recursive projection
+  walk cannot abort the process on a legal module.
+
+## 2.4.1 - 2026-11-03
+
+### Fixed
+
+- **Canonical form**: the tie-break signature added in 2.4.0 rendered a
+  constraint's expression by node id, which the encode remaps, so an image with
+  several identical constraint subjects was not a fixed point. The expression is
+  rendered by content now.
+## 2.4.2 - 2026-11-03
+
+### Fixed
+
+- **Redaction**: a custom unit name (`Quantity { unit: Named }`) is text and is
+  redacted; a derived module whose binary surface (provenance parent, a hash
+  entry, an extension, a blob payload or hash) copies a secret is refused, and
+  a parent or hash entry that copies one is dropped.
+- **Redaction labels**: a name (identifier, `Env` name, field, binding, unit,
+  media type) replaces the occurrence it contains, as the projections do; only
+  data text collapses whole. Two names that differ outside a secret stay
+  distinct.
+- **Canonical form**: the tie-break signature length-prefixes every part, so an
+  annotation text containing the join separators can no longer collide with a
+  different annotation set and fall back to arena order.
+- **Canonical form**: the secret-digest walk is charged against the annotation
+  key budget.
+- **Bridge**: a deeply nested literal is refused with `infinity/limit` instead of
+  aborting the stack.
+- **Value paths**: a binding label is charged against the export cap and never
+  shares another node's label.
+- **Merge**: annotation, provenance and extension keys share one cumulative
+  redaction budget.
+- **Codes**: `StreamChecksum` is preserved through the delta path; every fault a
+  planted object raises in `Store::get` is `infinity/store`.
+
+**Re-addressing note (INF-03).** 2.4.0, 2.4.1 and 2.4.2 — all shipped
+2026-11-03 — each made a hash-affecting canonical-form change (the tie-break
+signature, its fixed-point render, the length-prefixed parts) while the format
+stayed 1.0 and the dialect hash covered no canonical-form rule, so the same
+logical module hashes differently across the three patch releases with no
+version signal. Format 1.1 (see Unreleased) versions the dialect
+(`DIALECT_VERSION`, covered by the dialect hash), so a hash-affecting
+canonical-form change can no longer ship in a patch release.
 
 ## CLI 0.3.1 - 2026-10-31
 

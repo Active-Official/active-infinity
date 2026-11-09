@@ -23,3 +23,12 @@ deny = [
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+
+[graph]
+# R2-SUPPLY-01: build the deny graph from ALL features, not just the
+# defaults. Without this, `cargo deny check` never sees crates that only
+# optional features pull in (5 packages in this repo: zstd, zstd-sys, ...),
+# so bans/licenses/sources are blind there — a banned crate in the `zstd`
+# or `signatures` feature would pass CI. With the key set, the graph covers
+# every package in Cargo.lock (168/168).
+all-features = true

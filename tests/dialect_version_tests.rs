@@ -37,7 +37,7 @@ use active_infinity::layout::{
     is_accepted_dialect, Header, DIALECT_CANONICAL_TEXT, DIALECT_HASH_GOLDEN,
     DIALECT_HASH_GOLDEN_1_0, DIALECT_VERSION, FORMAT_MAJOR, FORMAT_MINOR,
 };
-use active_infinity::stream::{encode_stream, Frame, FrameKind, StreamDecoder};
+use active_infinity::stream::{encode_stream, FrameKind, StreamDecoder};
 use active_infinity::{
     decode_with, encode, validate, validate_canonical, validate_with, DecodeOpts, InfinityModule,
     Inode,

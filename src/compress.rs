@@ -7,8 +7,11 @@
 //! # Limits and trust
 //!
 //! - Every decompression takes an explicit output ceiling. The ceiling bounds
-//!   the allocation; pass the largest output you are willing to accept (for an
-//!   image, [`crate::Limits::max_total_bytes`]).
+//!   the *decoded output*, never the allocation: decoding streams into a
+//!   buffer that grows with the bytes actually produced, so a frame that
+//!   records no content size costs the decoded bytes plus decoder state,
+//!   not the ceiling (INF-COMPRESS-01). Pass the largest output you are
+//!   willing to accept (for an image, [`crate::Limits::max_total_bytes`]).
 //! - A dictionary is a compression hint. zstd can decompress a frame that does
 //!   not use the supplied dictionary, so a successful
 //!   [`decompress_with_dictionary`] says nothing about which dictionary the
@@ -20,6 +23,8 @@
 //!   `docs/spec/security.md`).
 //! - Levels outside the build's zstd range are refused instead of being clamped
 //!   silently, so a caller's intent is never replaced by a different level.
+
+use std::io::Read;
 
 use crate::{Error, Limits, Result};
 
@@ -93,10 +98,76 @@ pub fn compress(bytes: &[u8], level: i32) -> Result<Vec<u8>> {
     zstd::bulk::compress(bytes, level).map_err(|_| Error::Compression("zstd compress"))
 }
 
+/// Read chunk for streaming decompression: zstd's recommended output buffer
+/// (`ZSTD_DStreamOutSize()`, 128 KiB), so one `read` can return a full block
+/// without the decoder stalling on a small caller buffer. A heap buffer, not
+/// a stack array: 128 KiB would eat a small thread's stack, and this crate
+/// pins a small-stack fix (INF-15).
+const DECODE_CHUNK: usize = 128 * 1024;
+
+/// Decompress through zstd's streaming decoder into a buffer that grows
+/// with the decoded output.
+///
+/// The ceiling bounds the *output*, never the allocation: the output buffer
+/// starts from a small seed (the compressed input length, capped at 64 KiB)
+/// and grows geometrically as bytes arrive. A frame that records no content
+/// size therefore costs the decoded bytes plus decoder state — never the
+/// ceiling — no matter how large `max_output` is. The old code called
+/// `zstd::bulk::decompress`, which does `Vec::with_capacity(capacity)` with
+/// `capacity` falling back to the caller's `max_output` for a size-less
+/// frame (INF-COMPRESS-01: 1 GiB committed for a 35-byte payload at a 1 GiB
+/// ceiling).
+///
+/// The ceiling is still enforced exactly: the first chunk that would push
+/// the output past `max_output` fails closed with the same
+/// `infinity/compression` error the bulk call returned for an oversize
+/// frame. Frames that do record a size are unaffected in outcome: zstd
+/// itself rejects a frame whose decoded output disagrees with its declared
+/// size, so for every input that decodes successfully the streaming
+/// ceiling and the old declared-size check agree.
+fn decompress_streaming(
+    bytes: &[u8],
+    max_output: usize,
+    dictionary: Option<&[u8]>,
+    decode_error: &'static str,
+) -> Result<Vec<u8>> {
+    let mut decoder = match dictionary {
+        Some(dictionary) => zstd::stream::read::Decoder::with_dictionary(bytes, dictionary)
+            .map_err(|_| Error::Compression("zstd dictionary decompressor"))?,
+        None => zstd::stream::read::Decoder::with_buffer(bytes)
+            .map_err(|_| Error::Compression(decode_error))?,
+    };
+    // Seed from the compressed length, capped: the input is already in
+    // memory, so this never allocates more than the caller already holds,
+    // and a small frame starts small. Growth after that is geometric
+    // (`extend_from_slice`), driven by decoded bytes.
+    let mut out = Vec::with_capacity(bytes.len().min(64 * 1024));
+    let mut chunk = vec![0u8; DECODE_CHUNK];
+    loop {
+        match decoder.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => {
+                if n > max_output.saturating_sub(out.len()) {
+                    return Err(Error::Compression(decode_error));
+                }
+                out.extend_from_slice(&chunk[..n]);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => return Err(Error::Compression(decode_error)),
+        }
+    }
+    Ok(out)
+}
+
 /// Decompress with an explicit output ceiling. The ceiling is mandatory so a
 /// hostile frame cannot expand without bound, and empty input is refused: an
 /// empty file is not a zstd frame, and returning empty bytes for it reads as a
 /// successful decode.
+///
+/// The ceiling bounds the decoded output, not the allocation: decoding
+/// streams into a buffer that grows with the bytes actually produced, so a
+/// size-less frame costs the decoded bytes plus decoder state, never the
+/// ceiling (INF-COMPRESS-01).
 pub fn decompress(bytes: &[u8], max_output: usize) -> Result<Vec<u8>> {
     if bytes.is_empty() {
         return Err(Error::Compression("empty compressed input"));
@@ -106,7 +177,7 @@ pub fn decompress(bytes: &[u8], max_output: usize) -> Result<Vec<u8>> {
             "compressed input carries no content frame",
         ));
     }
-    zstd::bulk::decompress(bytes, max_output).map_err(|_| Error::Compression("zstd decompress"))
+    decompress_streaming(bytes, max_output, None, "zstd decompress")
 }
 
 /// Compress with a trained dictionary.
@@ -125,6 +196,10 @@ pub fn compress_with_dictionary(bytes: &[u8], level: i32, dictionary: &[u8]) -> 
 ///
 /// A frame that does not use the dictionary still decompresses; the dictionary
 /// is a hint, never proof of the producer.
+///
+/// As with [`decompress`], the ceiling bounds the decoded output, not the
+/// allocation: decoding streams into a buffer that grows with the bytes
+/// actually produced (INF-COMPRESS-01).
 pub fn decompress_with_dictionary(
     bytes: &[u8],
     max_output: usize,
@@ -138,11 +213,12 @@ pub fn decompress_with_dictionary(
             "compressed input carries no content frame",
         ));
     }
-    let mut decompressor = zstd::bulk::Decompressor::with_dictionary(dictionary)
-        .map_err(|_| Error::Compression("zstd dictionary decompressor"))?;
-    decompressor
-        .decompress(bytes, max_output)
-        .map_err(|_| Error::Compression("zstd decompress with dictionary"))
+    decompress_streaming(
+        bytes,
+        max_output,
+        Some(dictionary),
+        "zstd decompress with dictionary",
+    )
 }
 
 /// Train a dictionary from representative canonical images or frames.
@@ -172,6 +248,7 @@ pub fn train_dictionary<S: AsRef<[u8]>>(samples: &[S], max_size: usize) -> Resul
 mod tests {
     use super::*;
     use crate::{content_hash, decode, encode, InfinityModule, Inode};
+    use std::io::{Read, Write};
 
     fn image(seed: i64) -> Vec<u8> {
         let mut module = InfinityModule::new();
@@ -183,6 +260,23 @@ mod tests {
         let root = module.push(Inode::Table { fields });
         module.set_root(Some(root));
         encode(&module).expect("encode")
+    }
+
+    /// A zstd frame with NO content-size field, from the streaming encoder
+    /// (which cannot know the total size up front). This is the frame shape
+    /// INF-COMPRESS-01 is about: the old bulk path allocated the caller's
+    /// full ceiling for exactly this input.
+    fn sizeless_frame(payload: &[u8]) -> Vec<u8> {
+        let mut encoder = zstd::stream::Encoder::new(Vec::new(), 3).expect("streaming encoder");
+        encoder.write_all(payload).expect("encode");
+        let frame = encoder.finish().expect("finish");
+        // Frame header descriptor, byte 4: bit 5 (0x20) is the content-size flag.
+        assert_eq!(
+            frame[4] & 0x20,
+            0,
+            "streaming encoder must not record a content size"
+        );
+        frame
     }
 
     #[test]
@@ -256,5 +350,80 @@ mod tests {
         let image = image(0);
         let compressed = compress(&image, 3).expect("compress");
         assert!(decompress(&compressed, 8).is_err());
+    }
+
+    #[test]
+    fn sizeless_frame_round_trips() {
+        // INF-COMPRESS-01: the streaming path must decode a frame that
+        // records no content size, not just the sized frames `compress`
+        // produces.
+        let payload = b"hello world, this is a tiny payload";
+        let frame = sizeless_frame(payload);
+        let restored = decompress(&frame, 1 << 30).expect("decompress");
+        assert_eq!(restored.as_slice(), payload);
+    }
+
+    #[test]
+    fn sizeless_frame_with_dictionary_round_trips() {
+        // INF-COMPRESS-01, dictionary path: same streaming decode, same
+        // allocation behaviour as the plain path.
+        let payload = b"hello world, this is a tiny payload";
+        let samples: Vec<Vec<u8>> = (0..32u8)
+            .map(|seed| {
+                let mut sample = payload.to_vec();
+                sample.push(seed);
+                sample
+            })
+            .collect();
+        let dictionary = train_dictionary(&samples, 4_096).expect("train");
+        let mut reader = zstd::stream::read::Encoder::with_dictionary(
+            std::io::Cursor::new(payload.as_slice()),
+            3,
+            &dictionary,
+        )
+        .expect("streaming dictionary encoder");
+        let mut frame = Vec::new();
+        reader.read_to_end(&mut frame).expect("encode");
+        assert_eq!(
+            frame[4] & 0x20,
+            0,
+            "streaming encoder must not record a content size"
+        );
+        let restored =
+            decompress_with_dictionary(&frame, 1 << 30, &dictionary).expect("decompress");
+        assert_eq!(restored.as_slice(), payload);
+    }
+
+    #[test]
+    fn sizeless_frame_ceiling_still_fails_closed() {
+        // INF-COMPRESS-01: the ceiling is enforced on the decoded output
+        // even when there is no declared size for a bulk path to lean on —
+        // the loop aborts as soon as the output would pass the ceiling.
+        let payload = vec![b'x'; 100];
+        let frame = sizeless_frame(&payload);
+        let error = decompress(&frame, 8).expect_err("ceiling exceeded");
+        assert_eq!(error.code(), "infinity/compression", "{error}");
+        // One 100-byte sample of a single repeated byte cannot train a
+        // dictionary (zstd refuses it), so train from varied samples, as
+        // the other dictionary tests do.
+        let samples: Vec<Vec<u8>> = (0..32u8)
+            .map(|seed| {
+                let mut sample = payload.clone();
+                sample.push(seed);
+                sample
+            })
+            .collect();
+        let dictionary = train_dictionary(&samples, 4_096).expect("train");
+        let mut reader = zstd::stream::read::Encoder::with_dictionary(
+            std::io::Cursor::new(payload.as_slice()),
+            3,
+            &dictionary,
+        )
+        .expect("streaming dictionary encoder");
+        let mut dict_frame = Vec::new();
+        reader.read_to_end(&mut dict_frame).expect("encode");
+        let error =
+            decompress_with_dictionary(&dict_frame, 8, &dictionary).expect_err("ceiling exceeded");
+        assert_eq!(error.code(), "infinity/compression", "{error}");
     }
 }

@@ -21,6 +21,14 @@
 //!   next to attacker-influenced fields and exposing the compressed length is a
 //!   CRIME-style oracle; compress the redacted projection instead (see
 //!   `docs/spec/security.md`).
+//! - Compression takes an explicit input ceiling in [`compress_checked`]:
+//!   [`compress`] itself is unbounded, so callers with untrusted or
+//!   unbounded input should pass [`recommended_compress_max_input`] (the
+//!   codec's image ceiling) as the ceiling (INF-COMPRESS-02).
+//! - Dictionary training is bounded twice: [`MAX_DICTIONARY_BYTES`]
+//!   (112,640 bytes, zstd's own `--maxdict` default) caps the dictionary,
+//!   and [`MAX_TRAINING_SAMPLE_BYTES`] (100x that) caps the total sample
+//!   volume, per zstd's own training guidance (INF-COMPRESS-02).
 //! - Levels outside the build's zstd range are refused instead of being clamped
 //!   silently, so a caller's intent is never replaced by a different level.
 
@@ -92,10 +100,50 @@ fn carries_content_frame(bytes: &[u8]) -> bool {
     }
 }
 
+/// Recommended input ceiling for [`compress`], in bytes: the codec's image
+/// ceiling ([`Limits::default().max_total_bytes`]).
+///
+/// `compress` takes a canonical image, and a canonical image is bounded by
+/// that ceiling by construction, so an input larger than this is never a
+/// valid image: it is a caller error, not a bigger job. Callers that take
+/// untrusted or unbounded input should pass this value (or their own
+/// [`Limits`]' `max_total_bytes`) as `max_input` to [`compress_checked`]
+/// instead of calling [`compress`] directly (INF-COMPRESS-02).
+pub fn recommended_compress_max_input() -> usize {
+    Limits::default().max_total_bytes as usize
+}
+
 /// Compress a canonical image or frame payload with zstd.
+///
+/// The input is unbounded: zstd compresses whatever it is handed, so a
+/// caller that passes untrusted or unbounded bytes pays the compression
+/// work and the output allocation for all of it. Prefer [`compress_checked`]
+/// with [`recommended_compress_max_input`] (or your own [`Limits`]'
+/// `max_total_bytes`) unless the input is already bounded by construction
+/// (INF-COMPRESS-02). The behaviour of this function is unchanged: the
+/// ceiling lives in the checked variant, not here.
 pub fn compress(bytes: &[u8], level: i32) -> Result<Vec<u8>> {
     check_level(level)?;
     zstd::bulk::compress(bytes, level).map_err(|_| Error::Compression("zstd compress"))
+}
+
+/// Compress a canonical image or frame payload with zstd, refusing input
+/// above an explicit ceiling.
+///
+/// The ceiling is checked before the level and before zstd runs, so an
+/// oversize input costs one length comparison, not a compression pass. A
+/// refusal is [`Error::InvalidArgument`] (`infinity/invalid-argument`):
+/// the input is not a valid job for this call, not a compression failure.
+/// `max_input` is a per-call ceiling, not a global one: pass
+/// [`recommended_compress_max_input`] for the codec default, or your own
+/// [`Limits`]' `max_total_bytes` (INF-COMPRESS-02).
+pub fn compress_checked(bytes: &[u8], level: i32, max_input: usize) -> Result<Vec<u8>> {
+    if bytes.len() > max_input {
+        return Err(Error::InvalidArgument(
+            "compress input is above the caller's ceiling",
+        ));
+    }
+    compress(bytes, level)
 }
 
 /// Read chunk for streaming decompression: zstd's recommended output buffer
@@ -221,24 +269,78 @@ pub fn decompress_with_dictionary(
     )
 }
 
+/// Largest dictionary [`train_dictionary`] will train, in bytes: zstd's own
+/// `--maxdict` default, 112,640 bytes (110 KiB).
+///
+/// zstd's dictionary builder documentation (`zdict.h`) calls ~100 KiB "a
+/// reasonable dictionary" size, and the zstd CLI trains at most 112,640
+/// bytes by default; beyond that a dictionary buys no compression quality,
+/// only memory and training time. The repo's own dictionary tests train
+/// 4 KiB dictionaries, far inside the cap, so no in-repo caller is near
+/// it. This is an intended breaking change for the 1 GiB case the audit
+/// found accepted (INF-COMPRESS-02): a `max_size` above this is
+/// `infinity/invalid-argument`, refused before zstd is called.
+pub const MAX_DICTIONARY_BYTES: usize = 112_640;
+
+/// Largest total sample input [`train_dictionary`] will train from, in
+/// bytes: 100x [`MAX_DICTIONARY_BYTES`] (11,264,000 bytes, ~10.7 MiB).
+///
+/// zstd's dictionary builder documentation (`zdict.h`, and the zstd(1) man
+/// page) recommends the total size of all samples be about ~100x the target
+/// dictionary size — "10 MB for a 100 KB dictionary" — and warns that more
+/// samples only improve the dictionary's effectiveness up to that point.
+/// Past 100x the cap, extra samples buy no dictionary quality and only cost
+/// training time and the trainer's scan, so the total is refused with
+/// `infinity/invalid-argument` before zstd is called. The sum is computed
+/// with checked addition over the samples the caller already holds, and the
+/// check aborts as soon as the running total passes the cap, so no sample
+/// past the cap is even measured (INF-COMPRESS-02).
+pub const MAX_TRAINING_SAMPLE_BYTES: usize = 100 * MAX_DICTIONARY_BYTES;
+
 /// Train a dictionary from representative canonical images or frames.
 ///
-/// `max_size` is an allocation ceiling the caller chooses: it is the capacity
-/// zstd trains into. Zero is refused rather than passed through.
+/// `max_size` is an allocation ceiling the caller chooses, bounded by
+/// [`MAX_DICTIONARY_BYTES`]: zstd's own `--maxdict` default (112,640
+/// bytes), past which a dictionary buys no quality. The total size of all
+/// samples is bounded by [`MAX_TRAINING_SAMPLE_BYTES`] (100x the dictionary
+/// cap, per zstd's own training guidance). Both bounds are refused with
+/// `infinity/invalid-argument` before zstd is called; zero is refused
+/// rather than passed through (INF-COMPRESS-02).
 pub fn train_dictionary<S: AsRef<[u8]>>(samples: &[S], max_size: usize) -> Result<Vec<u8>> {
     if max_size == 0 {
         return Err(Error::InvalidArgument("dictionary size must be non-zero"));
     }
+    // zstd's allocator aborts the process (not an `Err`) for a large enough
+    // capacity, so the ceiling is enforced here: this crate's contract is to
+    // fail closed on every input. The cap is zstd's own `--maxdict`
+    // default, not the codec's image ceiling: a 1 GiB dictionary was
+    // accepted before this fix and buys nothing over a 112,640-byte one.
+    if max_size > MAX_DICTIONARY_BYTES {
+        return Err(Error::InvalidArgument(
+            "dictionary size is above the 112,640 byte dictionary ceiling",
+        ));
+    }
     if samples.is_empty() {
         return Err(Error::InvalidArgument("dictionary training needs samples"));
     }
-    // zstd's allocator aborts the process (not an `Err`) for a large enough
-    // capacity, so the ceiling is enforced here: this crate's contract is to
-    // fail closed on every input.
-    if max_size as u64 > Limits::default().max_total_bytes {
-        return Err(Error::InvalidArgument(
-            "dictionary size is above the codec's image ceiling",
-        ));
+    // The samples are already in memory, so this bounds the training work
+    // zstd does (its trainer scans every sample), not the caller's memory:
+    // past ~100x the dictionary size extra samples buy no dictionary
+    // quality (zstd's own guidance), only training time. Abort as soon as
+    // the running total passes the cap.
+    let mut total_bytes = 0usize;
+    for sample in samples {
+        total_bytes =
+            total_bytes
+                .checked_add(sample.as_ref().len())
+                .ok_or(Error::InvalidArgument(
+                    "dictionary training samples total overflowed",
+                ))?;
+        if total_bytes > MAX_TRAINING_SAMPLE_BYTES {
+            return Err(Error::InvalidArgument(
+                "dictionary training samples total above the 11,264,000 byte sample ceiling",
+            ));
+        }
     }
     zstd::dict::from_samples(samples, max_size)
         .map_err(|_| Error::Compression("zstd dictionary training"))
@@ -280,11 +382,104 @@ mod tests {
     }
 
     #[test]
-    fn train_refuses_a_dictionary_size_above_the_codec_ceiling() {
-        let samples = vec![image(0), image(1)];
-        let ceiling = Limits::default().max_total_bytes as usize;
-        let error = train_dictionary(&samples, ceiling + 1).expect_err("refused");
+    fn train_refuses_a_dictionary_size_above_the_dictionary_ceiling() {
+        // INF-COMPRESS-02: the cap is zstd's own `--maxdict` default
+        // (112,640 bytes), not the codec's image ceiling — a 1 GiB
+        // dictionary was accepted before this fix (W4 repro: Ok(142)).
+        let samples: Vec<Vec<u8>> = (0..32i64).map(image).collect();
+        // One byte past the cap is refused...
+        let error = train_dictionary(&samples, MAX_DICTIONARY_BYTES + 1).expect_err("refused");
         assert_eq!(error.code(), "infinity/invalid-argument", "{error}");
+        // ... and so is the 1 GiB size the audit found accepted.
+        let error = train_dictionary(&samples, 1 << 30).expect_err("refused");
+        assert_eq!(error.code(), "infinity/invalid-argument", "{error}");
+    }
+
+    /// Varied bytes for large-sample tests: a permutation cycle over
+    /// 0..=255, so zstd can train from the samples and any refusal comes
+    /// from the ceiling, never from a degenerate sample set.
+    fn varied(seed: u8, len: usize) -> Vec<u8> {
+        (0..len)
+            .map(|i| (i as u8).wrapping_add(seed).wrapping_mul(31))
+            .collect()
+    }
+
+    #[test]
+    fn train_refuses_samples_above_the_total_sample_ceiling() {
+        // INF-COMPRESS-02: 8 x 1,500,000 = 12,000,000 total sample bytes,
+        // above 100x the dictionary cap (11,264,000). Pre-fix the trainer
+        // ran on all of it (fail-before probe: Ok(390)).
+        let samples: Vec<Vec<u8>> = (0..8u8).map(|s| varied(s, 1_500_000)).collect();
+        let total: usize = samples.iter().map(Vec::len).sum();
+        assert!(total > MAX_TRAINING_SAMPLE_BYTES, "total is {total}");
+        let error = train_dictionary(&samples, 4_096).expect_err("refused");
+        assert_eq!(error.code(), "infinity/invalid-argument", "{error}");
+    }
+
+    #[test]
+    fn train_accepts_samples_at_the_total_sample_ceiling() {
+        // INF-COMPRESS-02: the total-sample cap is inclusive — exactly
+        // 100x the dictionary cap (8 x 1,408,000 = 11,264,000) trains.
+        let samples: Vec<Vec<u8>> = (0..8u8).map(|s| varied(s, 1_408_000)).collect();
+        let total: usize = samples.iter().map(Vec::len).sum();
+        assert_eq!(total, MAX_TRAINING_SAMPLE_BYTES, "total is {total}");
+        let dictionary = train_dictionary(&samples, 4_096).expect("cap trains");
+        assert!(!dictionary.is_empty() && dictionary.len() <= 4_096);
+        // The dictionary cap itself is accepted when the samples justify it:
+        // 11,264,000 bytes is exactly 100x the 112,640-byte cap, the ratio
+        // zstd's own guidance asks for. (A 112,640-byte dictionary cannot
+        // train from the 32 small images above — the dictionary's content
+        // comes from the samples — so the acceptance arm lives here, where
+        // the sample volume matches the cap.)
+        let dictionary = train_dictionary(&samples, MAX_DICTIONARY_BYTES).expect("cap trains");
+        assert!(!dictionary.is_empty() && dictionary.len() <= MAX_DICTIONARY_BYTES);
+    }
+
+    #[test]
+    fn compress_checked_recommended_ceiling_is_the_codec_ceiling() {
+        // INF-COMPRESS-02: the recommended input ceiling is the codec's
+        // image ceiling, not an invented number — it is derived from
+        // `Limits`, so the two cannot drift apart.
+        assert_eq!(
+            recommended_compress_max_input(),
+            Limits::default().max_total_bytes as usize
+        );
+    }
+
+    #[test]
+    fn compress_checked_refuses_input_above_the_ceiling() {
+        // INF-COMPRESS-02: the checked variant refuses before zstd runs,
+        // accepts exactly at the ceiling, and still refuses a bad level.
+        let bytes = vec![b'x'; 64];
+        let error = compress_checked(&bytes, 3, 32).expect_err("refused");
+        assert_eq!(error.code(), "infinity/invalid-argument", "{error}");
+        let compressed = compress_checked(&bytes, 3, 64).expect("at ceiling");
+        assert_eq!(
+            decompress(&compressed, 64).expect("decompress"),
+            bytes,
+            "at-ceiling input still round-trips"
+        );
+        let error = compress_checked(&bytes, 9_999, 64).expect_err("bad level");
+        assert_eq!(error.code(), "infinity/invalid-argument", "{error}");
+    }
+
+    #[test]
+    fn compress_of_64mib_succeeds_and_checked_refuses_it() {
+        // INF-COMPRESS-02, W4 repro shape: plain `compress` is deliberately
+        // unchanged — it compresses whatever it is handed — so the 64 MiB
+        // input the audit used to show there is no ceiling still succeeds
+        // here; the ceiling lives in `compress_checked`, not in `compress`.
+        let bytes = vec![0u8; 64 << 20];
+        let compressed = compress(&bytes, 3).expect("compress is unchanged");
+        assert!(compressed.len() < bytes.len());
+        let error = compress_checked(&bytes, 3, 1 << 20).expect_err("ceiling");
+        assert_eq!(error.code(), "infinity/invalid-argument", "{error}");
+        let checked = compress_checked(&bytes, 3, recommended_compress_max_input())
+            .expect("recommended ceiling accepts it");
+        assert_eq!(
+            checked, compressed,
+            "checked and plain agree below the ceiling"
+        );
     }
 
     #[test]

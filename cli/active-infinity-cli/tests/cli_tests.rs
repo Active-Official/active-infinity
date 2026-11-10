@@ -967,6 +967,67 @@ fn dict_train_refuses_samples_over_the_input_ceiling_before_reading_them() {
 }
 
 #[test]
+fn dict_train_refuses_a_size_above_the_dictionary_ceiling() {
+    // INF-COMPRESS-02: one byte past the 112,640-byte dictionary cap is
+    // refused with the cap named. The corpus guard would also refuse this
+    // size against such small samples, but the cap check runs first, so the
+    // asserted message proves it is the cap that fired.
+    let dir = sandbox("dict-size-cap");
+    let mut samples = Vec::new();
+    for seed in 0..12 {
+        let path = dir.join(format!("sample-{seed}.ainf"));
+        write(&path, &image(seed));
+        samples.push(path.to_string_lossy().into_owned());
+    }
+    let mut args = vec![
+        "dict".to_string(),
+        "train".to_string(),
+        "--output".to_string(),
+        dir.join("capped.dict").to_string_lossy().into_owned(),
+        "--size".to_string(),
+        "112641".to_string(),
+    ];
+    args.extend(samples);
+    let reference: Vec<&str> = args.iter().map(String::as_str).collect();
+    let output = run(&reference);
+    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("capped at 112640"),
+        "{}",
+        stderr(&output)
+    );
+}
+
+#[test]
+fn dict_train_refuses_samples_above_the_training_sample_ceiling() {
+    // INF-COMPRESS-02: two sparse 6 MiB samples total 12,582,912 bytes,
+    // above the 11,264,000-byte training-sample cap (100x the dictionary
+    // cap), and the refusal happens before any byte is read — the disk
+    // cost here is holes, not clusters, exactly as in the input-ceiling
+    // test above.
+    let dir = sandbox("dict-sample-cap");
+    let mut samples = Vec::new();
+    for seed in 0..2 {
+        let path = dir.join(format!("sparse-{seed}.ainf"));
+        let file = fs::File::create(&path).expect("create");
+        extend_sparse(&file, &path, 6u64 << 20);
+        drop(file);
+        samples.push(path.to_string_lossy().into_owned());
+    }
+    let mut args = vec![
+        "dict".to_string(),
+        "train".to_string(),
+        "--output".to_string(),
+        dir.join("over.dict").to_string_lossy().into_owned(),
+    ];
+    args.extend(samples);
+    let reference: Vec<&str> = args.iter().map(String::as_str).collect();
+    let output = run(&reference);
+    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+    assert!(stderr(&output).contains("11264000"), "{}", stderr(&output));
+}
+
+#[test]
 fn dict_apply_refuses_a_flag_that_the_mode_cannot_use() {
     let dir = sandbox("dict-mode-flags");
     let input = dir.join("input.bin");

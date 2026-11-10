@@ -13,6 +13,7 @@ use std::time::Instant;
 
 use active_infinity::compress::{
     compress_with_dictionary, decompress_with_dictionary, level_range, train_dictionary,
+    MAX_DICTIONARY_BYTES, MAX_TRAINING_SAMPLE_BYTES,
 };
 use active_infinity::stream::StreamDecoder;
 use active_infinity::{
@@ -480,8 +481,11 @@ fn dict_command(args: &[String]) -> Result<(), String> {
             }
             // Sum the declared sizes first. Reading every sample before any
             // check would let N hostile paths commit N files of memory; the
-            // per-file ceiling in `read` does not bound the total.
-            let ceiling = input_ceiling();
+            // per-file ceiling in `read` does not bound the total. The
+            // ceiling here is the library's training-sample cap
+            // (INF-COMPRESS-02): reading past it would only hand the library
+            // samples it refuses, so the refusal happens before a byte is read.
+            let ceiling = MAX_TRAINING_SAMPLE_BYTES as u64;
             let mut declared = 0u64;
             for sample in &positional[1..] {
                 let meta =
@@ -524,6 +528,14 @@ fn dict_command(args: &[String]) -> Result<(), String> {
             let size = flag_number(&flags, "--size", default_size)?;
             if size < 256 {
                 return Err("usage: --size must be at least 256 bytes".to_string());
+            }
+            // INF-COMPRESS-02: the library refuses a dictionary above its
+            // cap, so refuse here with the precise reason instead of letting
+            // the wrapped library error blame the samples.
+            if size > MAX_DICTIONARY_BYTES {
+                return Err(format!(
+                    "usage: --size {size} is too large; dictionaries are capped at {MAX_DICTIONARY_BYTES} bytes (zstd's --maxdict default)"
+                ));
             }
             let bound = size.checked_mul(4).ok_or_else(|| {
                 format!("usage: --size {size} is too large for {total} bytes of samples")
@@ -1289,7 +1301,7 @@ usage: active-infinity-cli <command> [options]
       `signature` prints the stored key and hash.
   dict train --output <dict> [--size N] <sample>...
   dict apply --dictionary <dict> [--decompress] [--level N] [--max-bytes N] [--output PATH] <input>
-      Train or apply a zstd dictionary. Hashes stay over uncompressed bytes.
+      Train or apply a zstd dictionary. Dictionaries are capped at {MAX_DICTIONARY_BYTES} bytes and training samples at {MAX_TRAINING_SAMPLE_BYTES} bytes total. Hashes stay over uncompressed bytes.
   proof issue <image> [--schema PATH] [--output PATH]
       Write a JSON sidecar: content hash, size, counts, secrets, dialect and an
       optional companion-schema hash.

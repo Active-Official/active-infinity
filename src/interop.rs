@@ -2246,6 +2246,33 @@ mod projection {
 
     /// Project provenance as JSON, redacting every text field and key against
     /// `secrets` (the module's secret literals).
+    ///
+    /// This projection never fails: a redacted-key collision keeps the first
+    /// entry (the same rule as [`provenance_lines`]).
+    ///
+    /// It is lossy on budget exhaustion: once the shared export redaction
+    /// budget (`EXPORT_REDACTION_BUDGET`, 64 MiB) is spent, text values
+    /// saturate to the hiding placeholder and the entry list ends -- later
+    /// entries are silently dropped, with no marker that anything was
+    /// dropped. The result is still a JSON object, never `null`: budget
+    /// exhaustion truncates, it does not refuse. For the shared
+    /// projection-loss vocabulary see the canonical loss table in
+    /// [`to_redacted_json`] (INF-INTEROP-06).
+    ///
+    /// The `Value::Null` return exists only for a refused projection, which
+    /// cannot happen in non-strict mode: the helper returns `None` only when
+    /// a redacted-key collision is refused, and this call does not refuse
+    /// collisions. A caller must therefore not read `null` as "the module
+    /// has no provenance": this function takes a `Provenance`, not a module,
+    /// and "no provenance" is expressed by the caller having nothing to
+    /// pass (INF-INTEROP-07).
+    ///
+    /// Prefer [`provenance_json_for`]: it collects the module's secrets
+    /// itself (including the raw bytes, so a non-UTF-8 secret is not
+    /// published as hex) and is strict -- it returns `None` instead of
+    /// silently keeping the first of two colliding entries. Note its `None`
+    /// conflates two reasons -- no provenance, or a refused projection --
+    /// see its docs.
     pub fn provenance_json(prov: &Provenance, secrets: &[String]) -> serde_json::Value {
         // The text-only entry point compares against the secrets' text; a module
         // caller (`provenance_json_for`) also passes the raw bytes, so a
@@ -2344,6 +2371,22 @@ mod projection {
     }
 
     /// Project a module's provenance, collecting its secret table first.
+    ///
+    /// Strict: a redacted-key collision refuses the projection (`None`)
+    /// instead of silently keeping the first entry, as
+    /// [`provenance_json`] does. Prefer this over [`provenance_json`] for
+    /// that reason, and because it also passes the raw secret bytes, so a
+    /// non-UTF-8 secret is not published as hex.
+    ///
+    /// `None` means two different things -- the module carries no
+    /// provenance, or the projection was refused (a collision) -- and the
+    /// return value alone cannot tell them apart. Check
+    /// `module.provenance().is_none()` first when the distinction matters:
+    /// `None` there means absence, `Some` means refusal (INF-INTEROP-07).
+    ///
+    /// Budget exhaustion is not a refusal here either: like
+    /// [`provenance_json`], the entry list is truncated and values saturate
+    /// to the marker, and the result is still `Some(object)`.
     pub fn provenance_json_for(module: &InfinityModule) -> Option<serde_json::Value> {
         let secrets = secret_literals(module);
         let raw = secret_bytes(module);
@@ -2511,13 +2554,70 @@ fn node_label_with(paths: &HashMap<NodeId, String>, module: &InfinityModule, id:
     }
 }
 
+/// Split a dotted path into segments, reversing the escaping `merge.rs`
+/// applies to field names in conflict paths (`escape_field`): `\\` is one
+/// literal backslash, `\.` is a literal dot, and `\<` at the start of a
+/// segment is a literal `<` (a leading `<` would otherwise read as one of
+/// the merge markers `<bindings>`, `<annotations>`, `<provenance>` or
+/// `<extensions>`).
+///
+/// A backslash before any other character, and a dangling trailing
+/// backslash, stay literal: no path that contains no escape sequence
+/// changes meaning, so every plain `server.port` path resolves exactly as
+/// before.
+fn split_escaped_path(path: &str) -> Vec<String> {
+    let mut segments = Vec::new();
+    let mut current = String::new();
+    let mut chars = path.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\\' => match chars.peek() {
+                Some('.') => {
+                    chars.next();
+                    current.push('.');
+                }
+                Some('\\') => {
+                    chars.next();
+                    current.push('\\');
+                }
+                Some('<') if current.is_empty() => {
+                    chars.next();
+                    current.push('<');
+                }
+                _ => current.push('\\'),
+            },
+            '.' => {
+                segments.push(std::mem::take(&mut current));
+            }
+            _ => current.push(ch),
+        }
+    }
+    segments.push(current);
+    segments
+}
+
 /// Resolve a dotted path the way the evaluator does (table fields, then
 /// single-segment bindings).
+///
+/// A path segment is unescaped the way `merge.rs` escapes field names in
+/// conflict paths (`escape_field`, `src/merge.rs`): `\.` is a literal dot
+/// in a field name, `\\` a literal backslash, and a leading `\<` a
+/// literal `<` -- so a merge conflict path resolves in the module it names
+/// (INF-INTEROP-07). A backslash before any other character, and a dangling
+/// trailing backslash, stay literal.
+///
+/// The binding fallback is driven by the parsed segment count (one segment),
+/// not by whether the raw text contains a dot, so a binding whose name
+/// contains a literal dot resolves via its escaped spelling too.
+///
+/// Note: [`value_paths`] joins raw keys with `.` and does not escape, so its
+/// labels do not round-trip through here when a field name contains a `.`.
 pub fn resolve_path(module: &InfinityModule, path: &str) -> Option<NodeId> {
+    let segments = split_escaped_path(path);
     if let Some(root) = module.root() {
         let mut current = root;
         let mut found = true;
-        for segment in path.split('.') {
+        for segment in &segments {
             match module.get(current) {
                 Some(Inode::Table { fields }) | Some(Inode::SchemaTable { fields, .. }) => {
                     match fields.iter().find(|(name, _)| name == segment) {
@@ -2538,11 +2638,11 @@ pub fn resolve_path(module: &InfinityModule, path: &str) -> Option<NodeId> {
             return Some(current);
         }
     }
-    if !path.contains('.') {
+    if segments.len() == 1 {
         return module
             .bindings()
             .iter()
-            .find(|(name, _)| name == path)
+            .find(|(name, _)| name == &segments[0])
             .map(|(_, id)| *id);
     }
     None

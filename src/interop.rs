@@ -149,6 +149,16 @@ mod bridge {
             if module.get(core_id).is_none() {
                 continue;
             }
+            // A node already lowered as another node's child must not be
+            // lowered again. The loop used to lower *every* arena node
+            // unconditionally, so a parent-first arena (legal for a
+            // caller-built `CoreModule`) pushed the child a second time and
+            // `map.insert` below then pointed at the duplicate while the
+            // parent kept referencing the first copy (INF-INTEROP-01).
+            // `lower_ref` consults `map` before lowering; the loop did not.
+            if map.contains_key(&core_id.0) {
+                continue;
+            }
             let node = lower_node(module, core_id, &mut out, &mut map, &mut visiting, 0)?;
             map.insert(core_id.0, node);
         }

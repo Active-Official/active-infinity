@@ -421,8 +421,9 @@ fn secrets_never_leak_through_debug_or_exports() {
     assert!(!node_debug.contains("hunter2-canary"), "node Debug leaked");
     assert!(debug.contains("Secret(***)"));
 
-    let displayed = format!("{}", SecretBytes::from("hunter2-canary"));
-    assert_eq!(displayed, "***SECRET***");
+    // INF-08 removed `Display` for `SecretBytes`: `format!("{}", secret)`
+    // no longer compiles. The redaction marker `***SECRET***` still exists
+    // as `SECRET_MARKER` for text redaction; it was never the secret itself.
     let bytes_view = InfinityView::new(&bytes, Limits::default()).unwrap();
     assert!(!format!("{bytes_view:?}").contains("hunter2-canary"));
 }

@@ -141,7 +141,7 @@ fn estimate_image_size(prepared: &crate::canonical::Prepared) -> Result<()> {
     total = total.saturating_add(prepared.blobs.iter().fold(0u64, |sum, blob| {
         sum.saturating_add(blob.payload.as_ref().map_or(0, |bytes| bytes.len() as u64) + 40)
     }));
-    total = total.saturating_add(prepared.secrets.iter().fold(0u64, |sum, bytes| {
+    total = total.saturating_add(prepared.secret_bytes().fold(0u64, |sum, bytes| {
         sum.saturating_add(bytes.len() as u64 + 8)
     }));
     total = total.saturating_add(prepared.extensions.iter().fold(0u64, |sum, (_, payload)| {
@@ -201,7 +201,7 @@ pub(crate) fn encode_prepared_into(
     if !prepared.extensions.is_empty() {
         header.flags |= FLAG_EXTENSIONS;
     }
-    if !prepared.secrets.is_empty() {
+    if prepared.secret_count() > 0 {
         header.flags |= FLAG_SECRETS;
     }
 
@@ -434,16 +434,16 @@ pub(crate) fn encode_prepared_into(
 
     // --- secrets -------------------------------------------------------
     header.span_mut(Section::Secrets).offset = image.len() as u32;
-    header.span_mut(Section::Secrets).count = prepared.secrets.len() as u32;
+    header.span_mut(Section::Secrets).count = prepared.secret_count() as u32;
     let mut secret_heap = 0u32;
-    for secret in &prepared.secrets {
+    for secret in prepared.secret_bytes() {
         image.extend_from_slice(&secret_heap.to_le_bytes());
         image.extend_from_slice(&(secret.len() as u32).to_le_bytes());
         secret_heap = secret_heap
             .checked_add(secret.len() as u32)
             .ok_or(Error::TooLarge)?;
     }
-    for secret in &prepared.secrets {
+    for secret in prepared.secret_bytes() {
         image.extend_from_slice(secret);
     }
     pad(image);

@@ -14,8 +14,9 @@
 //!   exists);
 //! - nesting depth stays within the caller's budget.
 //!
-//! Secret material is held in [`SecretBytes`], which has **no** `Display`,
-//! `Debug`, `Serialize` or equality path that can reveal it.
+//! Secret material is held in [`SecretBytes`], which has no `Display`,
+//! `Serialize` or equality path that can reveal it; its `Debug` prints only
+//! the constant `Secret(***)` (INF-08).
 
 // The variant and field names in this module are the wire contract itself and
 // are documented normatively in `docs/spec/layout.md`; per-variant rustdoc would
@@ -54,11 +55,24 @@ impl fmt::Display for NodeId {
 ///
 /// The type exposes no way to read the bytes back through a public API: the
 /// wire codec and the `active-core` bridge are the only in-crate readers, and
-/// both are audited. `Debug`, `Display`, `PartialEq`, `Ord` and `Hash` are all
-/// deliberately absent or redacting, so a secret can never leak through
-/// logging, assertion output, sorting or map keys, and a secret *value* can
-/// never be compared for equality (the anti-oracle rule: [`SecretBytes::eq`]
-/// is always false, including for self).
+/// both are audited. There is no `Display` and no `Serialize`; `Debug` exists
+/// but prints only the constant `Secret(***)`, so a secret can never leak
+/// through logging or assertion output. There is no `Ord` and no `Hash`, so
+/// a secret can never leak through sorting or map keys, and a secret *value*
+/// can never be compared for equality (the anti-oracle rule:
+/// [`SecretBytes::eq`] is always false, including for self).
+///
+/// `Clone` is the single sanctioned copy path (INF-08): [`Inode`] and
+/// [`InfinityModule`] derive it, so a secret is copied whenever a module is
+/// cloned, and the codec and the bridge copy it where they must. Each clone
+/// is an independent allocation, zeroized on drop. There is no second
+/// transcription in the encode path: the encoder reads the secret bytes
+/// from the prepared nodes themselves instead of copying them into a
+/// separate table. The redaction scan is the one other place that holds
+/// copies — it must hold the literals to search for them in prose
+/// (`interop::secret_literals`, `interop::secret_texts`,
+/// `canonical::storage_secret_texts`) — transient, and dropped when the
+/// scan ends.
 ///
 /// That rule lives at the *value* level only. One level up, [`Inode`] and
 /// [`InfinityModule`] compare secrets by presence only — a secret node equals
@@ -98,12 +112,6 @@ impl fmt::Debug for SecretBytes {
     }
 }
 
-impl fmt::Display for SecretBytes {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("***SECRET***")
-    }
-}
-
 impl PartialEq for SecretBytes {
     /// Anti-oracle: a secret value never equals anything, including itself.
     ///
@@ -131,6 +139,17 @@ impl Drop for SecretBytes {
     /// store cannot be elided the way a plain `fill(0)` can. A clone that was
     /// copied elsewhere is its own allocation and is zeroed when it is dropped;
     /// this is not a substitute for not copying secrets.
+    ///
+    /// The whole allocation is zeroed, spare capacity included (INF-08): the
+    /// pinned `zeroize` 1.9.1 `Vec` impl zeroes `spare_capacity_mut()` before
+    /// the elements, so the audit's "zeroize covers `len` only" premise does
+    /// not hold for this dependency — that sub-issue was not reproduced. The
+    /// behaviour is load-bearing here and is guarded by
+    /// `tests/inf08_secrets_tests.rs` (`drop_zeroizes_spare_capacity`), which
+    /// fails if spare capacity ever survives a drop again. The one thing
+    /// `zeroize` cannot undo is a copy made by an earlier reallocation of the
+    /// same buffer, which is why nothing in this crate ever grows a
+    /// `SecretBytes` after construction.
     fn drop(&mut self) {
         use zeroize::Zeroize;
         self.0.zeroize();
@@ -1668,7 +1687,7 @@ impl InfinityModule {
             && left.blobs == right.blobs
             && left.hashes == right.hashes
             && left.numbers == right.numbers
-            && left.secrets.len() == right.secrets.len()
+            && left.secret_count() == right.secret_count()
             && left.types.len() == right.types.len()
             && left
                 .types

@@ -61,8 +61,10 @@ pub(crate) struct PreparedType {
 /// Fully canonical, index-resolved module ready for byte emission.
 ///
 /// Deliberately no `Debug`: the struct holds secret bytes and blob payloads, and
-/// a derived impl would print them.
-#[derive(Clone, Default)]
+/// a derived impl would print them. Deliberately no `Clone` either (INF-08):
+/// cloning a prepared module would duplicate every secret it holds, so a
+/// caller that needs a second copy prepares again from the module.
+#[derive(Default)]
 pub(crate) struct Prepared {
     pub nodes: Vec<Inode>,
     pub root: Option<NodeId>,
@@ -75,7 +77,6 @@ pub(crate) struct Prepared {
     pub blobs: Vec<BlobPayload>,
     pub hashes: Vec<[u8; 32]>,
     pub numbers: Vec<i64>,
-    pub secrets: Vec<Vec<u8>>,
     pub extensions: Vec<(u64, Vec<u8>)>,
     pub string_index: HashMap<String, u32>,
     pub unit_index: HashMap<UnitTag, u32>,
@@ -85,20 +86,33 @@ pub(crate) struct Prepared {
     pub number_index: HashMap<i64, u32>,
 }
 
-impl Drop for Prepared {
-    /// Overwrite the crate's own raw copies of secret bytes.
+impl Prepared {
+    /// Secret bytes in node order, borrowed from [`Self::nodes`] (INF-08).
     ///
-    /// `SecretBytes` already zeroes its buffer, but `secrets` is a second
-    /// transcription used by the payload scan and the encoder, and the allocator
-    /// hands a freed block to the next allocation. `strings` is not touched: the
-    /// format stores metadata prose there deliberately (redacted, and promoted
-    /// fragments by design), so it is content, not residue.
-    fn drop(&mut self) {
-        use zeroize::Zeroize;
-        for secret in &mut self.secrets {
-            secret.as_mut_slice().zeroize();
-        }
+    /// There is no separate secrets table: the bytes live only in the
+    /// `Inode::Secret` values, and the encoder and the size estimate read
+    /// them here. An earlier form of this struct kept a second transcription
+    /// (`secrets: Vec<Vec<u8>>`, built by `secret.expose().to_vec()` in
+    /// `prepare()` and zeroized in `Drop`); it was removed because the nodes
+    /// already carry the bytes in exactly the order the secret heap needs
+    /// (node order, never deduplicated), so the copy bought nothing and
+    /// doubled the live copies during every encode.
+    pub(crate) fn secret_bytes(&self) -> impl Iterator<Item = &[u8]> + '_ {
+        secret_slices(&self.nodes)
     }
+
+    /// Number of secret nodes, i.e. the secret-heap entry count.
+    pub(crate) fn secret_count(&self) -> usize {
+        self.secret_bytes().count()
+    }
+}
+
+/// Borrowed secret bytes of `nodes`, in node order (INF-08).
+fn secret_slices(nodes: &[Inode]) -> impl Iterator<Item = &[u8]> + '_ {
+    nodes.iter().filter_map(|node| match node {
+        Inode::Secret(secret) => Some(secret.expose()),
+        _ => None,
+    })
 }
 
 /// True when `value` is the one NaN bit pattern the format permits.
@@ -427,14 +441,10 @@ pub(crate) fn prepare(module: &InfinityModule) -> Result<Prepared> {
         .map(|(index, value)| (*value, index as u32))
         .collect();
 
-    // Secrets: node order, never deduplicated.
-    let secrets: Vec<Vec<u8>> = nodes
-        .iter()
-        .filter_map(|node| match node {
-            Inode::Secret(secret) => Some(secret.expose().to_vec()),
-            _ => None,
-        })
-        .collect();
+    // Secrets are read from the nodes, never copied (INF-08): the borrowed
+    // slices below are all `reject_secret_copies` needs, and the encoder
+    // reads the same bytes through `Prepared::secret_bytes()`.
+    let secret_refs: Vec<&[u8]> = secret_slices(&nodes).collect();
 
     // Extensions: sorted by tag, unique tags, payloads preserved verbatim.
     let mut extensions: Vec<(u64, Vec<u8>)> = module.extensions().to_vec();
@@ -448,7 +458,13 @@ pub(crate) fn prepare(module: &InfinityModule) -> Result<Prepared> {
     // A secret copied into a binary surface cannot be redacted: there is no
     // marker that fits a 32-byte hash and no way to rewrite an opaque payload
     // without corrupting it. Refuse the encode instead of storing the copy.
-    reject_secret_copies(module, provenance.as_ref(), &extensions, &blobs, &secrets)?;
+    reject_secret_copies(
+        module,
+        provenance.as_ref(),
+        &extensions,
+        &blobs,
+        &secret_refs,
+    )?;
 
     let prepared = Prepared {
         nodes,
@@ -462,7 +478,6 @@ pub(crate) fn prepare(module: &InfinityModule) -> Result<Prepared> {
         blobs,
         hashes,
         numbers,
-        secrets,
         extensions,
         string_index,
         unit_index,
@@ -681,7 +696,7 @@ fn reject_secret_copies(
     provenance: Option<&Provenance>,
     extensions: &[(u64, Vec<u8>)],
     blobs: &[BlobPayload],
-    secrets: &[Vec<u8>],
+    secrets: &[&[u8]],
 ) -> Result<()> {
     if secrets.is_empty() {
         return Ok(());
@@ -689,7 +704,7 @@ fn reject_secret_copies(
     let hash_secrets: std::collections::BTreeSet<&[u8]> = secrets
         .iter()
         .filter(|secret| secret.len() == 32)
-        .map(Vec::as_slice)
+        .copied()
         .collect();
     // A blob hash is published verbatim by every projection. A hash that
     // copies a 32-byte secret would publish it there, exactly like a
@@ -743,11 +758,11 @@ fn reject_secret_copies(
 /// One opaque payload against every secret, charged by bytes compared.
 fn scan_payload(
     payload: &[u8],
-    secrets: &[Vec<u8>],
+    secrets: &[&[u8]],
     work: &mut usize,
     reason: &'static str,
 ) -> Result<()> {
-    for secret in secrets {
+    for &secret in secrets {
         if secret.is_empty() || secret.len() > payload.len() {
             continue;
         }
@@ -773,7 +788,7 @@ fn scan_payload(
                         limit: MAX_SECRET_SCAN_BYTES as u64,
                     });
                 }
-                if &payload[at..at + secret.len()] == secret.as_slice() {
+                if &payload[at..at + secret.len()] == secret {
                     return Err(Error::Encode(reason));
                 }
             }

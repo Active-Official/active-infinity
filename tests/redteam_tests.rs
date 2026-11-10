@@ -287,7 +287,8 @@ fn threat_secret_never_reaches_any_export_surface() {
             ),
         ),
         ("error", format!("{}", active_infinity::Error::Magic)),
-        ("secret display", format!("{}", SecretBytes::from(CANARY))),
+        // INF-08 removed `Display` for `SecretBytes`, so there is no
+        // "secret display" surface left to scan here.
     ];
     #[cfg(feature = "json")]
     {

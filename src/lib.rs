@@ -37,8 +37,13 @@
 //!    unreachable nodes, non-canonical slack and size bombs are rejected with
 //!    stable machine-readable codes before allocation (`validate`, `error`).
 //! 3. **Secrets stay secrets.** Secret material is a structural kind, never
-//!    equals anything (no oracle), carries no `Debug`/`Display`/`Serialize`
-//!    path, and is absent from every export path (`ir::SecretBytes`).
+//!    equals anything (no oracle), has a redacting `Debug` that prints only
+//!    the constant `Secret(***)` and no `Display`/`Serialize` path, and is
+//!    absent from every export path (`ir::SecretBytes`). Copies happen only
+//!    through `Clone` — plus transient copies inside the audited redaction
+//!    scan, which must hold the literals to search for them — and every
+//!    `Clone` copy is an independent allocation zeroized on drop, spare
+//!    capacity included (INF-08).
 //! 4. **Zero-copy and streaming.** A validated buffer can be read through
 //!    [`view::InfinityView`] without copying strings or blobs, and a module can
 //!    be shipped as ordered frames that reassemble to the identical canonical

@@ -38,6 +38,16 @@ const STALE_SCRATCH: Duration = Duration::from_secs(24 * 60 * 60);
 #[derive(Debug, Clone)]
 pub struct Store {
     root: PathBuf,
+    /// The limits this handle enforces (INF-16): every `put`/`get` validates
+    /// against these ceilings and reads no object larger than
+    /// [`Store::object_limit`]. A store opened with [`Store::open`] carries
+    /// [`Limits::default`]; [`Store::open_with_limits`] and
+    /// [`Store::with_limits`] let a deployment choose stricter ones. The
+    /// limits live on the handle, not on the directory: two handles over one
+    /// root may enforce different ceilings, and a handle never rewrites
+    /// objects another handle stored under looser limits — it simply refuses
+    /// to read or write above its own ceiling.
+    limits: Limits,
     /// Device/inode captured when the store was opened (Unix only; see
     /// [`root_identity`]). Every write re-checks it: a root swapped for a
     /// symlink or another directory after validation must not receive objects.
@@ -68,7 +78,28 @@ impl Store {
     /// path after open is refused. The token is a tripwire, not a kernel
     /// identity — a whole-directory copy carries it along, so a copied root
     /// is not detected; see `read_pin` below.
+    ///
+    /// The store enforces [`Limits::default`] (1 GiB objects). A deployment
+    /// that needs a stricter ceiling uses [`Store::open_with_limits`]
+    /// instead; `open` is exactly `open_with_limits(root,
+    /// Limits::default())`, so existing callers keep exactly the behaviour
+    /// they had (INF-16).
     pub fn open(root: impl Into<PathBuf>) -> Result<Self> {
+        Self::open_with_limits(root, Limits::default())
+    }
+
+    /// Open or create a store directory enforcing `limits` (INF-16).
+    ///
+    /// The limits are checked first, before the directory is touched: a
+    /// configuration with a zero ceiling ([`Limits::check`]) is an argument
+    /// error (`infinity/invalid-argument`) and never creates a directory.
+    /// Once opened, every `put`/`get`/`put_signed`/`get_signature` on this
+    /// handle validates against these limits and reads no object larger than
+    /// [`Store::object_limit`]. The limits are a property of the handle, so
+    /// a second handle over the same root — opened with `open`, with
+    /// different limits, or with [`Store::with_limits`] — is unaffected.
+    pub fn open_with_limits(root: impl Into<PathBuf>, limits: Limits) -> Result<Self> {
+        limits.check()?;
         let root = root.into();
         let identity = match fs::symlink_metadata(&root) {
             Ok(meta) => {
@@ -100,6 +131,7 @@ impl Store {
         };
         let store = Self {
             root,
+            limits,
             root_id: identity,
             #[cfg(not(unix))]
             pin,
@@ -107,6 +139,30 @@ impl Store {
         };
         store.sweep_stale_scratch();
         Ok(store)
+    }
+
+    /// A second handle over this store's root enforcing `limits` (INF-16).
+    ///
+    /// This re-opens the root — same validation, same root pin — so a root
+    /// swapped since this handle was opened is refused exactly as a fresh
+    /// [`Store::open_with_limits`] would refuse it. No object is copied or
+    /// rewritten; only the ceiling changes. The limits are checked before
+    /// the root is touched, so an invalid configuration fails without
+    /// side effects. The original handle is unaffected.
+    pub fn with_limits(&self, limits: Limits) -> Result<Self> {
+        Self::open_with_limits(self.root.clone(), limits)
+    }
+
+    /// The limits this handle enforces.
+    pub fn limits(&self) -> Limits {
+        self.limits
+    }
+
+    /// The largest object this handle will read or write, in bytes: the
+    /// configured [`Limits::max_total_bytes`]. A signature envelope gets
+    /// this ceiling plus the envelope overhead on top.
+    pub fn object_limit(&self) -> u64 {
+        self.limits.max_total_bytes
     }
 
     /// Store directory.
@@ -120,8 +176,8 @@ impl Store {
     /// re-encodes differently would otherwise get a second key for one logical
     /// module, and a signature over it would bind bytes nobody can reproduce.
     pub fn put(&self, image: &[u8]) -> Result<[u8; 32]> {
-        let limit = object_limit();
-        let meta = validate_canonical(image, Limits::default())?;
+        let limit = self.object_limit();
+        let meta = validate_canonical(image, self.limits)?;
         let hash = meta.content_hash;
         let path = self.path_for(&hash);
         match fs::symlink_metadata(&path) {
@@ -155,18 +211,24 @@ impl Store {
 
     /// Get an object by hash.
     ///
-    /// The bytes are read under the default size ceiling, proven canonical and
-    /// checked against the requested key before they are returned. A symbolic
-    /// link at the object path is refused; objects are regular files.
+    /// The bytes are read under this handle's size ceiling (see
+    /// [`Store::object_limit`]), proven canonical and checked against the
+    /// requested key before they are returned. A symbolic link at the object
+    /// path is refused; objects are regular files. An object stored under a
+    /// looser handle that exceeds this handle's ceiling is refused exactly
+    /// like an absent one (see `store_read_fault`): the ceiling is a
+    /// property of the handle, and a stricter handle never learns an
+    /// object's size from the error code.
     pub fn get(&self, hash: &[u8; 32]) -> Result<Vec<u8>> {
         // One answer for "no such object": a planted file larger than the
         // ceiling must not be distinguishable from an absent one by its code
         // (cross-cutting pass 1, #9).
-        let image = read_bounded(&self.path_for(hash), object_limit()).map_err(store_read_fault)?;
+        let image =
+            read_bounded(&self.path_for(hash), self.object_limit()).map_err(store_read_fault)?;
         // Every fault a planted object can raise is the store's own code: the
         // path is derived from the caller's hash, so a validation code would
         // distinguish an absent name from a malformed one (pass 2, #9).
-        let meta = validate_canonical(&image, Limits::default()).map_err(|error| match error {
+        let meta = validate_canonical(&image, self.limits).map_err(|error| match error {
             Error::Store(_) => error,
             _ => Error::Store("object is absent or unreadable"),
         })?;
@@ -203,7 +265,7 @@ impl Store {
         self.store_bytes(
             &path,
             &signed.to_bytes(),
-            object_limit().saturating_add(SIGNATURE_OVERHEAD),
+            self.object_limit().saturating_add(SIGNATURE_OVERHEAD),
         )?;
         Ok(hash)
     }
@@ -223,7 +285,10 @@ impl Store {
             }
             Ok(_) => {}
         }
-        let bytes = read_bounded(&path, object_limit().saturating_add(SIGNATURE_OVERHEAD))?;
+        let bytes = read_bounded(
+            &path,
+            self.object_limit().saturating_add(SIGNATURE_OVERHEAD),
+        )?;
         let signed = SignedImage::from_bytes(&bytes)?;
         if &signed.content_hash()? != hash {
             return Err(Error::Signature(
@@ -658,11 +723,6 @@ fn scratch_seed() -> u64 {
     nanos
         ^ u64::from(std::process::id()).rotate_left(32)
         ^ sequence.wrapping_mul(0x9E37_79B9_7F4A_7C15)
-}
-
-/// The largest object `get` will read: the codec's own ceiling for one image.
-fn object_limit() -> u64 {
-    Limits::default().max_total_bytes
 }
 
 /// Read a regular file no larger than `limit`, refusing links and directories.

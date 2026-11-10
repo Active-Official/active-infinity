@@ -142,7 +142,10 @@ enum PValue {
         media_type: String,
         tainted: bool,
     },
-    Env(String),
+    Env {
+        name: String,
+        default: Option<Box<PValue>>,
+    },
     Expr(String),
 }
 
@@ -277,8 +280,16 @@ fn decode_value(bytes: &[u8]) -> PValue {
             let (name_field, name_wire) = inner.key();
             assert_eq!((name_field, name_wire), (1, 2));
             let name = inner.string();
+            // Additive field 2 (INF-INTEROP-06): the projected default,
+            // as a nested Value. Absent when the Env has no default.
+            let mut default = None;
+            if !inner.done() {
+                let (default_field, default_wire) = inner.key();
+                assert_eq!((default_field, default_wire), (2, 2));
+                default = Some(Box::new(decode_value(inner.bytes())));
+            }
             assert!(inner.done());
-            PValue::Env(name)
+            PValue::Env { name, default }
         }
         12 => {
             assert_eq!(wire, 2);
@@ -564,7 +575,13 @@ fn projection_round_trips_through_an_independent_reader() {
     };
     assert_eq!(**inner, PValue::Float(2.5));
     assert_eq!(unit, "requests-per-second");
-    assert_eq!(*value("env"), PValue::Env("ACTIVE_MODE".into()));
+    assert_eq!(
+        *value("env"),
+        PValue::Env {
+            name: "ACTIVE_MODE".into(),
+            default: None,
+        }
+    );
     assert_eq!(*value("leaked"), PValue::Text(SECRET_MARKER.into()));
     match value("blob") {
         PValue::Blob {
@@ -921,4 +938,57 @@ fn a_wide_projection_charges_its_copies() {
     let error = active_infinity::protobuf::to_protobuf(&module)
         .expect_err("the copies exceed the work ceiling");
     assert_eq!(error.code(), "infinity/limit", "{error}");
+}
+
+/// INF-INTEROP-06: an `Env` default travels in Protobuf as additive field
+/// 2 of `message Env`, as a nested `Value` -- the same recursive
+/// projection JSON renders, checked here by the independent wire reader.
+#[test]
+fn env_default_encodes_as_field_two() {
+    let mut module = InfinityModule::new();
+    let default = module.push(Inode::Int(7));
+    let env = module.push(Inode::Env {
+        name: "ACTIVE_MODE".into(),
+        default: Some(default),
+    });
+    module.set_root(Some(env));
+    let bytes = to_protobuf(&module).expect("a legal module must project");
+    let decoded = decode_module(&bytes);
+    assert_eq!(
+        decoded.root,
+        Some(PValue::Env {
+            name: "ACTIVE_MODE".into(),
+            default: Some(Box::new(PValue::Int(7))),
+        }),
+        "the Env default must decode as a nested value"
+    );
+}
+
+/// INF-INTEROP-06: a secret default is redacted in Protobuf exactly as in
+/// JSON -- the marker, never the plaintext -- and the secret bytes appear
+/// nowhere in the wire bytes.
+#[test]
+fn env_with_secret_default_redacts_in_protobuf() {
+    const SECRET: &str = "env-default-secret-canary";
+    let mut module = InfinityModule::new();
+    let default = module.push(Inode::Secret(SecretBytes::from(SECRET)));
+    let env = module.push(Inode::Env {
+        name: "TOKEN".into(),
+        default: Some(default),
+    });
+    module.set_root(Some(env));
+    let bytes = to_protobuf(&module).expect("a legal module must project");
+    assert!(
+        !bytes.windows(SECRET.len()).any(|w| w == SECRET.as_bytes()),
+        "a secret default must never reach the wire bytes"
+    );
+    let decoded = decode_module(&bytes);
+    assert_eq!(
+        decoded.root,
+        Some(PValue::Env {
+            name: "TOKEN".into(),
+            default: Some(Box::new(PValue::Text(SECRET_MARKER.to_string()))),
+        }),
+        "a secret default must project as the marker"
+    );
 }

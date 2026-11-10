@@ -46,13 +46,15 @@ Both projections render one intermediate tree, built by
 | array | array | `Value.list` |
 | table | object | `Value.record` (ordered `Field` messages) |
 | blob | `{"$active.blob": {...}}` | `Value.blob` (identity only) |
-| environment lookup | `{"$env": "NAME"}` | `Value.env` |
+| environment lookup | `{"$env": "NAME"}` / `{"$env": "NAME", "default": <projected>}` | `Value.env` (`Env.default`, field 2, omitted when absent) |
 | operator, schema, patch | `{"$expr": "<kind>"}` | `Value.expr` |
 | secret | `"***SECRET***"` | `Value.text` = `***SECRET***` |
 
 Because the renderers consume the same tree, they cannot disagree about what is
 allowed to leave the process. A new node kind must be handled once, in the
-builder, and both projections gain it.
+builder, and both projections gain it. The full per-projection loss table
+is the canonical one in the `to_redacted_json` rustdoc (`src/interop.rs`,
+INF-INTEROP-06); this document states shapes, not losses.
 
 ## 2. Redaction
 
@@ -139,8 +141,11 @@ projected bytes.
 
 Two limits are documented rather than hidden:
 
-- A non-finite float is `null` in JSON (JSON has no NaN or infinity) and a real
-  IEEE double in Protobuf. A consumer that needs to tell `null` from NaN reads
+- A non-finite float is a tagged object in JSON (`{"$float": "NaN"}` /
+  `"Infinity"` / `"-Infinity"` -- the class only; NaN payload bits are lost,
+  INF-INTEROP-03) and a real IEEE double in Protobuf. (This line used to say
+  JSON renders a non-finite float as `null`; that was true before
+  INF-INTEROP-03 and stale since.) A consumer that needs the exact bits reads
   the AINF image or the Protobuf form.
 - The copy gate compares a hash against a secret **by value**. A 1-31 byte
   secret embedded inside a 32-byte hash is only caught when it happens to equal
@@ -236,7 +241,7 @@ message List { repeated Value items = 1; }
 message Record { repeated Field fields = 1; }
 message Field { string name = 1; Value value = 2; }
 message Blob { bytes blake3 = 1; uint64 size = 2; string media_type = 3; bool tainted = 4; }
-message Env { string name = 1; }
+message Env { string name = 1; Value default = 2; } // omitted when the Env has no default
 message Expr { string kind = 1; }
 ```
 
@@ -281,8 +286,13 @@ projection is a complete copy of the AINF bytes, and neither is meant to be.
 
 A projection follows the graph recursively. It refuses, rather than approximates:
 
-- a module deeper than 1024 edges from a projected node
-  (`infinity/encode`, reason `projection nesting exceeds the limit`);
+- a module deeper than 256 edges from a projected node
+  (`PROJECTION_DEPTH`, `infinity/limit`, `projection depth limit 256
+  exceeded`); (This line used to say 1024 edges with code
+  `infinity/encode`; 1024 is the module depth ceiling, the projection
+  walk ceiling is 256 -- see the `PROJECTION_DEPTH` comment in
+  `src/interop.rs` -- and the 200-deep-ok / 300-deep-refused behaviour
+  proves it. The code is `infinity/limit`, the `Limit` display.)
 - a module with a cycle, a dangling reference, a duplicate binding or a
   duplicate field name, because `to_protobuf` requires a canonical image.
 

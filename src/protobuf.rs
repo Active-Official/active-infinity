@@ -88,7 +88,7 @@
 //!   string media_type = 3;
 //!   bool tainted = 4;
 //! }
-//! message Env { string name = 1; }
+//! message Env { string name = 1; Value default = 2; } // omitted when the Env has no default
 //! message Expr { string kind = 1; }
 //! ```
 //!
@@ -246,9 +246,18 @@ fn encode_value(value: &Projected, out: &mut Vec<u8>, work: &mut usize) -> Resul
             boolean(&mut body, 4, *tainted);
             message(out, 10, &body, work)?;
         }
-        Projected::Env(name) => {
+        Projected::Env { name, default } => {
             let mut body = Vec::new();
             string(&mut body, 1, name);
+            // Additive field 2 (INF-INTEROP-06): the projected default, as
+            // a nested Value. Omitted when the Env has no default, so an
+            // Env without one encodes byte-identically to before, and a
+            // reader built against the old schema skips the field.
+            if let Some(default) = default {
+                let mut encoded = Vec::new();
+                encode_value(default, &mut encoded, work)?;
+                message(&mut body, 2, &encoded, work)?;
+            }
             message(out, 11, &body, work)?;
         }
         Projected::Expr(kind) => {
@@ -295,6 +304,15 @@ pub const MAX_PROTOBUF_WORK: usize = 64 << 20;
 /// a duplicate binding) is refused instead of being projected approximately, and
 /// so is a module whose opaque extension payload contains a copy of a secret
 /// literal: that copy would otherwise leave through the projection.
+///
+/// Loss table: this projection is lossy by design, and it differs from the
+/// JSON projection in its envelope -- it carries bindings, annotations,
+/// provenance and extensions where JSON carries the root value only. The
+/// full per-projection loss table is the canonical one in the
+/// `to_redacted_json` documentation (INF-INTEROP-06); this function
+/// points there instead of repeating it. An `Env` default travels here
+/// as `Env.default` (field 2, additive per spec §4.2), omitted when the
+/// `Env` has no default.
 pub fn to_protobuf(module: &InfinityModule) -> Result<Vec<u8>> {
     let image = encode(module)?;
     let hash = hash_image(&image)?;
@@ -428,7 +446,16 @@ fn projected_size(value: &Projected) -> usize {
     };
     match value {
         Projected::Null | Projected::Bool(_) | Projected::Int(_) | Projected::Float(_) => 16,
-        Projected::Text(text) | Projected::Env(text) => 8usize.saturating_add(text.len()),
+        Projected::Text(text) => 8usize.saturating_add(text.len()),
+        Projected::Env { name, default } => {
+            let mut total = 8usize.saturating_add(name.len());
+            if let Some(default) = default {
+                total = total
+                    .saturating_add(8)
+                    .saturating_add(projected_size(default));
+            }
+            total
+        }
         Projected::Expr(text) => 8usize.saturating_add(text.len()),
         Projected::DurationMs(_) => 16,
         Projected::Quantity(inner, unit) => 16usize

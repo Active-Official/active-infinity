@@ -12,7 +12,9 @@
 //! 2. **Redacted projections** (`to_redacted_json`): human and legacy
 //!    consumption. Secrets are replaced by the marker at every depth, and any
 //!    plain string equal to a secret literal is redacted too, so a copy of a
-//!    secret cannot leave through the projection.
+//!    secret cannot leave through the projection. Both projections and the
+//!    `active-core` bridge are lossy by design; the full loss table is the
+//!    canonical one in the `to_redacted_json` documentation (INF-INTEROP-06).
 //! 3. **Agent graph queries** (`why`, `impact`, `dependents`, `dependencies`,
 //!    `secret_tainted_paths`): the binary form of the questions agents ask,
 //!    answered with labels only — never values.
@@ -512,6 +514,13 @@ mod bridge {
     /// no structural form on the other side: a module that carries a blob or a
     /// secret node is refused with a stable error rather than silently dropping
     /// the fingerprint or exporting the plaintext.
+    ///
+    /// Loss table: the bridge is lossy beyond those refusals -- provenance
+    /// and extensions are dropped entirely, annotation spans are zeroed and
+    /// paths rewritten, the schema pointer is dropped. The full table is
+    /// the canonical one in the `to_redacted_json` documentation
+    /// (INF-INTEROP-06); this function points there instead of repeating
+    /// it.
     pub fn to_active_core(module: &InfinityModule) -> Result<CoreModule> {
         // `active-core` models a secret as a plain string. Lowering one would
         // hand the plaintext to every consumer of the bridge, so a
@@ -968,8 +977,17 @@ pub enum Projected {
         /// Whether the blob carries secret-derived bytes.
         tainted: bool,
     },
-    /// An environment lookup, by name.
-    Env(String),
+    /// An environment lookup, by name, with its fallback value when one
+    /// exists. The default is the recursively projected node it points at
+    /// (INF-INTEROP-06): a default is a value, so it projects like any
+    /// other value -- a secret default becomes the marker, an operator
+    /// default its kind tag. `None` renders exactly as before.
+    Env {
+        /// The environment variable name, redacted like any label.
+        name: String,
+        /// The projected default, when the `Env` node carries one.
+        default: Option<Box<Projected>>,
+    },
     /// A node kind that has no data projection (an operator, a schema, a patch).
     Expr(&'static str),
 }
@@ -1876,10 +1894,33 @@ fn build_projected(
                 redaction,
                 bytes,
             )?,
-            Inode::Env { name, .. } => {
+            Inode::Env { name, default } => {
                 let name = redact_within(name, secrets, redaction)?;
                 charge_projection_bytes(bytes, &name)?;
-                Projected::Env(name)
+                // The default is a value, so it projects through the same
+                // recursive call as every other node (INF-INTEROP-06): the
+                // full redaction applies, and a secret default becomes the
+                // marker instead of rendering in plaintext. A default CAN
+                // be secret -- `Inode::Env.default` is an arbitrary node
+                // id with no kind check, and the suite itself builds an
+                // `Env` whose default is a `Secret` node. The recursion
+                // shares the depth, node-budget and byte counters, so a
+                // default cannot spend a second allowance.
+                let default = match default {
+                    Some(id) => Some(Box::new(build_projected(
+                        module,
+                        Some(*id),
+                        secrets,
+                        hash_secrets,
+                        placeholder,
+                        depth + 1,
+                        budget,
+                        redaction,
+                        bytes,
+                    )?)),
+                    None => None,
+                };
+                Projected::Env { name, default }
             }
             Inode::Interpolate { parts } => {
                 let mut text = String::new();
@@ -1977,6 +2018,123 @@ mod projection {
     ///   `"Infinity"`, `"-Infinity"`), never as JSON `null`: a NaN used to
     ///   render as `null`, indistinguishable from a real null (INF-INTEROP-03);
     /// - annotations and provenance project as data, never as executable text.
+    ///
+    /// # Loss table (INF-INTEROP-06)
+    ///
+    /// Projections are lossy by design, and the loss is documented here
+    /// rather than left for a consumer to discover: this table is the
+    /// canonical copy. `to_protobuf` and `to_active_core` point here
+    /// instead of repeating it, so the three surfaces cannot drift apart.
+    /// `docs/spec/projection.md` states shapes; it does not restate this
+    /// table.
+    ///
+    /// A loss is a silent change to what a consumer sees; a refusal is
+    /// loud (an `Err`), and refusals are listed separately at the end.
+    /// "Preserved" means the same value, not merely the same shape.
+    ///
+    /// ## The shared projected tree: JSON and Protobuf render the same tree
+    ///
+    /// Both renderers consume the `Projected` tree built by
+    /// `build_projected`, so they cannot disagree about what is allowed
+    /// to leave the process. Every row below applies to both, unless the
+    /// row says otherwise.
+    ///
+    /// | Source | What the projection carries | What is lost |
+    /// | --- | --- | --- |
+    /// | `Secret` / `SecretRef` | the marker (`***SECRET***`) | the secret bytes, and the locator text: a `SecretRef` never projects its locator |
+    /// | `Str` containing a secret literal | the marker, whole value | the string itself: a partial copy cannot leak, so the whole value goes |
+    /// | `Str` otherwise | the text, verbatim | nothing |
+    /// | `Ident` | the name, redacted per occurrence | a secret embedded in the name is replaced in place, so the name can change |
+    /// | `Env` without a default | `{"$env": name}` / `Env{name}` | nothing; the name is redacted per occurrence like any label |
+    /// | `Env` with a default | `{"$env": name, "default": <projected default>}` / `Env{name, default}` | nothing since INF-INTEROP-06: before it, the default was dropped silently. The default is a nested projected value, so a secret default becomes the marker and an operator default its kind tag |
+    /// | `Binary`, `Unary`, `Constrained`, `Patch`, `SchemaField`, `SchemaTable`, `SchemaArray`, `ContentAddressed` | `{"$expr": "<kind>"}` / `Expr{kind}` | everything except the kind name: operators and operands, constraint bounds, patch ops, schema bounds / patterns / defaults / deprecation notes, blob media type and data |
+    /// | `Semantic` | the inner value, projected | the tag (`Prompt` / `Policy` / `Template`): the wrapper is transparent |
+    /// | `Ref` | the referenced value, projected | the indirection itself: a reference has no data of its own |
+    /// | `Interpolate` | flattened text, `${}` where an expression part stood | the part structure: which expression each `${}` stood for. An interpolation that resolves to a secret renders as the marker, whole string |
+    /// | `Blob` | identity only: hash, size, media type, taint | the payload, always. A tainted blob's media type becomes the marker |
+    /// | `Quantity` | `{"value": v, "unit": "<name>"}` | nothing: a unit IS its name (`UnitTag::name`) |
+    /// | `Float`, non-finite | JSON: `{"$float": "NaN"}` / `"Infinity"` / `"-Infinity"` (INF-INTEROP-03); Protobuf: the real IEEE double | JSON: the class only -- NaN payload bits are lost (the canonical form already normalises every NaN to one quiet NaN). Protobuf: nothing |
+    /// | Table / record | fields in canonical (sorted, redacted-name) order | the in-memory field order. Two names that redact to one key are refused, not merged |
+    /// | `DurationMs` | `{"ms": n}` | nothing |
+    ///
+    /// ## JSON only (`to_redacted_json` / `to_redacted_json_pretty`)
+    ///
+    /// | Source | What the projection carries | What is lost |
+    /// | --- | --- | --- |
+    /// | Envelope | the root value only | bindings, annotations, provenance, extensions, content hash and image size: a consumer that needs the metadata reads the Protobuf form |
+    /// | Data key starting with `$` | the key, escaped by doubling (`$env` becomes `$$env`) | the unescaped spelling: markers (`$env`, `$expr`, `$float`, `$active.blob`) are reserved, so data can never impersonate one |
+    ///
+    /// ## Protobuf only (`to_protobuf`)
+    ///
+    /// | Source | What the projection carries | What is lost |
+    /// | --- | --- | --- |
+    /// | Envelope | root, bindings, annotations, provenance, extensions, content hash, total size | nothing the module holds -- except the annotation path/span, which Infinity annotations do not carry in the first place |
+    /// | `Env` default | `Env.default`, field 2, a nested `Value`; omitted when the `Env` has no default | nothing. The field is additive (spec §4.2: new fields take the next free number), so a reader built against the old schema skips it |
+    /// | Record keys | names verbatim | nothing: the `$` escaping is JSON-only, the Protobuf form has no markers to impersonate |
+    /// | Provenance entries | first entry per key | later entries sharing a key (same rule as `provenance_lines`) |
+    ///
+    /// ## The `active-core` bridge (`to_active_core`)
+    ///
+    /// | Source | What the bridge carries | What is lost |
+    /// | --- | --- | --- |
+    /// | Provenance | nothing | the whole provenance block: `active-core` 1.4.0 `Module` has no provenance field (verified against the 1.4.0 registry source), so there is nowhere to put it |
+    /// | Extensions | nothing | every extension (tag and payload): `active-core` 1.4.0 `Module` has no extensions field |
+    /// | `Module::schema` pointer and `schemas` map | nothing | the document schema: neither survives, so schema/constraint validation (T002/T003/T004) can never fail through `evaluate` |
+    /// | Annotation spans | zeroed (`line 0, column 0`) | every diagnostic position: `InfinityModule` carries no span store, and the rebuilt `CoreModule` has an empty `node_spans` map |
+    /// | Annotation paths | `node<N>` placeholders | the original dotted path |
+    /// | `SchemaField` span | `None` | the span only; bounds, pattern and default convert |
+    /// | Everything else (nodes, edges, bindings, root, annotation kinds) | converted 1:1 | nothing -- including the `Env` default, which converts (`CoreNode::Env { default }`) |
+    ///
+    /// The reverse direction is lossy too: `from_active_core` reads only
+    /// the arena, bindings, root and annotations, so a `CoreModule`'s
+    /// diagnostics, source name and style, spans, files, healing, trivia,
+    /// includes, profiles, patches, schema, schemas and `depends_on`
+    /// never reach Infinity.
+    ///
+    /// ## Refusals, not losses
+    ///
+    /// These are loud errors, never silent drops: a secret-bearing module
+    /// is refused by `to_active_core` (`active-core` models a secret as a
+    /// plain string); a module carrying a `Blob` or `ContentAddressed`
+    /// node is refused by `to_active_core` (no `active-core` 1.4.0
+    /// counterpart; `TypeSpec::Blob` likewise); a module whose opaque
+    /// extension payload contains a secret literal is refused by
+    /// `to_protobuf`; a projection deeper than 256 edges, past the
+    /// 100 000-visit node budget, or with two names redacting to one key
+    /// is refused rather than truncated.
+    ///
+    /// # Example
+    ///
+    /// An `Env` with a default renders the default as a nested projected
+    /// value; without one it renders exactly as it always has:
+    ///
+    /// ```
+    /// use active_infinity::{InfinityModule, Inode};
+    /// use active_infinity::interop::to_redacted_json;
+    ///
+    /// let mut module = InfinityModule::new();
+    /// let default = module.push(Inode::Str("/home/dave".into()));
+    /// let env = module.push(Inode::Env {
+    ///     name: "HOME".into(),
+    ///     default: Some(default),
+    /// });
+    /// module.set_root(Some(env));
+    /// assert_eq!(
+    ///     to_redacted_json(&module).unwrap(),
+    ///     r#"{"$env":"HOME","default":"/home/dave"}"#
+    /// );
+    ///
+    /// let mut plain = InfinityModule::new();
+    /// let env = plain.push(Inode::Env {
+    ///     name: "HOME".into(),
+    ///     default: None,
+    /// });
+    /// plain.set_root(Some(env));
+    /// assert_eq!(
+    ///     to_redacted_json(&plain).unwrap(),
+    ///     r#"{"$env":"HOME"}"#
+    /// );
+    /// ```
     pub fn to_redacted_json(module: &InfinityModule) -> Result<String> {
         let value = to_serde(&project_root(module)?);
         serde_json::to_string(&value).map_err(|_| Error::Encode("json projection failed"))
@@ -2067,7 +2225,21 @@ mod projection {
                     "tainted": tainted,
                 }
             }),
-            Projected::Env(name) => serde_json::json!({ "$env": name }),
+            Projected::Env { name, default } => match default {
+                // No default: exactly the shape Env always rendered,
+                // `{"$env": name}`. A default gains the field, as a nested
+                // projected value (INF-INTEROP-06): a string default stays
+                // a JSON string, an integer stays a number, an operator
+                // default collapses to its `$expr` tag. The `default` key
+                // is part of the marker object, like `$float` and `$expr`:
+                // a data record can never produce it, because a data key
+                // starting with `$` is escaped by doubling in the `Record`
+                // arm above.
+                Some(default) => {
+                    serde_json::json!({ "$env": name, "default": to_serde(default) })
+                }
+                None => serde_json::json!({ "$env": name }),
+            },
             Projected::Expr(kind) => serde_json::json!({ "$expr": kind }),
         }
     }

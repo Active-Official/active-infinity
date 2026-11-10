@@ -163,17 +163,32 @@ mod bridge {
             map.insert(core_id.0, node);
         }
         for (name, core_id) in &module.bindings {
-            if let Some(id) = map.get(&core_id.0) {
-                out.bind(name.clone(), *id);
-            }
+            // A binding naming a node the arena never produced is caller
+            // error, not a droppable detail: silently skipping it used to
+            // bridge a module whose `ghost` binding simply vanished
+            // (INF-INTEROP-02). Refuse with the same `EncodeDangling` the
+            // annotation-`expr` path below already returns.
+            let id = map
+                .get(&core_id.0)
+                .copied()
+                .ok_or(Error::EncodeDangling(core_id.0))?;
+            out.bind(name.clone(), id);
         }
         if let Some(root) = module.root {
-            out.set_root(map.get(&root.0).copied());
+            // Same refusal for the root: `set_root(None)` used to turn a
+            // dangling root into a rootless module with no error.
+            let root = map
+                .get(&root.0)
+                .copied()
+                .ok_or(Error::EncodeDangling(root.0))?;
+            out.set_root(Some(root));
         }
         let mut annotations: Vec<(NodeId, AnnotationKind)> = Vec::new();
         for (core_id, list) in &module.annotations {
+            // Same refusal for an annotation keyed on an unmapped node:
+            // `continue` used to drop the whole annotation list silently.
             let Some(node) = map.get(&core_id.0).copied() else {
-                continue;
+                return Err(Error::EncodeDangling(core_id.0));
             };
             for annotation in list {
                 let kind = match &annotation.kind {

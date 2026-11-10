@@ -112,6 +112,31 @@
   blob table (entries, order, payload bytes) and every node record are
   byte-identical, so no dialect bump.
 
+- **`InfinityView::new` refuses non-canonical images (INF-12).**
+  The view constructor hard-coded `verify_canonical: false`, so it was
+  the one default path INF-02 left lenient: a non-canonical image whose
+  provenance text contained a copy of a secret literal yielded a view
+  whose `provenance_entries()` returned the secret verbatim, even
+  though canonical `encode` redacts provenance against the module's
+  secrets. `new` now uses the default decode options (hash verified
+  and canonicality proven), so a non-canonical image is refused with
+  `infinity/not-canonical` instead of yielding a view; the entries a
+  `new`-built view reports are therefore redacted-by-construction. A
+  caller that must read a trusted non-canonical image (migration,
+  repair) still opts out explicitly with `InfinityView::with_opts`
+  and `verify_canonical: false` -- the same deliberate, auditable
+  opt-out INF-02 documents for `decode` -- and then owns redaction:
+  `provenance()` stays the raw accessor and lenient views return the
+  stored entries as they are, so output leaving the process must go
+  through `interop::provenance_json`. Redacting inside
+  `provenance_entries()` instead was considered and rejected: it
+  would duplicate the encoder's redaction at a second layer (and
+  still leave `provenance()` raw), while the canonical proof already
+  exists, is bounded by the INF-01 decode budget, and closes every
+  accessor over a non-canonical image through `new`, not just one
+  method. Not hash-affecting: no bytes change, only which images the
+  constructor accepts.
+
 - **Store commits are atomic on filesystems without hard links (XPL-INF-05 /
   INF-L10).** `commit()` fell back to writing the object directly at its
   final name when hard links were unavailable (exFAT/FAT32, some network

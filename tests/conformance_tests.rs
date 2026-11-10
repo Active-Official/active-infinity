@@ -266,7 +266,7 @@ fn valid_vectors_validate_and_reencode_identically() {
         let module = decode_with(&bytes, entry.decode_opts())
             .unwrap_or_else(|error| panic!("{name} must decode, got {error:?}"));
 
-        let view = InfinityView::new(&bytes, limits).expect("view");
+        let view = InfinityView::with_opts(&bytes, entry.decode_opts()).expect("view");
         assert_eq!(view.node_count(), meta.nodes, "{name} view nodes");
         assert_eq!(view.content_hash(), meta.content_hash, "{name} view hash");
 

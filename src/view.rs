@@ -66,11 +66,23 @@ pub struct InfinityView<'a> {
 
 impl<'a> InfinityView<'a> {
     /// Validate `buf` and borrow it.
+    ///
+    /// The default decode options apply (INF-02, INF-12): the content hash
+    /// is verified **and** canonicality is proven, so a structurally valid
+    /// but non-canonical image is refused with `infinity/not-canonical`
+    /// instead of yielding a view. That is what makes the provenance a
+    /// `new`-built view reports safe to display: a canonical image's
+    /// provenance was redacted against the module's secrets at encode
+    /// time, so `provenance_entries()` cannot return an unredacted copy
+    /// of a secret through this constructor. A caller that must read a
+    /// trusted non-canonical image (migration, repair) opts out
+    /// explicitly with [`InfinityView::with_opts`] and
+    /// `verify_canonical: false` — and then owns redaction (see
+    /// `provenance_entries()`).
     pub fn new(buf: &'a [u8], limits: crate::layout::Limits) -> Result<Self> {
         let opts = DecodeOpts {
             limits,
-            verify_hash: true,
-            verify_canonical: false,
+            ..DecodeOpts::default()
         };
         Ok(Self {
             validated: Validated::new(buf, opts)?,
@@ -148,6 +160,15 @@ impl<'a> InfinityView<'a> {
         Ok(out)
     }
 
+    /// The stored provenance block, verbatim: this is the raw accessor.
+    ///
+    /// For a view built by [`InfinityView::new`] the image is canonical,
+    /// so the block was redacted against the module's secrets at encode
+    /// time. For a leniently built view ([`InfinityView::with_opts`] with
+    /// `verify_canonical: false`, or [`InfinityView::from_validated`]
+    /// over leniently validated bytes) it may carry unredacted
+    /// provenance — use `interop::provenance_json` for output that leaves
+    /// the process.
     pub fn provenance(&self) -> Result<Option<Provenance>> {
         self.validated.provenance()
     }
@@ -271,11 +292,15 @@ impl<'a> InfinityView<'a> {
 
     /// Provenance entries, borrowed.
     ///
-    /// A raw accessor: it returns the stored entries as they are. Canonicalization
-    /// redacts provenance against the module's secrets, so for an image that is
-    /// canonical (`validate_canonical`) the text is already safe. This view only
-    /// proves structure, so a caller that builds it over hand-made or
-    /// non-canonical bytes must use `interop::provenance_json` for output that
+    /// For a view built by [`InfinityView::new`] the image is canonical,
+    /// so the entries are redacted-by-construction: canonicalization
+    /// redacts provenance against the module's secrets at encode time,
+    /// and `new` refuses a non-canonical image instead of yielding a
+    /// view (INF-12). A view built leniently —
+    /// [`InfinityView::with_opts`] with `verify_canonical: false`, or
+    /// [`InfinityView::from_validated`] over leniently validated bytes —
+    /// returns the stored entries as they are, and a caller that builds
+    /// such a view must use `interop::provenance_json` for output that
     /// leaves the process.
     pub fn provenance_entries(&self) -> Result<Vec<(String, ProvEntry)>> {
         Ok(self

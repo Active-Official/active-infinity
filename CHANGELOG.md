@@ -92,6 +92,26 @@
   dialect bump (the canonical-form rules for every previously encodable
   module are unchanged).
 
+- **Encode no longer clones every blob payload per node (INF-11).**
+  `BlobKey` carried the full payload bytes, and `prepare()` cloned every
+  payload into the blob table (once per node), cloned it again into the
+  `blob_index` key, and `encode` cloned it a third time per node for the
+  lookup key — so 200 `Blob` nodes sharing a 16 MiB payload paid ~6.25 GiB
+  of transient allocation and ~30 s in debug. Blobs are now keyed by
+  `(hash, size, payload presence)` and the table borrows each distinct
+  payload from its first node instead of cloning it; each distinct payload
+  is Blake3-verified once, and later nodes sharing the key are memcmp'd
+  against the representative (no clone, no second hash). A materialised
+  payload must hash to its entry hash, so one key identifies one payload
+  up to a Blake3 collision — the same assumption the format already makes
+  for content addressing — and a mismatch that still hashes to the key
+  (a genuine collision) is refused with `infinity/encode` instead of
+  silently aliasing two payloads. The 200x16 MiB encode now peaks at
+  ~3.2 GiB of transient allocation (the normalised arena's own per-node
+  copies, which the prepared module must own). Not hash-affecting: the
+  blob table (entries, order, payload bytes) and every node record are
+  byte-identical, so no dialect bump.
+
 - **Store commits are atomic on filesystems without hard links (XPL-INF-05 /
   INF-L10).** `commit()` fell back to writing the object directly at its
   final name when hard links were unavailable (exFAT/FAT32, some network

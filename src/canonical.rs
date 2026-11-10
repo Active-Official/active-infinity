@@ -40,15 +40,83 @@ use crate::unit::UnitTag;
 /// Deduplication key for a type table entry: code plus its aux payload.
 pub(crate) type TypeKey = (u32, Vec<(u32, u32)>);
 
-/// Deduplication key for a blob entry: identity plus payload.
-pub(crate) type BlobKey = ([u8; 32], u64, Option<Vec<u8>>);
+/// Deduplication key for a blob entry: identity plus payload presence.
+///
+/// The key is `(hash, size, has_payload)` — the payload bytes themselves
+/// are never part of the key (INF-11). A materialised payload must
+/// Blake3-hash to its entry hash (checked in `prepare`), so two payloads
+/// under one key are byte-equal up to a Blake3 collision — exactly the
+/// same collision assumption the format already makes for content
+/// addressing. The bytes are still compared on a key hit in `prepare`
+/// (memcmp, no clone); a mismatch that still hashes to the key is a
+/// genuine Blake3 collision, and encode refuses rather than silently
+/// addressing two payloads by one key.
+pub(crate) type BlobKey = ([u8; 32], u64, bool);
 
 /// A blob payload prepared for the content-addressed heap.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// The payload bytes are NOT stored here (INF-11): they live in the
+/// `Prepared::nodes` entry named by `source`, and this struct borrows
+/// them by index instead of cloning them. A module with N `Blob` nodes
+/// sharing one payload used to pay N full payload clones into this
+/// table (plus one more per node for the `blob_index` key and one more
+/// per node in `encode.rs`); now the table holds one small record per
+/// distinct blob and the bytes are written to the heap straight from
+/// the representative node.
+#[derive(Debug, Clone, Eq)]
 pub(crate) struct BlobPayload {
     pub hash: [u8; 32],
     pub size: u64,
-    pub payload: Option<Vec<u8>>,
+    /// True when a materialised, non-empty payload exists for this entry.
+    /// An empty payload and a detached blob both map to `false`: they
+    /// encode to the same `(hash, offset, 0)` record, and keying them
+    /// apart would emit two duplicate records the validator refuses.
+    pub has_payload: bool,
+    /// Length of the materialised payload; 0 when `has_payload` is false.
+    /// Always equal to `size` when `has_payload` is true (`prepare`
+    /// verifies the length); kept as its own field so the heap writer
+    /// and the size estimate do not have to re-derive it from the
+    /// presence bit.
+    pub payload_len: u64,
+    /// Index into `Prepared::nodes` of the first node carrying this
+    /// entry's payload; `None` when `has_payload` is false. The index
+    /// is a prepare-internal representative choice, not canonical
+    /// content — it is deliberately excluded from `PartialEq`.
+    pub source: Option<usize>,
+}
+
+impl BlobPayload {
+    /// The payload bytes for this entry, borrowed from the prepared
+    /// nodes through `source`. `None` when the entry carries no bytes
+    /// — or when the index does not resolve, which cannot happen for
+    /// entries `prepare` built (the index comes from the same `nodes`
+    /// vec, which is never reordered after the blob pass) but is
+    /// reported as "no payload" rather than panicking.
+    pub(crate) fn payload_in<'a>(&self, nodes: &'a [Inode]) -> Option<&'a [u8]> {
+        let index = self.source?;
+        match nodes.get(index)? {
+            Inode::Blob { payload, .. } => payload.as_deref(),
+            _ => None,
+        }
+    }
+}
+
+impl PartialEq for BlobPayload {
+    /// Canonical comparison only: hash, size, presence, length. The
+    /// `source` index is excluded — two prepared modules built from
+    /// the same logical module in different arena order choose
+    /// different representatives for the same payload. Payload *bytes*
+    /// are still compared, through `Prepared::nodes` via `node_eq`
+    /// (`prepared_eq` in `ir.rs`), and both payloads were verified to
+    /// hash to `hash` in `prepare`, so this is as strong as comparing
+    /// the bytes here up to the Blake3 assumption the format already
+    /// makes.
+    fn eq(&self, other: &Self) -> bool {
+        self.hash == other.hash
+            && self.size == other.size
+            && self.has_payload == other.has_payload
+            && self.payload_len == other.payload_len
+    }
 }
 
 /// One prepared type-table entry with its aux payload (enum members).
@@ -351,9 +419,22 @@ pub(crate) fn prepare(module: &InfinityModule) -> Result<Prepared> {
         type_index.insert((*code, aux.clone()), index as u32);
     }
 
-    // Blobs: deduplicate by identity+payload, ordered by hash then size.
+    // Blobs: deduplicate by (hash, size, payload presence), ordered by hash then size.
+    //
+    // The payload bytes are never cloned here (INF-11). Each distinct
+    // payload is verified once — the first occurrence runs the Blake3
+    // check, later occurrences are memcmp'd against the representative's
+    // bytes (no clone, no second hash) — and the table holds one small
+    // record per distinct blob, borrowing its bytes from the first node
+    // that carries them (`BlobPayload::source`, an index into `nodes`).
+    // `blob_seen` is the dedup: `blobs` is already duplicate-free when
+    // the loop ends, so there is no `dedup()` pass; the stable sort by
+    // (hash, size) then orders first occurrences exactly as the old
+    // sort-plus-dedup ordered the survivors. `nodes` is not reordered
+    // after this point, so the `source` indices stay valid in `Prepared`.
     let mut blobs: Vec<BlobPayload> = Vec::new();
-    for node in &nodes {
+    let mut blob_seen: HashMap<BlobKey, usize> = HashMap::new();
+    for (node_index, node) in nodes.iter().enumerate() {
         if let Inode::Blob {
             hash,
             size,
@@ -365,6 +446,10 @@ pub(crate) fn prepare(module: &InfinityModule) -> Result<Prepared> {
             if *tainted && payload.is_some() {
                 return Err(Error::Encode("a tainted blob must not carry a payload"));
             }
+            // An empty payload and a detached blob encode to the same
+            // (hash, offset, 0) record; keying them apart would emit two
+            // duplicate records the validator refuses.
+            let has_payload = !*tainted && payload.as_ref().is_some_and(|bytes| !bytes.is_empty());
             if let Some(bytes) = payload {
                 // The image is validated on the way in, so an inconsistent blob
                 // has to fail here: emitting it would produce bytes the crate
@@ -372,30 +457,90 @@ pub(crate) fn prepare(module: &InfinityModule) -> Result<Prepared> {
                 if bytes.len() as u64 != *size {
                     return Err(Error::Encode("blob payload length disagrees with size"));
                 }
+                if !has_payload {
+                    // Empty payload: hashing zero bytes is O(1), and the
+                    // validator holds a flagged empty node to blake3("")
+                    // (its node arm checks `size == 0` against the empty
+                    // hash), so every empty node is verified individually,
+                    // exactly as before. A detached node carries no bytes
+                    // and needs no check: it may declare any hash.
+                    if blake3::hash(bytes).as_bytes() != hash {
+                        return Err(Error::Encode("blob payload hash mismatch"));
+                    }
+                }
+            }
+            let key: BlobKey = (*hash, *size, has_payload);
+            if let Some(&representative) = blob_seen.get(&key) {
+                if has_payload {
+                    // A later node for the same key: the payloads must be
+                    // byte-equal (both hash to `hash`, verified below on
+                    // mismatch). Compare, don't clone and don't re-hash.
+                    let representative_bytes = match &nodes[representative] {
+                        Inode::Blob {
+                            payload: Some(bytes),
+                            ..
+                        } => bytes,
+                        _ => {
+                            return Err(Error::Encode(
+                                "blob representative missing from prepared module",
+                            ));
+                        }
+                    };
+                    let bytes = payload
+                        .as_ref()
+                        .expect("has_payload implies a payload is present");
+                    if bytes.as_slice() != representative_bytes.as_slice() {
+                        // The bytes differ, so at most one of them hashes
+                        // to `hash`. Re-hash this one: a mismatch is the
+                        // same refusal as before; a match means two
+                        // distinct payloads share a Blake3 hash and size,
+                        // and one key cannot address both — refuse
+                        // (fail closed) instead of silently aliasing
+                        // them.
+                        if blake3::hash(bytes).as_bytes() != hash {
+                            return Err(Error::Encode("blob payload hash mismatch"));
+                        }
+                        return Err(Error::Encode(
+                            "blob payload hash collision: two distinct payloads share a hash and size",
+                        ));
+                    }
+                }
+                continue;
+            }
+            if has_payload {
+                // First occurrence of this key: verify the payload
+                // hashes to its entry hash (the one Blake3 per distinct
+                // payload; later nodes with the same key are memcmp'd
+                // against this representative instead).
+                let bytes = payload
+                    .as_ref()
+                    .expect("has_payload implies a payload is present");
                 if blake3::hash(bytes).as_bytes() != hash {
                     return Err(Error::Encode("blob payload hash mismatch"));
                 }
             }
+            blob_seen.insert(key, node_index);
             blobs.push(BlobPayload {
                 hash: *hash,
                 size: *size,
-                // An empty payload and a detached blob encode to the same
-                // (hash, offset, 0) record; keying them apart would emit two
-                // duplicate records the validator refuses.
-                payload: if *tainted {
-                    None
+                has_payload,
+                payload_len: if has_payload {
+                    payload
+                        .as_ref()
+                        .expect("has_payload implies a payload is present")
+                        .len() as u64
                 } else {
-                    payload.clone().filter(|bytes| !bytes.is_empty())
+                    0
                 },
+                source: if has_payload { Some(node_index) } else { None },
             });
         }
     }
     blobs.sort_by_key(|blob| (blob.hash, blob.size));
-    blobs.dedup();
     let blob_index: HashMap<BlobKey, u32> = blobs
         .iter()
         .enumerate()
-        .map(|(index, blob)| ((blob.hash, blob.size, blob.payload.clone()), index as u32))
+        .map(|(index, blob)| ((blob.hash, blob.size, blob.has_payload), index as u32))
         .collect();
 
     // Hashes: provenance hash values.
@@ -464,6 +609,7 @@ pub(crate) fn prepare(module: &InfinityModule) -> Result<Prepared> {
     // without corrupting it. Refuse the encode instead of storing the copy.
     reject_secret_copies(
         module,
+        &nodes,
         provenance.as_ref(),
         &extensions,
         &blobs,
@@ -697,6 +843,7 @@ pub(crate) const MAX_SECRET_SCAN_BYTES: usize = 64 << 20;
 /// stored image as well as for every projection.
 fn reject_secret_copies(
     module: &InfinityModule,
+    nodes: &[Inode],
     provenance: Option<&Provenance>,
     extensions: &[(u64, Vec<u8>)],
     blobs: &[BlobPayload],
@@ -746,8 +893,17 @@ fn reject_secret_copies(
             "extension payload carries a secret literal",
         )?;
     }
+    // The scan runs over the deduplicated table, not over the nodes:
+    // a payload shared by N nodes is scanned once, so the charge
+    // (`MAX_SECRET_SCAN_BYTES`) is per distinct payload, as before.
+    // A `has_payload` entry whose bytes do not resolve is an encoder
+    // fault, not a scan to skip: skipping it would publish a payload
+    // that was never checked for secret copies.
     for blob in blobs {
-        if let Some(payload) = &blob.payload {
+        if blob.has_payload {
+            let payload = blob
+                .payload_in(nodes)
+                .ok_or(Error::Encode("blob payload missing from prepared module"))?;
             scan_payload(
                 payload,
                 secrets,

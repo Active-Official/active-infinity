@@ -138,9 +138,12 @@ fn estimate_image_size(prepared: &crate::canonical::Prepared) -> Result<()> {
             .iter()
             .fold(0u64, |sum, text| sum.saturating_add(text.len() as u64 + 4)),
     );
-    total = total.saturating_add(prepared.blobs.iter().fold(0u64, |sum, blob| {
-        sum.saturating_add(blob.payload.as_ref().map_or(0, |bytes| bytes.len() as u64) + 40)
-    }));
+    total = total.saturating_add(
+        prepared
+            .blobs
+            .iter()
+            .fold(0u64, |sum, blob| sum.saturating_add(blob.payload_len + 40)),
+    );
     total = total.saturating_add(prepared.secret_bytes().fold(0u64, |sum, bytes| {
         sum.saturating_add(bytes.len() as u64 + 8)
     }));
@@ -292,14 +295,27 @@ pub(crate) fn encode_prepared_into(
     header.span_mut(Section::Blobs).count = prepared.blobs.len() as u32;
     let mut blob_heap_len = 0u32;
     for blob in &prepared.blobs {
-        let len = blob.payload.as_ref().map(|p| p.len()).unwrap_or(0) as u32;
+        let len = blob.payload_len as u32;
         image.extend_from_slice(&blob.hash);
         image.extend_from_slice(&blob_heap_len.to_le_bytes());
         image.extend_from_slice(&len.to_le_bytes());
         blob_heap_len = blob_heap_len.checked_add(len).ok_or(Error::TooLarge)?;
     }
+    // The payload bytes are written straight from the representative
+    // node (`BlobPayload::source`, INF-11): the table holds no copies
+    // of its own. A `has_payload` entry whose bytes do not resolve is
+    // an encoder fault, not a zero-length entry — silently writing
+    // nothing would emit a heap shorter than the table promises.
     for blob in &prepared.blobs {
-        if let Some(payload) = &blob.payload {
+        if blob.has_payload {
+            let payload = blob
+                .payload_in(&prepared.nodes)
+                .ok_or(Error::Encode("blob payload missing from prepared module"))?;
+            debug_assert_eq!(
+                payload.len() as u64,
+                blob.payload_len,
+                "representative payload length must match the table entry"
+            );
             image.extend_from_slice(payload);
         }
     }
@@ -807,15 +823,14 @@ fn build_node_tables(prepared: &Prepared) -> Result<NodeTables> {
                 media_type,
                 payload,
             } => {
-                let key = (
-                    *hash,
-                    *size,
-                    if *tainted {
-                        None
-                    } else {
-                        payload.clone().filter(|bytes| !bytes.is_empty())
-                    },
-                );
+                // The key is (hash, size, payload presence) — the payload
+                // bytes themselves are never cloned into the key (INF-11).
+                // The presence rule must match `prepare()` exactly:
+                // tainted never carries a payload, and an empty payload
+                // is the same entry class as a detached blob.
+                let has_payload =
+                    !*tainted && payload.as_ref().is_some_and(|bytes| !bytes.is_empty());
+                let key = (*hash, *size, has_payload);
                 let index = *prepared
                     .blob_index
                     .get(&key)

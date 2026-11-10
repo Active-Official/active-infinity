@@ -56,8 +56,16 @@ impl fmt::Display for NodeId {
 /// wire codec and the `active-core` bridge are the only in-crate readers, and
 /// both are audited. `Debug`, `Display`, `PartialEq`, `Ord` and `Hash` are all
 /// deliberately absent or redacting, so a secret can never leak through
-/// logging, assertion output, sorting or map keys, and can never be compared
-/// for equality (the anti-oracle rule).
+/// logging, assertion output, sorting or map keys, and a secret *value* can
+/// never be compared for equality (the anti-oracle rule: [`SecretBytes::eq`]
+/// is always false, including for self).
+///
+/// That rule lives at the *value* level only. One level up, [`Inode`] and
+/// [`InfinityModule`] compare secrets by presence only — a secret node equals
+/// another secret node regardless of content — so node equality and module
+/// equality agree (INF-07). Presence-only equality reveals nothing beyond the
+/// node kind, which is already public via [`Inode::kind`], so it cannot
+/// become a guessing oracle.
 #[derive(Clone)]
 pub struct SecretBytes(Vec<u8>);
 
@@ -97,7 +105,12 @@ impl fmt::Display for SecretBytes {
 }
 
 impl PartialEq for SecretBytes {
-    /// Anti-oracle: a secret never equals anything, including itself.
+    /// Anti-oracle: a secret value never equals anything, including itself.
+    ///
+    /// This is the value-level rule only. [`Inode`] compares secret *nodes*
+    /// by presence (see `node_eq`), and [`InfinityModule`] compares
+    /// modules the same way, so no equality in this crate ever looks at
+    /// secret bytes.
     fn eq(&self, _other: &Self) -> bool {
         false
     }
@@ -455,7 +468,14 @@ impl SchemaFieldSpec {
 /// `Debug` is written by hand (never derived): blob payloads are summarized
 /// by identity and secrets render as `Secret(***)`, so logging a module can
 /// never dump payload or secret bytes.
-#[derive(Clone, PartialEq)]
+///
+/// `PartialEq` is written by hand too (never derived): it is `node_eq`,
+/// the single equality implementation shared with
+/// [`InfinityModule::structurally_eq`], so generic code comparing nodes and
+/// module-level code can no longer disagree (INF-07). A derived impl would
+/// call [`SecretBytes::eq`] — always false — and make a secret node unequal
+/// to itself while the module holding it compares equal.
+#[derive(Clone)]
 pub enum Inode {
     Null,
     Bool(bool),
@@ -473,7 +493,9 @@ pub enum Inode {
     Table {
         fields: Vec<(String, NodeId)>,
     },
-    /// A structural secret literal. Never equals anything.
+    /// A structural secret literal. Equal to any other secret literal
+    /// (presence only — the bytes are never compared, so this can never
+    /// become a guessing oracle) and to nothing else.
     Secret(SecretBytes),
     /// A secret derived from a locator node (`secret.env(NAME)`,
     /// `secret(<expr>)`).
@@ -532,6 +554,19 @@ pub enum Inode {
         media_type: String,
         payload: Option<Vec<u8>>,
     },
+}
+
+impl PartialEq for Inode {
+    /// Single node-equality implementation, shared with
+    /// [`InfinityModule::structurally_eq`] via `node_eq`.
+    ///
+    /// Secret nodes compare by presence only (`Secret == Secret` is true
+    /// regardless of content — the bytes are never read), float nodes
+    /// compare by bits (so a NaN equals itself), and every other variant
+    /// compares field by field. See `node_eq` for the rationale (INF-07).
+    fn eq(&self, other: &Self) -> bool {
+        node_eq(self, other)
+    }
 }
 
 impl fmt::Debug for Inode {
@@ -1262,20 +1297,182 @@ impl PartialEq for InfinityModule {
     /// holding a secret is equal to a structurally identical copy of itself.
     /// Use [`SecretBytes`] directly when you need the anti-oracle behaviour of
     /// two secret values.
+    ///
+    /// When either module cannot be prepared (dangling reference, duplicate
+    /// binding, cycle, …), [`InfinityModule::structurally_eq`] falls back to
+    /// a raw-arena comparison so `==` stays reflexive; use
+    /// [`InfinityModule::try_structurally_eq`] when you need to distinguish
+    /// "different" from "unpreparable" (INF-07).
     fn eq(&self, other: &Self) -> bool {
         self.structurally_eq(other)
     }
 }
 
 /// Compare two canonical nodes, blinding secret payloads.
+///
+/// This is the single node-equality implementation: [`Inode`]'s `PartialEq`
+/// delegates here, and [`InfinityModule::structurally_eq`] compares its
+/// prepared nodes with it, so the two levels can no longer disagree
+/// (INF-07). The match is exhaustive on purpose — a derived `PartialEq`
+/// would call [`SecretBytes::eq`] (always false) for the `Secret` variant
+/// and `f64::eq` (NaN unequal to itself) for `Float`, which is exactly the
+/// divergence this function exists to prevent. A new `Inode` variant fails
+/// to compile here until its comparison is decided explicitly.
+///
+/// Security: the `Secret` arm never reads the bytes — two secret nodes are
+/// equal by presence only. The result is independent of the secret contents,
+/// so no sequence of comparisons can confirm a guess, and the comparison
+/// itself is O(1): there is no content-dependent timing to measure. (A
+/// constant-time byte comparison would be the wrong tool here: it would
+/// still answer "equal or not" about the contents, which is the oracle.
+/// Presence-only answers a different question — "are both nodes secrets?" —
+/// whose answer the node kind already makes public via [`Inode::kind`].)
 fn node_eq(left: &Inode, right: &Inode) -> bool {
-    match (left, right) {
-        (Inode::Secret(_), Inode::Secret(_)) => true,
-        (Inode::Secret(_), _) | (_, Inode::Secret(_)) => false,
+    // Matched on `left` with no wildcard arm: adding an `Inode` variant
+    // fails to compile here until its comparison is decided explicitly, so
+    // the INF-07 bug class (a variant silently unequal to itself) cannot
+    // recur. Each arm's inner `_ => false` covers only cross-variant pairs.
+    match left {
+        // Presence only: never reads the bytes, never a timing oracle.
+        Inode::Secret(_) => matches!(right, Inode::Secret(_)),
         // Canonicalization normalizes floats; compare their bits so a NaN is
         // equal to itself.
-        (Inode::Float(a), Inode::Float(b)) => a.to_bits() == b.to_bits(),
-        _ => left == right,
+        Inode::Float(a) => match right {
+            Inode::Float(b) => a.to_bits() == b.to_bits(),
+            _ => false,
+        },
+        Inode::Null => matches!(right, Inode::Null),
+        Inode::Bool(a) => match right {
+            Inode::Bool(b) => a == b,
+            _ => false,
+        },
+        Inode::Int(a) => match right {
+            Inode::Int(b) => a == b,
+            _ => false,
+        },
+        Inode::Str(a) => match right {
+            Inode::Str(b) => a == b,
+            _ => false,
+        },
+        Inode::DurationMs(a) => match right {
+            Inode::DurationMs(b) => a == b,
+            _ => false,
+        },
+        Inode::Quantity { value, unit } => match right {
+            Inode::Quantity {
+                value: other_value,
+                unit: other_unit,
+            } => value == other_value && unit == other_unit,
+            _ => false,
+        },
+        Inode::Array { elements } => match right {
+            Inode::Array { elements: other } => elements == other,
+            _ => false,
+        },
+        Inode::Table { fields } => match right {
+            Inode::Table { fields: other } => fields == other,
+            _ => false,
+        },
+        Inode::SecretRef { locator } => match right {
+            Inode::SecretRef { locator: other } => locator == other,
+            _ => false,
+        },
+        Inode::Ref(id) => match right {
+            Inode::Ref(other) => id == other,
+            _ => false,
+        },
+        Inode::Env { name, default } => match right {
+            Inode::Env {
+                name: other_name,
+                default: other_default,
+            } => name == other_name && default == other_default,
+            _ => false,
+        },
+        Inode::Ident(name) => match right {
+            Inode::Ident(other) => name == other,
+            _ => false,
+        },
+        Inode::Interpolate { parts } => match right {
+            Inode::Interpolate { parts: other } => parts == other,
+            _ => false,
+        },
+        Inode::Binary { op, lhs, rhs } => match right {
+            Inode::Binary {
+                op: other_op,
+                lhs: other_lhs,
+                rhs: other_rhs,
+            } => op == other_op && lhs == other_lhs && rhs == other_rhs,
+            _ => false,
+        },
+        Inode::Unary { op, expr } => match right {
+            Inode::Unary {
+                op: other_op,
+                expr: other_expr,
+            } => op == other_op && expr == other_expr,
+            _ => false,
+        },
+        Inode::Constrained { target, constraint } => match right {
+            Inode::Constrained {
+                target: other_target,
+                constraint: other_constraint,
+            } => target == other_target && constraint == other_constraint,
+            _ => false,
+        },
+        Inode::Patch(op) => match right {
+            Inode::Patch(other) => op == other,
+            _ => false,
+        },
+        Inode::SchemaField(spec) => match right {
+            Inode::SchemaField(other) => spec == other,
+            _ => false,
+        },
+        Inode::SchemaTable { fields, closed } => match right {
+            Inode::SchemaTable {
+                fields: other_fields,
+                closed: other_closed,
+            } => fields == other_fields && closed == other_closed,
+            _ => false,
+        },
+        Inode::SchemaArray { element } => match right {
+            Inode::SchemaArray { element: other } => element == other,
+            _ => false,
+        },
+        Inode::Semantic { tag, inner } => match right {
+            Inode::Semantic {
+                tag: other_tag,
+                inner: other_inner,
+            } => tag == other_tag && inner == other_inner,
+            _ => false,
+        },
+        Inode::ContentAddressed { media_type, data } => match right {
+            Inode::ContentAddressed {
+                media_type: other_media,
+                data: other_data,
+            } => media_type == other_media && data == other_data,
+            _ => false,
+        },
+        Inode::Blob {
+            hash,
+            size,
+            tainted,
+            media_type,
+            payload,
+        } => match right {
+            Inode::Blob {
+                hash: other_hash,
+                size: other_size,
+                tainted: other_tainted,
+                media_type: other_media,
+                payload: other_payload,
+            } => {
+                hash == other_hash
+                    && size == other_size
+                    && tainted == other_tainted
+                    && media_type == other_media
+                    && payload == other_payload
+            }
+            _ => false,
+        },
     }
 }
 
@@ -1414,17 +1611,53 @@ impl InfinityModule {
     /// that matters, call [`Self::check_reachable`] first and compare the
     /// raw arenas. `encode()` refuses an unreachable node by default, so an
     /// unreachable node can only exist in a module that was never encoded.
+    ///
+    /// When either module cannot be prepared (dangling reference, duplicate
+    /// binding, cycle, over a limit, …) this falls back to a raw-arena
+    /// comparison (`raw_eq`) instead of returning false: `==` stays
+    /// reflexive — a module is always equal to itself and to its clone —
+    /// and two unpreparable modules compare by their actual content. The
+    /// fallback never treats "invalid" as "different". Use
+    /// [`Self::try_structurally_eq`] when you need to distinguish
+    /// "different" from "unpreparable" (INF-07).
     pub fn structurally_eq(&self, other: &Self) -> bool {
-        let (Ok(left), Ok(right)) = (
-            crate::canonical::prepare(self),
-            crate::canonical::prepare(other),
-        ) else {
-            return false;
-        };
-        // Raw arena sizes, not prepared sizes: prepare() drops unreachable
-        // nodes, so without this an extra unreachable node would be
-        // invisible to the comparison (INF-04).
-        self.nodes.len() == other.nodes.len()
+        match self.try_structurally_eq(other) {
+            Ok(equal) => equal,
+            Err(_) => self.raw_eq(other),
+        }
+    }
+
+    /// Canonical structural equality, or the reason it cannot be decided.
+    ///
+    /// Returns `Ok(true)` / `Ok(false)` when both modules prepare, and
+    /// `Err` when `prepare()` fails on either side — the caller then knows
+    /// the modules are unpreparable rather than merely different. This is
+    /// the tri-state form of [`Self::structurally_eq`]: `==` answers with
+    /// the raw-arena fallback where this answers with the error (INF-07).
+    pub fn try_structurally_eq(&self, other: &Self) -> Result<bool, super::Error> {
+        let left = crate::canonical::prepare(self)?;
+        let right = crate::canonical::prepare(other)?;
+        Ok(Self::prepared_eq(
+            self.nodes.len(),
+            &left,
+            other.nodes.len(),
+            &right,
+        ))
+    }
+
+    /// Canonical-form comparison of two prepared modules.
+    ///
+    /// The `*_node_count` arguments are the *raw* arena sizes, not the
+    /// prepared sizes: prepare() drops unreachable nodes, so without this
+    /// an extra unreachable node would be invisible to the comparison
+    /// (INF-04).
+    fn prepared_eq(
+        left_node_count: usize,
+        left: &crate::canonical::Prepared,
+        right_node_count: usize,
+        right: &crate::canonical::Prepared,
+    ) -> bool {
+        left_node_count == right_node_count
             && left.root == right.root
             && left.extensions == right.extensions
             && left.bindings == right.bindings
@@ -1447,6 +1680,31 @@ impl InfinityModule {
                 .nodes
                 .iter()
                 .zip(right.nodes.iter())
+                .all(|(a, b)| node_eq(a, b))
+    }
+
+    /// Raw-arena comparison, used only when `prepare()` fails on either side.
+    ///
+    /// Compares every field of the module as stored — roots, bindings,
+    /// annotations, provenance, extensions, node count and every node via
+    /// [`node_eq`] — so two unpreparable modules compare by their actual
+    /// content instead of both collapsing to "not equal". In particular a
+    /// module with a dangling reference is equal to its own clone. This is
+    /// deliberately *not* canonical: arena order matters here, because no
+    /// canonical numbering exists for a module that cannot be prepared
+    /// (INF-07). Callers that need canonical equality for valid modules
+    /// must use [`Self::try_structurally_eq`] and handle the error.
+    fn raw_eq(&self, other: &Self) -> bool {
+        self.nodes.len() == other.nodes.len()
+            && self.root == other.root
+            && self.bindings == other.bindings
+            && self.annotations == other.annotations
+            && self.provenance == other.provenance
+            && self.extensions == other.extensions
+            && self
+                .nodes
+                .iter()
+                .zip(other.nodes.iter())
                 .all(|(a, b)| node_eq(a, b))
     }
 

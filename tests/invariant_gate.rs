@@ -45,7 +45,26 @@ fn canary_never_reaches_debug_display_json_or_protobuf() {
 
 #[test]
 fn secret_values_are_never_equal() {
+    // The anti-oracle rule lives at the SecretBytes (value) level: a secret
+    // value never equals anything, including itself, so no comparison can
+    // confirm a guess (INF-07 keeps this exactly as it was).
+    let first = SecretBytes::from(CANARY);
+    let second = SecretBytes::from(CANARY);
+    assert_ne!(first, second);
+    assert_ne!(first, first.clone());
+}
+
+#[test]
+fn secret_nodes_compare_by_presence_only() {
+    // One level up, Inode equality is presence-only (INF-07): a secret node
+    // equals any other secret node regardless of content — the bytes are
+    // never read — so node equality and module equality agree. This is not
+    // an oracle: the result is independent of the contents, and the answer
+    // ("both are secrets") is already public via the node kind.
     let first = Inode::Secret(SecretBytes::from(CANARY));
     let second = Inode::Secret(SecretBytes::from(CANARY));
-    assert_ne!(first, second);
+    assert_eq!(first, second);
+    let different = Inode::Secret(SecretBytes::from("a-completely-different-secret"));
+    assert_eq!(first, different);
+    assert_ne!(first, Inode::Str(CANARY.into()));
 }

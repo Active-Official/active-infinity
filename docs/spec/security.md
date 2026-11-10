@@ -12,7 +12,7 @@ that would violate one stops and needs an ADR.
 | ID | Invariant |
 |---|---|
 | I-1 | Structural secret taint: a secret is a kind, not a removable flag. |
-| I-2 | Anti-oracle equality: a secret never equals anything, including itself. |
+| I-2 | Anti-oracle equality: a secret *value* never equals anything, including itself (`SecretBytes::eq` is always false); node/module equality is presence-only and never compares secret contents. |
 | I-3 | Secret non-leakage: secrets never appear in Debug, Display, JSON, Protobuf, diagnostics, logs, errors, annotations, provenance or wire tags. |
 | I-4 | Capability unforgeability: capability ids are unguessable and possession is authority. |
 | I-5 | Attenuation only narrows: no operation may widen methods, budgets, paths or tool policy. |
@@ -118,7 +118,7 @@ the code that enforces it and the test that would fail if it regressed.
 |---|---|---|---|
 | Canonical identity | Blake3 over the canonical payload; `validate_canonical` proves a received image re-encodes to itself | `tests/conformance_tests.rs`, `tests/property_tests.rs` | enforced |
 | Structural secrets | `SecretBytes` is a kind with no `Display`/`Serialize`; locators are promoted at canonicalization | `tests/redteam_tests.rs`, `tests/invariant_gate.rs` | enforced |
-| Anti-oracle equality | `SecretBytes::eq` is always false; module equality blinds payloads; merge refuses secret fields | `tests/merge_tests.rs`, `tests/redteam_tests.rs` | enforced |
+| Anti-oracle equality | `SecretBytes::eq` is always false; node/module equality is presence-only (`Secret == Secret`, never content); merge refuses secret fields | `tests/inf07_equality_tests.rs`, `tests/invariant_gate.rs`, `tests/merge_tests.rs`, `tests/redteam_tests.rs` | enforced |
 | Fail-closed validation | every count, range, edge and reachability check runs before allocation; `DecodeOpts::paranoid()` for untrusted input | `tests/conformance_tests.rs`, fuzz `decode` | enforced |
 | Bounded resources | `Limits` cover total bytes, depth, nodes, strings and arrays; streams are bounded by the declared size | `tests/redteam_tests.rs` (limit and stream cases), `tests/perf_budget.rs` | enforced |
 | Projection authority | JSON/Protobuf are derived views; a consumer re-validates the AINF bytes (`projection.md` §0) | `tests/projection_authority_tests.rs` | enforced |

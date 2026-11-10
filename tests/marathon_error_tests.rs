@@ -73,7 +73,12 @@ fn a_short_header_buffer_is_an_invalid_argument() {
 /// parsing `Display`.
 #[test]
 fn an_evaluation_sub_code_is_available_without_the_message() {
-    let error = active_infinity::Error::Evaluation("T001");
+    let error = active_infinity::Error::Evaluation {
+        code: "T001",
+        line: 2,
+        column: 14,
+        message: "type error".to_string(),
+    };
     assert_eq!(error.code(), "infinity/evaluation");
     assert_eq!(error.sub_code(), Some("T001"));
     assert!(!error.is_fatal(), "the module itself is valid");

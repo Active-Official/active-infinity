@@ -108,9 +108,40 @@ pub enum Error {
     Limit { kind: &'static str, limit: u64 },
     /// A caller-supplied value is outside its legal range.
     InvalidArgument(&'static str),
+    /// Active source failed to parse; the first diagnostic's position and
+    /// message (INF-INTEROP-05). `line`/`column` are 1-based as reported
+    /// by the parser; `line` is 0 when the parser supplied no position
+    /// (every diagnostic active-core 1.4.0 can produce carries one, so
+    /// 0 is defensive only). The message is the diagnostic's own text:
+    /// it names token kinds, keys and type names, never a string
+    /// literal's content, so it cannot carry secret material. The
+    /// diagnostic count is not preserved here -- only the first
+    /// diagnostic travels; callers that need them all use
+    /// `active_core::parse` directly.
+    Parse {
+        line: u32,
+        column: u32,
+        message: String,
+    },
     /// The Active evaluator rejected the module; the payload is its stable
-    /// diagnostic class (`S001`, `T001`, `X00n`, ...).
-    Evaluation(&'static str),
+    /// diagnostic class (`S001`, `T001`, `X00n`, ...) plus the first
+    /// diagnostic's position and message (INF-INTEROP-05). `line`/`column`
+    /// are 1-based as reported by the evaluator; both are 0 when the
+    /// failure carries no source position (cycle, missing root, secret
+    /// leak, global budget) -- and, through the bridge today, for every
+    /// failure, because lowering drops the parser's node spans and
+    /// `InfinityModule` carries no span store (see the INF-INTEROP-05
+    /// record). The message is the evaluator's own
+    /// diagnostic text; it can quote literal values from the evaluated
+    /// module, which the bridge has already proven secret-free
+    /// (`to_active_core` refuses secret-bearing modules before the
+    /// engine runs), so it cannot carry secret material.
+    Evaluation {
+        code: &'static str,
+        line: u32,
+        column: u32,
+        message: String,
+    },
     /// A companion schema rejected the instance shape.
     Schema(&'static str),
     /// Optional compression/decompression failed or exceeded its bound.
@@ -212,7 +243,8 @@ impl Error {
             Error::Depth { .. } => "infinity/depth",
             Error::Limit { .. } => "infinity/limit",
             Error::InvalidArgument(_) => "infinity/invalid-argument",
-            Error::Evaluation(_) => "infinity/evaluation",
+            Error::Parse { .. } => "infinity/parse",
+            Error::Evaluation { .. } => "infinity/evaluation",
             Error::Schema(_) => "infinity/schema",
             Error::Compression(_) => "infinity/compression",
             Error::Store(_) => "infinity/store",
@@ -245,7 +277,7 @@ impl Error {
     /// other variant returns `None`.
     pub const fn sub_code(&self) -> Option<&'static str> {
         match self {
-            Error::Evaluation(code) => Some(code),
+            Error::Evaluation { code, .. } => Some(code),
             _ => None,
         }
     }
@@ -274,7 +306,8 @@ impl Error {
     /// ceiling), `invalid-argument`, `evaluation` (the module is valid; the
     /// program failed), `schema`, `compression` and `store` (transient or
     /// media-dependent), `signature` and `proof` (the sidecar, not the image),
-    /// `encode` (the caller's own module), `stream-delta` and `stream-state`
+    /// `encode` (the caller's own module), `parse` (the caller's own source),
+    /// `stream-delta` and `stream-state`
     /// (the caller's protocol state).
     pub const fn is_fatal(&self) -> bool {
         matches!(
@@ -381,7 +414,35 @@ impl fmt::Display for Error {
             Error::Depth { limit } => write!(f, "nesting deeper than {limit}"),
             Error::Limit { kind, limit } => write!(f, "{kind} limit {limit} exceeded"),
             Error::InvalidArgument(what) => write!(f, "invalid argument: {what}"),
-            Error::Evaluation(code) => write!(f, "Active evaluation failed: {code}"),
+            Error::Evaluation {
+                code,
+                line,
+                column,
+                message,
+            } => {
+                if *line == 0 {
+                    write!(f, "Active evaluation failed: {code}: {message}")
+                } else {
+                    write!(
+                        f,
+                        "Active evaluation failed: {code} at line {line}, column {column}: {message}"
+                    )
+                }
+            }
+            Error::Parse {
+                line,
+                column,
+                message,
+            } => {
+                if *line == 0 {
+                    write!(f, "Active source failed to parse: {message}")
+                } else {
+                    write!(
+                        f,
+                        "Active source failed to parse at line {line}, column {column}: {message}"
+                    )
+                }
+            }
             Error::Schema(reason) => write!(f, "schema validation failed: {reason}"),
             Error::Compression(reason) => write!(f, "compression failed: {reason}"),
             Error::Store(reason) => write!(f, "store failed: {reason}"),
@@ -513,7 +574,17 @@ mod code_tests {
                 limit: 1,
             },
             Error::InvalidArgument("test"),
-            Error::Evaluation("S001"),
+            Error::Evaluation {
+                code: "S001",
+                line: 0,
+                column: 0,
+                message: "cycle detected in dependency graph".to_string(),
+            },
+            Error::Parse {
+                line: 1,
+                column: 1,
+                message: "unexpected token".to_string(),
+            },
             Error::Schema("test"),
             Error::Compression("test"),
             Error::Store("test"),
@@ -616,7 +687,17 @@ mod code_tests {
                 kind: "test",
                 limit: 1,
             },
-            Error::Evaluation("S001"),
+            Error::Evaluation {
+                code: "S001",
+                line: 0,
+                column: 0,
+                message: "cycle detected in dependency graph".to_string(),
+            },
+            Error::Parse {
+                line: 1,
+                column: 1,
+                message: "unexpected token".to_string(),
+            },
             Error::Schema("test"),
             Error::Compression("test"),
             Error::Store("test"),
@@ -635,7 +716,25 @@ mod code_tests {
 
     #[test]
     fn only_an_evaluation_error_carries_a_sub_code() {
-        assert_eq!(Error::Evaluation("T001").sub_code(), Some("T001"));
+        assert_eq!(
+            Error::Evaluation {
+                code: "T001",
+                line: 2,
+                column: 14,
+                message: "type error".to_string(),
+            }
+            .sub_code(),
+            Some("T001")
+        );
+        assert_eq!(
+            Error::Parse {
+                line: 1,
+                column: 1,
+                message: "unexpected token".to_string(),
+            }
+            .sub_code(),
+            None
+        );
         assert_eq!(Error::Magic.sub_code(), None);
         assert_eq!(Error::Schema("shape").sub_code(), None);
     }

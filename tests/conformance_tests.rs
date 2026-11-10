@@ -82,6 +82,10 @@ const NON_IMAGE_CLASSES: &[(&str, &str)] = &[
         "infinity/evaluation",
         "Active evaluator refusal; the module is valid bytes",
     ),
+    (
+        "infinity/parse",
+        "Active source failed to parse; the failure is text-source-only, no byte image can express it",
+    ),
     ("infinity/ok", "C ABI status, not a failure class"),
     ("infinity/null-input", "C ABI caller condition"),
     ("infinity/null-output", "C ABI caller condition"),

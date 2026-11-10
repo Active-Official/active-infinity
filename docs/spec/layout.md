@@ -623,7 +623,8 @@ messages. Every code below is part of the contract.
 | `infinity/depth` | nesting deeper than the configured limit |
 | `infinity/limit` | a configured `Limits` ceiling was exceeded |
 | `infinity/invalid-argument` | caller-supplied argument outside its range |
-| `infinity/evaluation` | the Active evaluator refused the module; `Error::sub_code()` carries the evaluator's stable class (`S001`, `T001`, `X00n`, ...) |
+| `infinity/evaluation` | the Active evaluator refused the module; `Error::sub_code()` carries the evaluator's stable class (`S001`, `T001`, `X00n`, ...) and `Error::Evaluation` carries the first diagnostic's line, column and message |
+| `infinity/parse` | Active source failed to parse; `Error::Parse` carries the first diagnostic's line, column and message |
 | `infinity/schema` | companion schema rejected the instance shape |
 | `infinity/compression` | optional zstd compression failed or exceeded its bound |
 | `infinity/store` | local content-addressed store failed |

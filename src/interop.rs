@@ -763,9 +763,51 @@ mod bridge {
         let mut engine = active_core::Engine::new();
         engine.budget = budget;
         engine.evaluate(&core).map_err(|error| {
-            // Keep the machine-readable Active class; the payload is a code with
-            // no values in it (spec/secrets.md §4).
-            Error::Evaluation(active_error_code(error.code()))
+            // Keep the machine-readable Active class as the sub-code, and
+            // carry the first diagnostic's position and message too
+            // (INF-INTEROP-05): the bare code alone left an evaluation
+            // failure undebuggable. The message can quote literal values
+            // from the evaluated module, which is safe here because
+            // `to_active_core` above refuses secret-bearing modules
+            // before the engine runs, so no secret material can reach
+            // the evaluator or its messages. A failure with no source
+            // position (cycle, missing root, secret leak, global budget)
+            // reports line 0, column 0 -- the documented "no position"
+            // sentinel (parser lines are 1-based). Through this bridge
+            // that is every failure today: lowering drops the parser's
+            // node spans (`InfinityModule` carries no span store) and the
+            // rebuilt `CoreModule` has an empty `node_spans` map, so
+            // `EvalError::span()` is `None`. Real eval positions need
+            // spans to survive the bridge (see the INF-INTEROP-05 record).
+            //
+            // `EvalError::span` already returns the first diagnostic's
+            // span for `ValidationFailed`; only its message needs the
+            // special case, because `Display` for that variant is the
+            // bare "validation failed" with the diagnostics inside the
+            // variant. That arm is unreachable through this bridge today
+            // -- `to_active_core` drops the `Module::schema` pointer and
+            // rewrites annotation paths to `node<N>` placeholders, so
+            // neither schema nor constraint validation can fail here --
+            // but it is the correct mapping if the bridge ever preserves
+            // them, and the code map below already names their classes
+            // (T002/T003/T004).
+            let (line, column) = error
+                .span()
+                .map(|span| (span.line, span.column))
+                .unwrap_or((0, 0));
+            let message = match &error {
+                active_core::EvalError::ValidationFailed { diagnostics } => diagnostics
+                    .first()
+                    .map(|diagnostic| diagnostic.message.clone())
+                    .unwrap_or_else(|| error.to_string()),
+                _ => error.to_string(),
+            };
+            Error::Evaluation {
+                code: active_error_code(error.code()),
+                line,
+                column,
+                message,
+            }
         })
     }
 
@@ -775,6 +817,17 @@ mod bridge {
             "S002" => "active/S002-missing-root",
             "S003" => "active/S003-missing-node",
             "T001" => "active/T001-type",
+            // INF-INTEROP-05: these classes used to fall through to the
+            // generic `active/eval-error`, discarding the diagnostic class
+            // the same way the message was discarded. T002/T003/T004 are
+            // the `ValidationFailed` classes (schema violation / enum
+            // membership / missing required key, active-core 1.4.0
+            // `validate.rs`); E019 is `PatchError`, S004 is `SecretLeak`.
+            "T002" => "active/T002-schema",
+            "T003" => "active/T003-schema-enum",
+            "T004" => "active/T004-schema-missing",
+            "E019" => "active/E019-patch",
+            "S004" => "active/S004-secret-leak",
             "X001" => "active/X001-node-budget",
             "X002" => "active/X002-wall-clock",
             "X003" => "active/X003-depth",
@@ -813,6 +866,41 @@ mod bridge {
             assert!(
                 !error.to_string().contains("hunter2-canary-interop04"),
                 "the refusal must not carry the plaintext anywhere; got {error}"
+            );
+        }
+
+        /// INF-INTEROP-05: the evaluator's code map must name every class
+        /// `EvalError::code()` can produce. Before the fix the validation
+        /// (T002/T003/T004), patch (E019) and secret-leak (S004) classes
+        /// fell through to the generic `active/eval-error`, discarding
+        /// the diagnostic class the same way the message was discarded.
+        /// The established classes are pinned too, so a future
+        /// active-core code cannot silently join the generic bucket.
+        #[test]
+        fn active_error_code_names_every_evaluator_class() {
+            for (code, expected) in [
+                ("S001", "active/S001-cycle"),
+                ("S002", "active/S002-missing-root"),
+                ("S003", "active/S003-missing-node"),
+                ("T001", "active/T001-type"),
+                ("T002", "active/T002-schema"),
+                ("T003", "active/T003-schema-enum"),
+                ("T004", "active/T004-schema-missing"),
+                ("E019", "active/E019-patch"),
+                ("S004", "active/S004-secret-leak"),
+                ("X001", "active/X001-node-budget"),
+                ("X002", "active/X002-wall-clock"),
+                ("X003", "active/X003-depth"),
+                ("X004", "active/X004-array-length"),
+                ("X005", "active/X005-keys"),
+                ("X006", "active/X006-value-size"),
+            ] {
+                assert_eq!(active_error_code(code), expected, "class {code}");
+            }
+            assert_eq!(
+                active_error_code("Z999"),
+                "active/eval-error",
+                "an unknown future class still falls back to the generic code"
             );
         }
     }
@@ -2562,7 +2650,38 @@ pub fn provenance_pairs(prov: &Provenance) -> Vec<&ProvEntry> {
 /// then hand the module to the codec.
 #[cfg(feature = "active-core")]
 pub fn from_active_source(source: &str, name: &str) -> Result<InfinityModule> {
-    let core = active_core::parse(source, name)
-        .map_err(|_| Error::Encode("Active source failed to parse"))?;
+    let core = active_core::parse(source, name).map_err(|diagnostics| {
+        // Carry the first diagnostic (INF-INTEROP-05): the old generic
+        // `Error::Encode("Active source failed to parse")` discarded the
+        // parser's line/column/message, leaving a parse failure
+        // undebuggable. The parser returns its hard errors in source
+        // order (lexer errors first), so the first one is the fault the
+        // caller must fix first; the count is not preserved -- only the
+        // first diagnostic travels. The message is safe to surface: the
+        // active-core 1.4.0 parser names token kinds, keys and type
+        // names in its messages and never quotes a string literal's
+        // content, so it cannot carry secret material. `parse` never
+        // returns an empty error list (it returns `Ok` instead), so the
+        // `None` arm is defensive only.
+        match diagnostics.first() {
+            Some(diagnostic) => {
+                let (line, column) = diagnostic
+                    .span
+                    .as_ref()
+                    .map(|span| (span.line, span.column))
+                    .unwrap_or((0, 0));
+                Error::Parse {
+                    line,
+                    column,
+                    message: diagnostic.message.clone(),
+                }
+            }
+            None => Error::Parse {
+                line: 0,
+                column: 0,
+                message: "Active source failed to parse".to_string(),
+            },
+        }
+    })?;
     from_active_core(&core)
 }

@@ -53,6 +53,35 @@ pub const DEFAULT_CHUNK: usize = 64 << 10;
 /// Largest frame payload this reader accepts.
 pub const MAX_FRAME_PAYLOAD: u32 = 64 << 20;
 
+/// Work charged per byte of generation input (INF-13).
+///
+/// One generation does apply (clone the base module and merge), a re-encode,
+/// `Validated::new` with `verify_canonical: true` (validate, hash, decode,
+/// re-encode and re-validate) and a final `decode_validated`: roughly six
+/// to eight image-sized passes. Measured on a 10 MiB image: one generation
+/// costs 1.3-1.9x one `validate_canonical` in release (1.2-2.4x in debug
+/// across runs; the `validate_canonical` baseline itself is noisy under
+/// load), i.e. up to ~8 passes against the 4 charged here, so the charge
+/// tracks the real work within a small constant factor (at most ~2x in the
+/// worst measured case). The charge is applied at the `End` sites, which is
+/// where a generation's work happens.
+pub const GENERATION_WORK_FACTOR: u64 = 4;
+/// Total generation-work budget, as a multiple of `Limits::max_total_bytes`
+/// (INF-13).
+///
+/// The audit's example total (8x) cannot hold together with the suite's
+/// legitimate-use floor: the marathon 40-generation stream charges 95,224
+/// bytes of generation work against a 4 KiB budget (measured 2026-11-10),
+/// so the multiplier must be at least 24x for that stream to complete.
+/// 32x is the smallest power of two above that measured minimum, and it
+/// fits the 40-generation stream with 27% margin. The total real work one
+/// decoder can be made to do stays bounded at a few tens of
+/// `max_total_bytes` (~60x in the worst measured case: 32x charged times
+/// the ~1.9x worst measured real/charged ratio), against several hundred
+/// times `max_total_bytes` before this fix (72 generations at a 1x charge
+/// on the round-2 shape, each doing ~6-8 passes over the image).
+pub const WORK_LIMIT_FACTOR: u64 = 32;
+
 /// Frame kinds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FrameKind {
@@ -958,6 +987,18 @@ impl StreamDecoder {
         self.pending_decoded_bytes
     }
 
+    /// Cumulative generation work charged to this decoder (INF-13).
+    ///
+    /// Exposed so a caller (and a test) can prove the latch trips at the
+    /// measured point instead of asserting it from the outside. The
+    /// ceiling is [`WORK_LIMIT_FACTOR`] times `Limits::max_total_bytes`;
+    /// each generation is charged at [`GENERATION_WORK_FACTOR`] times the
+    /// image length, so the charged work also bounds the real work
+    /// within a small constant factor.
+    pub fn generation_work(&self) -> u64 {
+        self.generation_work
+    }
+
     pub fn with_limits(mut self, limits: crate::layout::Limits) -> Self {
         self.limits = limits;
         self
@@ -1411,7 +1452,15 @@ impl StreamDecoder {
                     // price of the base image.
                     let pending =
                         usize::try_from(self.pending_delta_bytes).map_err(|_| Error::TooLarge)?;
-                    self.charge_generation(estimate.max(ops).max(pending))?;
+                    // Charge the generation at the generation rate (INF-13):
+                    // apply + encode + canonical validation + decode is
+                    // ~6-8 image-sized passes, not the ~1x charged before.
+                    self.charge_generation(
+                        estimate
+                            .max(ops)
+                            .max(pending)
+                            .saturating_mul(GENERATION_WORK_FACTOR as usize),
+                    )?;
                     let base = self
                         .module
                         .as_ref()
@@ -1431,7 +1480,13 @@ impl StreamDecoder {
                     )
                     .map_err(delta_fault)?;
                     if image.len() > estimate {
-                        self.charge_generation(image.len() - estimate)?;
+                        // The new image is bigger, so the validation and
+                        // decode passes cost more: the growth is charged at
+                        // the generation rate too (INF-13).
+                        self.charge_generation(
+                            (image.len() - estimate)
+                                .saturating_mul(GENERATION_WORK_FACTOR as usize),
+                        )?;
                     }
                     if self.image.as_ref() == Some(&image) {
                         // A delta that changes nothing still costs a full
@@ -1476,7 +1531,10 @@ impl StreamDecoder {
                 // Charge first: the length is the work the assembly would do,
                 // and a disagreement below must still cost it.
                 let charge = usize::try_from(expected).map_err(|_| Error::TooLarge)?;
-                self.charge_generation(charge)?;
+                // A first generation assembles, hashes, fully validates
+                // (canonical proof) and decodes: charge it at the
+                // generation rate (INF-13), not at 1x the image length.
+                self.charge_generation(charge.saturating_mul(GENERATION_WORK_FACTOR as usize))?;
                 if expected != size {
                     // The hash covers `total_size`, so a distinct size fault
                     // would be a one-bit oracle; it is also the fuel for the
@@ -1504,13 +1562,39 @@ impl StreamDecoder {
         Ok(())
     }
 
-    /// Bytes of generation work this decoder may still do.
+    /// Total generation-work budget for this decoder (INF-13).
+    ///
+    /// This ceiling bounds the *cumulative* work across generations; the
+    /// per-generation peak transient is bounded separately by INF-06:
+    /// every generation's validate passes run through `Validated::new`
+    /// under these same `Limits`, so each generation's validate transient
+    /// fits `Limits::max_working_bytes`, and this ceiling counts every
+    /// such generation at the validate-canonical rate. The two budgets
+    /// compose instead of conflicting: a generation too big for the
+    /// working budget is refused with "working bytes", and a stream of
+    /// affordable generations is stopped by this ceiling.
     fn work_limit(&self) -> u64 {
-        self.limits.max_total_bytes.saturating_mul(64)
+        self.limits
+            .max_total_bytes
+            .saturating_mul(WORK_LIMIT_FACTOR)
     }
 
-    /// Charge one generation against the stream's work ceiling.
+    /// Charge bytes against the stream's work ceiling.
     ///
+    /// The `End` sites charge at `GENERATION_WORK_FACTOR` times the bytes
+    /// they process (INF-13); a `Delta` frame charges its wire bytes at
+    /// 1x. The split is deliberate, not an oversight: the closing `End`
+    /// re-charges the pending delta bytes at the generation rate
+    /// (`estimate.max(ops).max(pending)`), which pays for the fragment
+    /// decode and validation the `Delta` frame already did -- charging the
+    /// `Delta` at 4x as well would bill the same fragment work twice and
+    /// refuse legitimate large-fragment streams. The `Delta` charge exists
+    /// so a refused or replayed delta still costs the budget, and so a
+    /// generation abandoned without its `End` cannot buy unbounded
+    /// fragment validation: accepted-but-unclosed deltas are capped by the
+    /// pending budgets (`pending_delta_bytes` and `pending_decoded_bytes`,
+    /// each at most `max_total_bytes`), so the unclosed exposure is
+    /// bounded at ~4x `max_total_bytes` of real work per generation cycle.
     /// Every generation applies the pending deltas, re-encodes and fully
     /// re-validates the module, so the charge is taken *before* that work: a
     /// replay of a refused frame costs the ceiling, not another encode. A

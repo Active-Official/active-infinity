@@ -749,6 +749,10 @@ pub fn apply_delta_with_limits(
 /// avoids cloning the whole graph and only merges the fragment nodes actually
 /// referenced by `PutNode`. Canonical encoding still runs once at the end,
 /// because the canonical image is the identity boundary.
+///
+/// A `PutNode` prunes unreachable nodes and compacts the arena (INF-14), so
+/// node ids held from before the call can shift; re-resolve them from the
+/// updated module (by binding or by content) instead of reusing old ids.
 pub fn apply_delta_in_place(module: &mut InfinityModule, ops: &[DeltaOp]) -> Result<()> {
     apply_delta_in_place_with_limits(module, ops, crate::layout::Limits::default())
 }
@@ -792,11 +796,24 @@ fn apply_ops(
                     return Err(Error::StreamDelta("fragment is empty"));
                 }
                 let replacement = merge_fragment_with_limits(module, fragment, limits)?;
+                // The fragment's root annotations now point at the imported
+                // root copy. The copy is orphaned by the content move below,
+                // so repoint them at the target that now holds the root's
+                // content — otherwise the following prune would drop the
+                // annotations with the copy (INF-14).
+                module.repoint_annotations(replacement, *target);
                 let content = module
                     .get(replacement)
                     .cloned()
                     .ok_or(Error::StreamDelta("fragment root missing"))?;
                 *module.node_mut(*target)? = content;
+                // Prune what the `PutNode` orphaned — the imported root copy
+                // and the old target subtree — so the arena stays
+                // proportional to the live module instead of growing to
+                // `arena_limit` over a long stream (INF-14). One linear
+                // pass, the same order as the validate/encode passes every
+                // generation already pays (INF-13).
+                module.prune_unreachable()?;
             }
             DeltaOp::SetBinding { name, node } => {
                 if module.get(*node).is_none() {
@@ -855,34 +872,151 @@ pub(crate) fn merge_fragment_with_limits(
     fragment: &InfinityModule,
     limits: crate::layout::Limits,
 ) -> Result<NodeId> {
+    // A rootless fragment is refused before anything is pushed: the merge
+    // is fail-atomic (INF-14 — the old code pushed the fragment first and
+    // only then discovered the missing root, leaving the arena mutated on
+    // the error path; the clone-then-swap callers contained it, but a
+    // direct caller did not).
+    let fragment_root = fragment
+        .root()
+        .ok_or(Error::StreamDelta("fragment has no root"))?;
+    // Import only the nodes the graft can ever reach: the fragment root's
+    // cone plus the cones of the fragment's annotation subjects and
+    // constraint expressions (annotations are roots, so their subjects
+    // must land for the carried annotations to stay valid). Fragment
+    // BINDINGS are not grafted by `PutNode` (pinned by the marathon
+    // round-7 tests), so a node reachable only through a binding is not
+    // imported: it would be unreachable in the base the moment it lands
+    // (INF-14).
+    let import = fragment_import_set(fragment, fragment_root);
+    let import_count = import.iter().filter(|keep| **keep).count();
     let base_count = base.node_count();
-    // A fragment can be as large as a frame allows. The merged arena is bounded
-    // by the default node ceiling (well below the u32 id space) so a stream of
-    // tiny fragments cannot turn a small wire budget into a huge arena and an
-    // expensive canonical encode.
+    // A fragment can be as large as a frame allows. The merged arena is
+    // bounded by the node ceiling (well below the u32 id space) so a
+    // stream of tiny fragments cannot turn a small wire budget into a huge
+    // arena and an expensive canonical encode. The bound is on the
+    // IMPORTED count, not the fragment's raw count: a fragment whose bulk
+    // sits behind a binding cannot buy arena growth past the ceiling (and
+    // cannot be refused for nodes it never imports).
     let arena_limit = limits.max_nodes as usize;
     let merged = base_count
-        .checked_add(fragment.node_count())
+        .checked_add(import_count)
         .filter(|total| *total <= arena_limit)
         .ok_or(Error::Limit {
             kind: "stream arena nodes",
             limit: arena_limit as u64,
         })?;
-    let map: Vec<NodeId> = (base_count..merged)
-        .map(|index| NodeId(index as u32))
-        .collect();
+    // The fragment's provenance is the merged module's only provenance
+    // record when the base has none; when both carry one and they differ,
+    // the single provenance slot cannot hold both, so the delta is refused
+    // explicitly instead of silently dropping the fragment's (INF-14).
+    // Checked before any mutation, so the refusal leaves the base untouched.
+    if let Some(fragment_provenance) = fragment.provenance() {
+        if let Some(base_provenance) = base.provenance() {
+            if base_provenance != fragment_provenance {
+                return Err(Error::StreamDelta(
+                    "fragment carries provenance that differs from the base module's provenance",
+                ));
+            }
+        }
+    }
+    let mut map: Vec<NodeId> = vec![NodeId::NONE; fragment.node_count()];
+    let mut next = base_count;
+    for (index, keep) in import.iter().enumerate() {
+        if *keep {
+            map[index] = NodeId(next as u32);
+            next += 1;
+        }
+    }
+    debug_assert_eq!(next, merged);
     // Remap every node first: a failure must leave the caller's arena untouched.
-    let mut remapped = Vec::with_capacity(fragment.node_count());
-    for node in fragment.nodes() {
-        remapped.push(remap_node(node, &map)?);
+    let mut remapped = Vec::with_capacity(import_count);
+    for (index, node) in fragment.nodes().iter().enumerate() {
+        if import[index] {
+            remapped.push(remap_node(node, &map)?);
+        }
     }
     for node in remapped {
         base.try_push(node)?;
     }
-    let root = fragment
-        .root()
-        .and_then(|root| map.get(root.index()).copied());
-    root.ok_or(Error::StreamDelta("fragment has no root"))
+    // Carry the fragment's annotations, remapped into the base arena
+    // (INF-14 — the old code used only the root content and silently
+    // discarded them). Exact duplicates cannot arise here: every imported
+    // id is fresh, so no pre-existing annotation can name one. An
+    // annotation on the fragment root points at the imported root copy;
+    // the `PutNode` caller repoints it at the target (see `apply_ops`),
+    // where a duplicate can arise and is dropped.
+    for annotation in fragment.annotations() {
+        let subject = map
+            .get(annotation.node.index())
+            .copied()
+            .filter(|id| !id.is_none())
+            .ok_or(Error::StreamDelta(
+                "fragment annotation subject was not imported",
+            ))?;
+        let kind = match &annotation.kind {
+            AnnotationKind::Constraint { source, expr } => {
+                let expr = map
+                    .get(expr.index())
+                    .copied()
+                    .filter(|id| !id.is_none())
+                    .ok_or(Error::StreamDelta(
+                        "fragment annotation expression was not imported",
+                    ))?;
+                AnnotationKind::Constraint {
+                    source: source.clone(),
+                    expr,
+                }
+            }
+            kind => kind.clone(),
+        };
+        base.annotate(subject, kind);
+    }
+    // Adopt the fragment's provenance when the base has none (INF-14).
+    // When both carry the same provenance this is a no-op (checked above).
+    if base.provenance().is_none() {
+        if let Some(provenance) = fragment.provenance() {
+            base.set_provenance(Some(provenance.clone()));
+        }
+    }
+    map.get(fragment_root.index())
+        .copied()
+        .filter(|id| !id.is_none())
+        .ok_or(Error::StreamDelta("fragment root was not imported"))
+}
+
+/// Nodes of `fragment` the graft can ever reach: the root's cone plus the
+/// cones of the fragment's annotation subjects and constraint expressions.
+///
+/// Fragment bindings are deliberately NOT seeds: `PutNode` does not graft
+/// bindings, so a binding-only node would land unreachable (INF-14, and
+/// the marathon round-7 tests pin the no-graft rule). Out-of-range ids in
+/// a hand-built fragment are skipped here and fail closed later, in the
+/// remap, instead of panicking.
+fn fragment_import_set(fragment: &InfinityModule, root: NodeId) -> Vec<bool> {
+    let count = fragment.node_count();
+    let mut keep = vec![false; count];
+    let mut stack: Vec<NodeId> = vec![root];
+    for annotation in fragment.annotations() {
+        stack.push(annotation.node);
+        if let AnnotationKind::Constraint { expr, .. } = &annotation.kind {
+            stack.push(*expr);
+        }
+    }
+    while let Some(id) = stack.pop() {
+        if id.index() >= count || keep[id.index()] {
+            continue;
+        }
+        keep[id.index()] = true;
+        if let Some(node) = fragment.get(id) {
+            for child in node.children() {
+                if child.index() < count && !keep[child.index()] {
+                    stack.push(child);
+                }
+            }
+        }
+    }
+    keep
 }
 
 /// A reassembled stream generation.
@@ -1467,10 +1601,12 @@ impl StreamDecoder {
                         .ok_or(Error::StreamState("no module to patch"))?;
                     let updated = apply_delta_with_limits(base, &self.pending_deltas, self.limits)
                         .map_err(delta_fault)?;
-                    // The delta leaves the replaced subtree orphaned on
-                    // purpose, so this re-encode opts in to the drop
-                    // (INF-04): the default fail-closed encode would refuse
-                    // the orphaned nodes.
+                    // A `PutNode` merge already prunes the replaced subtree
+                    // and the imported root copy (INF-14), so the merged
+                    // module holds no unreachable nodes from that op; the
+                    // `drop_unreachable` opt-in stays as a safety net for
+                    // the other ops (a `RemoveBinding` or `SetRoot` can
+                    // still orphan a subtree, INF-04).
                     let image = encode_with(
                         &updated,
                         EncodeOpts {
@@ -1956,7 +2092,9 @@ fn decode_fragment(
 /// Apply a list of delta operations and return the re-encoded hash.
 pub fn delta_hash(module: &InfinityModule, ops: &[DeltaOp]) -> Result<[u8; 32]> {
     let updated = apply_delta(module, ops)?;
-    // The delta orphans the replaced subtree on purpose (INF-04).
+    // A `PutNode` merge already prunes the replaced subtree (INF-14), but
+    // the other ops can still orphan nodes (INF-04), so the re-encode
+    // keeps the `drop_unreachable` opt-in.
     let image = encode_with(
         &updated,
         EncodeOpts {

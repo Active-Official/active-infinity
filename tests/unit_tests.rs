@@ -375,9 +375,10 @@ fn streaming_delta_produces_the_whole_module_encoding() {
     let bytes = encoder.to_bytes();
     let streamed = stream::decode_stream(&bytes).unwrap_or_else(|e| panic!("decode stream: {e:?}"));
 
-    // Expected: the same ops applied to the base, canonicalized. The delta
-    // orphans the replaced node on purpose (INF-04), so this encode opts in
-    // to the drop, exactly as the stream's own re-encodes do.
+    // Expected: the same ops applied to the base, canonicalized. The
+    // `PutNode` merge prunes the replaced node (INF-14); this encode keeps
+    // the `drop_unreachable` opt-in as a safety net for the other ops
+    // (INF-04), exactly as the stream's own re-encodes do.
     let expected = stream::apply_delta(&base, &ops).expect("apply delta");
     let expected_image = active_infinity::encode_with(
         &expected,

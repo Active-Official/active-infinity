@@ -1593,6 +1593,52 @@ impl InfinityModule {
         self.annotations.push(Annotation { node, kind });
     }
 
+    /// Repoint every annotation subject and constraint expression equal to
+    /// `from` at `to`, dropping exact duplicates the repoint creates.
+    ///
+    /// Stream `PutNode` carries a fragment root's annotations on the
+    /// imported root copy, then moves the root's content into the target:
+    /// without the repoint the annotation would point at the copy, which
+    /// the following [`Self::prune_unreachable`] drops (INF-14). The
+    /// repoint can land an annotation on top of an identical one the base
+    /// already held (a repeated identical delta); canonical `prepare`
+    /// dedupes exact annotations, so dropping the duplicate here is
+    /// canonical-form-preserving and keeps the annotation list bounded.
+    pub(crate) fn repoint_annotations(&mut self, from: NodeId, to: NodeId) {
+        if from == to {
+            return;
+        }
+        let mut touched: Vec<usize> = Vec::new();
+        for (index, annotation) in self.annotations.iter_mut().enumerate() {
+            let mut moved = false;
+            if annotation.node == from {
+                annotation.node = to;
+                moved = true;
+            }
+            if let AnnotationKind::Constraint { expr, .. } = &mut annotation.kind {
+                if *expr == from {
+                    *expr = to;
+                    moved = true;
+                }
+            }
+            if moved {
+                touched.push(index);
+            }
+        }
+        // Only a repointed annotation can have become a duplicate: the
+        // others were already distinct, so this stays linear in the
+        // repointed few instead of quadratic in the whole list.
+        for index in touched.into_iter().rev() {
+            let candidate = &self.annotations[index];
+            let duplicate = self.annotations.iter().enumerate().any(|(other, held)| {
+                other != index && held.node == candidate.node && held.kind == candidate.kind
+            });
+            if duplicate {
+                self.annotations.remove(index);
+            }
+        }
+    }
+
     /// Drop every annotation.
     pub fn clear_annotations(&mut self) {
         self.annotations.clear();
@@ -2016,6 +2062,114 @@ impl InfinityModule {
             });
         }
         Ok(())
+    }
+
+    /// Drop every node unreachable from the module roots, renumbering the
+    /// survivors in place (compacted, arena order preserved).
+    ///
+    /// Reachability is exactly [`Self::check_reachable`]'s: the module
+    /// root, binding targets, annotation subjects and constraint
+    /// expressions, then node children. Annotations whose subject or
+    /// constraint expression was pruned go with their node: keeping one
+    /// would leave a dangling annotation `validate_structure` refuses.
+    /// A binding or root that dangles (possible only in a hand-built
+    /// module, never in a decoded one) is dropped the same way instead
+    /// of failing the prune.
+    ///
+    /// Annotations are roots, so a node an annotation still points at is
+    /// kept: a `PutNode` that replaces an annotated subtree leaves the
+    /// annotated node and its annotation behind (the INF-MERGE-03
+    /// annotation-ghost shape — a separate finding, deliberately not
+    /// changed here). The growth this stops is the unannotated one: the
+    /// replaced subtree and the imported fragment nodes no root reaches.
+    ///
+    /// Returns the number of nodes removed. Fails only when a reachable
+    /// node carries a dangling child reference (impossible in a validated
+    /// module); on failure the arena is left untouched.
+    pub(crate) fn prune_unreachable(&mut self) -> Result<usize, super::Error> {
+        let count = self.nodes.len();
+        if count == 0 {
+            return Ok(0);
+        }
+        let mut seen = vec![false; count];
+        let mut stack: Vec<NodeId> = self
+            .roots()
+            .into_iter()
+            .filter(|id| !id.is_none() && id.index() < count)
+            .collect();
+        while let Some(id) = stack.pop() {
+            if seen[id.index()] {
+                continue;
+            }
+            seen[id.index()] = true;
+            for child in self.nodes[id.index()].children() {
+                if child.index() < count && !seen[child.index()] {
+                    stack.push(child);
+                }
+            }
+        }
+        if seen.iter().all(|reached| *reached) {
+            return Ok(0);
+        }
+        // Compact remap, preserving arena order: a survivor keeps its
+        // relative position, so the renumbering is deterministic.
+        let mut remap: Vec<NodeId> = vec![NodeId::NONE; count];
+        let mut next = 0u32;
+        for (index, reached) in seen.iter().enumerate() {
+            if *reached {
+                remap[index] = NodeId(next);
+                next += 1;
+            }
+        }
+        let map = |id: NodeId| -> Option<NodeId> {
+            remap
+                .get(id.index())
+                .copied()
+                .filter(|mapped| !mapped.is_none())
+        };
+        // Remap the survivors first: a failure must leave the arena
+        // untouched, so nothing is swapped in until every node remaps.
+        let mut nodes: Vec<Inode> = Vec::with_capacity(next as usize);
+        for (index, node) in self.nodes.iter().enumerate() {
+            if seen[index] {
+                nodes.push(crate::canonical::remap_node(node, &remap)?);
+            }
+        }
+        let root = self.root.and_then(map);
+        let mut bindings = Vec::with_capacity(self.bindings.len());
+        for (name, id) in &self.bindings {
+            if let Some(id) = map(*id) {
+                bindings.push((name.clone(), id));
+            }
+        }
+        let mut annotations = Vec::with_capacity(self.annotations.len());
+        for annotation in &self.annotations {
+            let Some(subject) = map(annotation.node) else {
+                continue;
+            };
+            let kind = match &annotation.kind {
+                AnnotationKind::Constraint { source, expr } => {
+                    let Some(expr) = map(*expr) else {
+                        continue;
+                    };
+                    AnnotationKind::Constraint {
+                        source: source.clone(),
+                        expr,
+                    }
+                }
+                kind => kind.clone(),
+            };
+            annotations.push(Annotation {
+                node: subject,
+                kind,
+            });
+        }
+        let removed = count - nodes.len();
+        self.nodes = nodes;
+        self.root = root;
+        self.bindings = bindings;
+        self.annotations = annotations;
+        Ok(removed)
     }
 
     /// Cycle detection over the derived dependency graph (Kahn sweep).

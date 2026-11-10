@@ -32,8 +32,9 @@ fn delta_replacement_updates_the_hash_and_matches_the_projection() {
     }];
     let mut updated = base.clone();
     apply_delta_in_place(&mut updated, &ops).expect("in-place delta");
-    // The delta orphans the replaced subtree on purpose (INF-04), so the
-    // post-delta encode opts in to the drop.
+    // The `PutNode` merge prunes the replaced subtree (INF-14); the
+    // post-delta encode keeps the `drop_unreachable` opt-in as a safety
+    // net for the other ops (INF-04).
     let image = encode_with(
         &updated,
         EncodeOpts {
@@ -72,7 +73,11 @@ fn a_large_patch_keeps_the_rest_of_the_graph() {
     }];
     let mut updated = module.clone();
     apply_delta_in_place(&mut updated, &ops).expect("large delta");
-    // The delta orphans the replaced subtree on purpose (INF-04).
+    // The `PutNode` merge prunes the replaced subtree and the imported
+    // root copy (INF-14), so the arena does not grow: the one imported
+    // node is the target itself, holding the new content. The encode
+    // keeps the `drop_unreachable` opt-in as a safety net for the other
+    // ops (INF-04).
     let image = encode_with(
         &updated,
         EncodeOpts {
@@ -82,5 +87,5 @@ fn a_large_patch_keeps_the_rest_of_the_graph() {
     )
     .expect("encode");
     validate(&image).expect("validate");
-    assert_eq!(updated.node_count(), module.node_count() + 1);
+    assert_eq!(updated.node_count(), module.node_count());
 }

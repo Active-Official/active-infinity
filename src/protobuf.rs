@@ -193,79 +193,180 @@ fn message(out: &mut Vec<u8>, field: u32, body: &[u8], work: &mut usize) -> Resu
 // ---------------------------------------------------------------------------
 
 fn encode_value(value: &Projected, out: &mut Vec<u8>, work: &mut usize) -> Result<()> {
-    match value {
-        Projected::Null => message(out, 1, &[], work)?,
-        Projected::Bool(flag) => boolean(out, 2, *flag),
-        Projected::Int(number) => sint(out, 3, *number),
-        Projected::Float(number) => double(out, 4, *number),
-        Projected::Text(text) => string(out, 5, text),
-        Projected::DurationMs(ms) => {
-            let mut body = Vec::new();
-            uint(&mut body, 1, *ms);
-            message(out, 6, &body, work)?;
-        }
-        Projected::Quantity(value, unit) => {
-            let mut body = Vec::new();
-            let mut inner = Vec::new();
-            encode_value(value, &mut inner, work)?;
-            message(&mut body, 1, &inner, work)?;
-            string(&mut body, 2, unit);
-            message(out, 7, &body, work)?;
-        }
-        Projected::Array(items) => {
-            let mut body = Vec::new();
-            for item in items {
-                let mut encoded = Vec::new();
-                encode_value(item, &mut encoded, work)?;
-                message(&mut body, 1, &encoded, work)?;
+    // Iterative (INF-INTEROP-08): the old recursion followed the `Projected`
+    // tree one frame per level, so encoding a legal 4095-deep projection
+    // recursed 4095 frames. An explicit task stack replaces it: an `Encode`
+    // task renders one node (a leaf pushes its encoding onto `done`, a
+    // composite pushes a wrap task and its children's `Encode` tasks in
+    // reverse), and a wrap task pops its children's encodings -- in order --
+    // and wraps them exactly as the recursive version did, calling
+    // `message()` in the same order, so the `MAX_PROTOBUF_WORK` charges and
+    // the bytes are unchanged.
+    enum Task<'a> {
+        Encode(&'a Projected),
+        WrapQuantity { unit: &'a str },
+        WrapArray { count: usize },
+        WrapRecord { keys: Vec<&'a str> },
+        WrapEnv { name: &'a str, has_default: bool },
+    }
+    let mut tasks = vec![Task::Encode(value)];
+    let mut done: Vec<Vec<u8>> = Vec::new();
+    while let Some(task) = tasks.pop() {
+        match task {
+            Task::Encode(value) => match value {
+                Projected::Null => {
+                    let mut buf = Vec::new();
+                    message(&mut buf, 1, &[], work)?;
+                    done.push(buf);
+                }
+                Projected::Bool(flag) => {
+                    let mut buf = Vec::new();
+                    boolean(&mut buf, 2, *flag);
+                    done.push(buf);
+                }
+                Projected::Int(number) => {
+                    let mut buf = Vec::new();
+                    sint(&mut buf, 3, *number);
+                    done.push(buf);
+                }
+                Projected::Float(number) => {
+                    let mut buf = Vec::new();
+                    double(&mut buf, 4, *number);
+                    done.push(buf);
+                }
+                Projected::Text(text) => {
+                    let mut buf = Vec::new();
+                    string(&mut buf, 5, text);
+                    done.push(buf);
+                }
+                Projected::DurationMs(ms) => {
+                    let mut body = Vec::new();
+                    uint(&mut body, 1, *ms);
+                    let mut buf = Vec::new();
+                    message(&mut buf, 6, &body, work)?;
+                    done.push(buf);
+                }
+                Projected::Quantity(value, unit) => {
+                    tasks.push(Task::WrapQuantity { unit });
+                    tasks.push(Task::Encode(value));
+                }
+                Projected::Array(items) => {
+                    tasks.push(Task::WrapArray { count: items.len() });
+                    for item in items.iter().rev() {
+                        tasks.push(Task::Encode(item));
+                    }
+                }
+                Projected::Record(fields) => {
+                    let keys = fields.iter().map(|(name, _)| name.as_str()).collect();
+                    tasks.push(Task::WrapRecord { keys });
+                    for (_, value) in fields.iter().rev() {
+                        tasks.push(Task::Encode(value));
+                    }
+                }
+                Projected::Blob {
+                    hash,
+                    size,
+                    media_type,
+                    tainted,
+                } => {
+                    let mut body = Vec::new();
+                    bytes(&mut body, 1, hash);
+                    uint(&mut body, 2, *size);
+                    string(&mut body, 3, media_type);
+                    boolean(&mut body, 4, *tainted);
+                    let mut buf = Vec::new();
+                    message(&mut buf, 10, &body, work)?;
+                    done.push(buf);
+                }
+                Projected::Env { name, default } => {
+                    tasks.push(Task::WrapEnv {
+                        name,
+                        has_default: default.is_some(),
+                    });
+                    if let Some(default) = default {
+                        tasks.push(Task::Encode(default));
+                    }
+                }
+                Projected::Expr(kind) => {
+                    let mut body = Vec::new();
+                    string(&mut body, 1, kind);
+                    let mut buf = Vec::new();
+                    message(&mut buf, 12, &body, work)?;
+                    done.push(buf);
+                }
+            },
+            Task::WrapQuantity { unit } => {
+                let inner = done
+                    .pop()
+                    .expect("a Quantity wrap always has one child encoding");
+                let mut body = Vec::new();
+                message(&mut body, 1, &inner, work)?;
+                string(&mut body, 2, unit);
+                let mut buf = Vec::new();
+                message(&mut buf, 7, &body, work)?;
+                done.push(buf);
             }
-            message(out, 8, &body, work)?;
-        }
-        Projected::Record(fields) => {
-            let mut body = Vec::new();
-            for (name, value) in fields {
-                let mut field = Vec::new();
-                string(&mut field, 1, name);
-                let mut encoded = Vec::new();
-                encode_value(value, &mut encoded, work)?;
-                message(&mut field, 2, &encoded, work)?;
-                message(&mut body, 1, &field, work)?;
+            Task::WrapArray { count } => {
+                let mut children = Vec::with_capacity(count);
+                for _ in 0..count {
+                    children.push(
+                        done.pop()
+                            .expect("an Array wrap always has one encoding per element"),
+                    );
+                }
+                children.reverse();
+                let mut body = Vec::new();
+                for encoded in &children {
+                    message(&mut body, 1, encoded, work)?;
+                }
+                let mut buf = Vec::new();
+                message(&mut buf, 8, &body, work)?;
+                done.push(buf);
             }
-            message(out, 9, &body, work)?;
-        }
-        Projected::Blob {
-            hash,
-            size,
-            media_type,
-            tainted,
-        } => {
-            let mut body = Vec::new();
-            bytes(&mut body, 1, hash);
-            uint(&mut body, 2, *size);
-            string(&mut body, 3, media_type);
-            boolean(&mut body, 4, *tainted);
-            message(out, 10, &body, work)?;
-        }
-        Projected::Env { name, default } => {
-            let mut body = Vec::new();
-            string(&mut body, 1, name);
-            // Additive field 2 (INF-INTEROP-06): the projected default, as
-            // a nested Value. Omitted when the Env has no default, so an
-            // Env without one encodes byte-identically to before, and a
-            // reader built against the old schema skips the field.
-            if let Some(default) = default {
-                let mut encoded = Vec::new();
-                encode_value(default, &mut encoded, work)?;
-                message(&mut body, 2, &encoded, work)?;
+            Task::WrapRecord { keys } => {
+                let count = keys.len();
+                let mut children = Vec::with_capacity(count);
+                for _ in 0..count {
+                    children.push(
+                        done.pop()
+                            .expect("a Record wrap always has one encoding per field"),
+                    );
+                }
+                children.reverse();
+                let mut body = Vec::new();
+                for (name, encoded) in keys.into_iter().zip(children) {
+                    let mut field = Vec::new();
+                    string(&mut field, 1, name);
+                    message(&mut field, 2, &encoded, work)?;
+                    message(&mut body, 1, &field, work)?;
+                }
+                let mut buf = Vec::new();
+                message(&mut buf, 9, &body, work)?;
+                done.push(buf);
             }
-            message(out, 11, &body, work)?;
-        }
-        Projected::Expr(kind) => {
-            let mut body = Vec::new();
-            string(&mut body, 1, kind);
-            message(out, 12, &body, work)?;
+            Task::WrapEnv { name, has_default } => {
+                let mut body = Vec::new();
+                string(&mut body, 1, name);
+                // Additive field 2 (INF-INTEROP-06): the projected default, as
+                // a nested Value. Omitted when the Env has no default, so an
+                // Env without one encodes byte-identically to before, and a
+                // reader built against the old schema skips the field.
+                if has_default {
+                    let encoded = done
+                        .pop()
+                        .expect("an Env wrap with a default always has one child encoding");
+                    message(&mut body, 2, &encoded, work)?;
+                }
+                let mut buf = Vec::new();
+                message(&mut buf, 11, &body, work)?;
+                done.push(buf);
+            }
         }
     }
+    let encoded = done
+        .pop()
+        .expect("the root Encode always leaves one buffer");
+    out.extend_from_slice(&encoded);
     Ok(())
 }
 
@@ -438,42 +539,59 @@ pub fn to_protobuf(module: &InfinityModule) -> Result<Vec<u8>> {
 ///
 /// Every field costs one tag byte plus a varint length, and text dominates the
 /// payload, so this is a safe over-estimate that never under-counts.
+///
+/// Iterative (INF-INTEROP-08): the old recursion followed the `Projected`
+/// tree one frame per level; an explicit stack replaces it. The total is
+/// unchanged -- addition is order-independent, and every arm contributes
+/// exactly what the recursive version contributed.
 fn projected_size(value: &Projected) -> usize {
-    let nested = |items: &[Projected]| -> usize {
-        items.iter().fold(0usize, |sum, item| {
-            sum.saturating_add(8 + projected_size(item))
-        })
-    };
-    match value {
-        Projected::Null | Projected::Bool(_) | Projected::Int(_) | Projected::Float(_) => 16,
-        Projected::Text(text) => 8usize.saturating_add(text.len()),
-        Projected::Env { name, default } => {
-            let mut total = 8usize.saturating_add(name.len());
-            if let Some(default) = default {
-                total = total
-                    .saturating_add(8)
-                    .saturating_add(projected_size(default));
+    let mut total = 0usize;
+    let mut stack = vec![value];
+    while let Some(value) = stack.pop() {
+        match value {
+            Projected::Null | Projected::Bool(_) | Projected::Int(_) | Projected::Float(_) => {
+                total = total.saturating_add(16);
             }
-            total
-        }
-        Projected::Expr(text) => 8usize.saturating_add(text.len()),
-        Projected::DurationMs(_) => 16,
-        Projected::Quantity(inner, unit) => 16usize
-            .saturating_add(unit.len())
-            .saturating_add(projected_size(inner)),
-        Projected::Array(items) => 8usize.saturating_add(nested(items)),
-        Projected::Record(fields) => {
-            let mut total = 8usize;
-            for (key, value) in fields {
-                total = total
-                    .saturating_add(8)
-                    .saturating_add(key.len())
-                    .saturating_add(projected_size(value));
+            Projected::Text(text) => {
+                total = total.saturating_add(8).saturating_add(text.len());
             }
-            total
+            Projected::Env { name, default } => {
+                total = total.saturating_add(8).saturating_add(name.len());
+                if let Some(default) = default {
+                    total = total.saturating_add(8);
+                    stack.push(default);
+                }
+            }
+            Projected::Expr(text) => {
+                total = total.saturating_add(8).saturating_add(text.len());
+            }
+            Projected::DurationMs(_) => {
+                total = total.saturating_add(16);
+            }
+            Projected::Quantity(inner, unit) => {
+                total = total.saturating_add(16).saturating_add(unit.len());
+                stack.push(inner);
+            }
+            Projected::Array(items) => {
+                total = total.saturating_add(8);
+                for item in items {
+                    total = total.saturating_add(8);
+                    stack.push(item);
+                }
+            }
+            Projected::Record(fields) => {
+                total = total.saturating_add(8);
+                for (key, value) in fields {
+                    total = total.saturating_add(8).saturating_add(key.len());
+                    stack.push(value);
+                }
+            }
+            Projected::Blob { media_type, .. } => {
+                total = total.saturating_add(80).saturating_add(media_type.len());
+            }
         }
-        Projected::Blob { media_type, .. } => 80usize.saturating_add(media_type.len()),
     }
+    total
 }
 
 fn check_size(out: &[u8]) -> Result<()> {

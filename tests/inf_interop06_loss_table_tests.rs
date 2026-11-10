@@ -26,7 +26,7 @@
 //!   with no kind check (`decode.rs` accepts any node id as the default),
 //!   and the suite itself builds one (`marathon_redaction_tests.rs`
 //!   pushes an `Env` whose default is a `Secret` node). The default is
-//!   therefore projected through the same recursive `build_projected` call
+//!   therefore projected through the same iterative `build_projected` walk
 //!   as every other node, so the full redaction applies -- a secret default
 //!   renders as the marker, never as plaintext. The tests below pin that.
 //! - The same default travels in Protobuf as additive field 2 of `message
@@ -148,7 +148,7 @@ fn env_with_secret_ref_default_redacts_to_marker() {
     );
 }
 
-/// The default projects recursively: an operator default collapses to its
+/// The default projects as a nested value: an operator default collapses to its
 /// kind tag, exactly as it would at the root.
 #[test]
 fn env_with_expr_default_collapses_to_kind_name() {

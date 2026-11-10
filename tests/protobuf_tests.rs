@@ -903,22 +903,35 @@ fn taint_follows_references_in_interpolations() {
     assert!(!json.contains("prefix"), "no literal prefix survives");
 }
 
-/// A deep chain is refused at the projection depth ceiling: the walk is
-/// recursive and 1024 frames abort the process (cross-cutting pass 1, #4).
+/// A deep chain is refused at the protobuf encoder's work budget, not
+/// aborted: the projection walk is iterative (INF-INTEROP-08) and the
+/// ceiling is the codec's 4096, so a 300-deep chain renders now -- the
+/// refusal moved to where the encoder's copying work trips
+/// `MAX_PROTOBUF_WORK` (64 MiB). A 2000-deep chain is past that boundary
+/// (a single-field Record chain renders to 1914 and trips at 1915,
+/// measured INF-INTEROP-08) and is refused cleanly with `infinity/limit`.
 #[test]
 fn a_deep_projection_is_refused_not_aborted() {
     use active_infinity::{InfinityModule, Inode};
 
     let mut module = InfinityModule::new();
     let mut current = module.push(Inode::Int(1));
-    for index in 0..300 {
+    for index in 0..2000 {
         current = module.push(Inode::Table {
             fields: vec![(format!("f{index}"), current)],
         });
     }
     module.set_root(Some(current));
-    let error = active_infinity::protobuf::to_protobuf(&module).expect_err("too deep");
+    let error = active_infinity::protobuf::to_protobuf(&module)
+        .expect_err("a 2000-deep chain exceeds the protobuf work budget");
     assert_eq!(error.code(), "infinity/limit", "{error}");
+    match error {
+        active_infinity::Error::Limit { kind, limit } => {
+            assert_eq!(kind, "protobuf work bytes", "{error}");
+            assert_eq!(limit, 64 << 20, "{error}");
+        }
+        other => panic!("expected Error::Limit, got {other:?}"),
+    }
 }
 
 /// A wide projection costs one copy per field: a table of many large strings

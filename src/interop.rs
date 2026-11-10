@@ -922,17 +922,31 @@ pub use bridge::{evaluate, from_active_core, to_active_core};
 // Shared redacted projection tree
 // ---------------------------------------------------------------------------
 
-/// Deepest graph the projection will follow. A validated module is at most
-/// `Limits::max_depth` deep; this is a second, independent stop so a
-/// hand-built module cannot exhaust the stack.
-/// Deepest container nesting a projection will walk.
+/// Deepest graph the projection will follow, in edges from the projected
+/// node (the projected node itself is depth 0).
 ///
-/// The walk is recursive (build, redaction check, protobuf encode), and the
-/// module depth ceiling alone is 1024: 600 nested tables overflow the default
-/// thread stack in a debug build, which aborts the process instead of refusing
-/// (cross-cutting pass 1, #4). 256 is far past any schema and safely inside the
-/// smallest stack this crate runs on.
-const PROJECTION_DEPTH: usize = 256;
+/// This is the codec's ceiling, not a second one:
+/// `Limits::default().max_depth` is 4096, and `prepare()` refuses anything
+/// deeper before a projection ever sees it, so a projection ceiling below
+/// 4096 refused legal modules (INF-INTEROP-08: a legal 300-deep module
+/// could not be rendered as JSON or protobuf at all). The two ceilings
+/// count differently -- the codec counts nodes from 1, the projection
+/// counts edges from 0 -- so the deepest node of a legal module sits at
+/// projection depth 4095, one inside this ceiling; a module past it is
+/// refused by the codec first, with `infinity/depth`, and this check is
+/// defense in depth for a hand-built module projected without encoding
+/// (pinned by a unit test in this file).
+///
+/// The ceiling can match the codec only because the whole projection path
+/// is iterative (INF-INTEROP-08): `build_projected`, `resolves_to_secret`,
+/// `encode_value` and `projected_size` all run on explicit heap stacks,
+/// the JSON projection writes text straight from the `Projected` tree
+/// (`write_json`, no `serde_json::Value` tree to serialize or drop),
+/// and dropping a `Projected` tree is iterative too -- so no step
+/// recurses per level of module depth. The old recursive walk needed a
+/// 256 ceiling because 600 nested tables overflowed the debug stack,
+/// which aborts the process instead of refusing (cross-cutting pass 1, #4).
+const PROJECTION_DEPTH: usize = 4096;
 
 /// Maximum number of nodes a single projection may materialise.
 ///
@@ -978,7 +992,7 @@ pub enum Projected {
         tainted: bool,
     },
     /// An environment lookup, by name, with its fallback value when one
-    /// exists. The default is the recursively projected node it points at
+    /// exists. The default is the projected node it points at
     /// (INF-INTEROP-06): a default is a value, so it projects like any
     /// other value -- a secret default becomes the marker, an operator
     /// default its kind tag. `None` renders exactly as before.
@@ -991,10 +1005,49 @@ pub enum Projected {
     /// A node kind that has no data projection (an operator, a schema, a patch).
     Expr(&'static str),
 }
+impl Drop for Projected {
+    fn drop(&mut self) {
+        // Iterative teardown (INF-INTEROP-08): dropping a `Projected` tree
+        // recurses once per level of depth in the default drop glue -- a
+        // 4095-deep tree dropped on a small stack overflows it the same way
+        // the old recursive walk did. The children are moved onto an
+        // explicit heap stack and dropped one at a time instead. Each child
+        // is dropped with its own children already moved out, so the
+        // re-entrant `drop` call on it sees a childless node and returns at
+        // once; a leaf returns without allocating at all. Drops have no
+        // side effects here (strings and vectors just free memory), so the
+        // order leaves are freed in is unobservable.
+        fn take_children(node: &mut Projected, stack: &mut Vec<Projected>) {
+            match node {
+                Projected::Quantity(inner, _) => {
+                    stack.push(*std::mem::replace(inner, Box::new(Projected::Null)));
+                }
+                Projected::Array(items) => stack.extend(std::mem::take(items)),
+                Projected::Record(fields) => {
+                    stack.extend(std::mem::take(fields).into_iter().map(|(_, value)| value));
+                }
+                Projected::Env { default, .. } => {
+                    if let Some(default) = default.take() {
+                        stack.push(*default);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut stack = Vec::new();
+        take_children(self, &mut stack);
+        if stack.is_empty() {
+            return;
+        }
+        while let Some(mut node) = stack.pop() {
+            take_children(&mut node, &mut stack);
+        }
+    }
+}
 
 /// Project a module's root value with every secret redacted.
 ///
-/// A projection walks the graph recursively, so a module with cycles or
+/// A projection walks the graph iteratively (INF-INTEROP-08), so a module with cycles or
 /// dangling references is refused instead of risking the stack. The Protobuf
 /// projection starts from [`project_node_with`] because it already holds the
 /// secret table and the encoded image.
@@ -1713,69 +1766,126 @@ pub(crate) fn redacted_key(text: &str, secrets: &[String]) -> String {
 ///
 /// Reference wrappers must be transparent for taint: an interpolated
 /// `${ref_to_secret}` has to redact the whole string, not render it as `${}`.
+///
+/// Iterative (INF-INTEROP-08): the old recursion followed `Ref` /
+/// `Semantic` / wrapper chains one frame per level, so a deep wrapper chain
+/// inside an interpolation could overflow the stack the same way
+/// `build_projected` did. A work stack of `(id, depth)` pairs replaces it.
+/// The walk is a boolean OR over the wrapper closure, so it returns `true`
+/// at the first secret and `false` when the stack empties; children are
+/// pushed in reverse order so they are visited in the same order the
+/// recursive version evaluated them (a `Binary` still short-circuits its
+/// right side when the left is secret, and an `Interpolate` still stops at
+/// its first secret part), and the shared node budget is charged per visit
+/// exactly as before.
 fn resolves_to_secret(
     module: &InfinityModule,
     id: NodeId,
     depth: usize,
     budget: &mut usize,
 ) -> Result<bool> {
-    *budget = budget.saturating_add(1);
-    if *budget > PROJECTION_NODE_BUDGET {
-        return Err(Error::Limit {
-            kind: "projection node budget",
-            limit: PROJECTION_NODE_BUDGET as u64,
-        });
-    }
-    if depth > PROJECTION_DEPTH {
-        // A pathological chain is treated as secret: fail closed.
-        return Ok(true);
-    }
-    Ok(match module.get(id) {
-        Some(Inode::Secret(_)) | Some(Inode::SecretRef { .. }) => true,
-        // Every wrapper that passes a value through is transparent for taint:
-        // a secret reached through one of them must redact the outer string,
-        // not print its shape.
-        Some(Inode::Ref(inner) | Inode::Semantic { inner, .. }) => {
-            resolves_to_secret(module, *inner, depth + 1, budget)?
+    let mut stack = vec![(id, depth)];
+    while let Some((id, depth)) = stack.pop() {
+        *budget = budget.saturating_add(1);
+        if *budget > PROJECTION_NODE_BUDGET {
+            return Err(Error::Limit {
+                kind: "projection node budget",
+                limit: PROJECTION_NODE_BUDGET as u64,
+            });
         }
-        Some(Inode::Quantity { value, .. }) => {
-            resolves_to_secret(module, *value, depth + 1, budget)?
+        if depth > PROJECTION_DEPTH {
+            // A pathological chain is treated as secret: fail closed.
+            return Ok(true);
         }
-        Some(Inode::Unary { expr, .. }) => resolves_to_secret(module, *expr, depth + 1, budget)?,
-        Some(Inode::Binary { lhs, rhs, .. }) => {
-            resolves_to_secret(module, *lhs, depth + 1, budget)?
-                || resolves_to_secret(module, *rhs, depth + 1, budget)?
-        }
-        Some(Inode::Constrained { target, .. }) => {
-            resolves_to_secret(module, *target, depth + 1, budget)?
-        }
-        Some(Inode::Patch(crate::ir::PatchOp::Set { value, .. })) => {
-            resolves_to_secret(module, *value, depth + 1, budget)?
-        }
-        Some(Inode::ContentAddressed { data, .. }) => {
-            resolves_to_secret(module, *data, depth + 1, budget)?
-        }
-        Some(Inode::Env {
-            default: Some(fallback),
-            ..
-        }) => resolves_to_secret(module, *fallback, depth + 1, budget)?,
-        Some(Inode::Interpolate { parts }) => {
-            let mut found = false;
-            for part in parts {
-                if let crate::ir::InterpPart::Expr(inner) = part {
-                    found = found || resolves_to_secret(module, *inner, depth + 1, budget)?;
+        match module.get(id) {
+            Some(Inode::Secret(_)) | Some(Inode::SecretRef { .. }) => return Ok(true),
+            // Every wrapper that passes a value through is transparent for
+            // taint: a secret reached through one of them must redact the
+            // outer string, not print its shape.
+            Some(Inode::Ref(inner) | Inode::Semantic { inner, .. }) => {
+                stack.push((*inner, depth + 1));
+            }
+            Some(Inode::Quantity { value, .. }) => {
+                stack.push((*value, depth + 1));
+            }
+            Some(Inode::Unary { expr, .. }) => stack.push((*expr, depth + 1)),
+            Some(Inode::Binary { lhs, rhs, .. }) => {
+                stack.push((*rhs, depth + 1));
+                stack.push((*lhs, depth + 1));
+            }
+            Some(Inode::Constrained { target, .. }) => {
+                stack.push((*target, depth + 1));
+            }
+            Some(Inode::Patch(crate::ir::PatchOp::Set { value, .. })) => {
+                stack.push((*value, depth + 1));
+            }
+            Some(Inode::ContentAddressed { data, .. }) => {
+                stack.push((*data, depth + 1));
+            }
+            Some(Inode::Env {
+                default: Some(fallback),
+                ..
+            }) => stack.push((*fallback, depth + 1)),
+            Some(Inode::Interpolate { parts }) => {
+                for part in parts.iter().rev() {
+                    if let crate::ir::InterpPart::Expr(inner) = part {
+                        stack.push((*inner, depth + 1));
+                    }
                 }
             }
-            found
+            Some(node) if node.is_secret() => return Ok(true),
+            Some(_) | None => {}
         }
-        Some(node) => node.is_secret(),
-        None => false,
-    })
+    }
+    Ok(false)
+}
+
+/// One frame of the iterative projection walk (INF-INTEROP-08).
+///
+/// `build_projected` used to recurse once per level of module depth, so a
+/// legal 300-deep module was refused at the 256 ceiling and a 600-deep one
+/// overflowed the debug stack instead of being refused. The walk is now an
+/// explicit heap stack. A `Node` frame is a node being projected; a
+/// composite frame (`Quantity` / `Array` / `Table` / `Env`) is a parent
+/// waiting for its children's projections. `pending` in `build_projected`
+/// holds the one projection a finished child just produced, for its parent
+/// to consume; `Ref` and `Semantic` push no frame, they pass their child's
+/// projection straight through to their parent, exactly as the recursive
+/// call returned it.
+enum ProjectionFrame<'m> {
+    /// A node to project, at this projection depth.
+    Node { id: Option<NodeId>, depth: usize },
+    /// A `Quantity` whose child is in flight. The unit is held unredacted:
+    /// the recursive walk redacted it after the child (the child is the
+    /// first field), and the charge order is preserved by redacting it at
+    /// combine time, not here.
+    Quantity { unit: &'m UnitTag },
+    /// An `Array` in progress: `next` is the index of the next element to
+    /// project, `items` the projections collected so far, in order.
+    Array {
+        elements: &'m [NodeId],
+        next: usize,
+        items: Vec<Projected>,
+        depth: usize,
+    },
+    /// A `Table` in progress: `next` is the index of the next field to
+    /// project, `key` the redacted key of the field in flight (redacted
+    /// before its child is projected, exactly as the recursive walk did),
+    /// `projected` the (key, projection) pairs collected so far.
+    Table {
+        fields: &'m [(String, NodeId)],
+        next: usize,
+        key: Option<String>,
+        projected: Vec<(String, Projected)>,
+        depth: usize,
+    },
+    /// An `Env` whose default is in flight; the name is already redacted.
+    Env { name: String },
 }
 
 #[allow(clippy::too_many_arguments)]
-fn build_projected(
-    module: &InfinityModule,
+fn build_projected<'m>(
+    module: &'m InfinityModule,
     id: Option<NodeId>,
     secrets: &[String],
     hash_secrets: &[Vec<u8>],
@@ -1785,219 +1895,282 @@ fn build_projected(
     redaction: &mut usize,
     bytes: &mut usize,
 ) -> Result<Projected> {
-    if depth > PROJECTION_DEPTH {
-        return Err(Error::Limit {
-            kind: "projection depth",
-            limit: PROJECTION_DEPTH as u64,
-        });
-    }
-    *budget += 1;
-    if *budget > PROJECTION_NODE_BUDGET {
-        return Err(Error::Limit {
-            kind: "projection node budget",
-            limit: PROJECTION_NODE_BUDGET as u64,
-        });
-    }
-    let value = match id.and_then(|id| module.get(id)) {
-        None => Projected::Null,
-        Some(node) => match node {
-            Inode::Null => Projected::Null,
-            Inode::Bool(flag) => Projected::Bool(*flag),
-            Inode::Int(number) => Projected::Int(*number),
-            Inode::Float(number) => Projected::Float(*number),
-            Inode::Str(text) => {
-                let text = redacted_value_within(text, secrets, redaction)?;
-                charge_projection_bytes(bytes, &text)?;
-                Projected::Text(text)
-            }
-            Inode::Ident(text) => {
-                let text = redact_within(text, secrets, redaction)?;
-                charge_projection_bytes(bytes, &text)?;
-                Projected::Text(text)
-            }
-            Inode::DurationMs(ms) => Projected::DurationMs(*ms),
-            Inode::Quantity { value, unit } => Projected::Quantity(
-                Box::new(build_projected(
-                    module,
-                    Some(*value),
-                    secrets,
-                    hash_secrets,
-                    placeholder,
-                    depth + 1,
-                    budget,
-                    redaction,
-                    bytes,
-                )?),
-                {
-                    let unit = redact_within(unit.name(), secrets, redaction)?;
-                    charge_projection_bytes(bytes, &unit)?;
-                    unit
-                },
-            ),
-            Inode::Array { elements } => Projected::Array(
-                elements
-                    .iter()
-                    .map(|id| {
-                        build_projected(
-                            module,
-                            Some(*id),
-                            secrets,
-                            hash_secrets,
-                            placeholder,
-                            depth + 1,
-                            budget,
-                            redaction,
-                            bytes,
-                        )
-                    })
-                    .collect::<Result<Vec<_>>>()?,
-            ),
-            Inode::Table { fields } => {
-                let mut projected = Vec::with_capacity(fields.len());
-                for (name, id) in fields {
-                    let key = redact_within(name, secrets, redaction)?;
-                    charge_projection_bytes(bytes, &key)?;
-                    projected.push((
-                        key,
-                        build_projected(
-                            module,
-                            Some(*id),
-                            secrets,
-                            hash_secrets,
-                            placeholder,
-                            depth + 1,
-                            budget,
-                            redaction,
-                            bytes,
-                        )?,
-                    ));
+    // Iterative (INF-INTEROP-08): the explicit `ProjectionFrame` stack
+    // replaces one call frame per level of module depth, so a legal
+    // 4095-deep module projects instead of overflowing the debug stack.
+    // The walk is a pre-order traversal identical to the recursive one:
+    // a node is depth- and budget-checked when its `Node` frame is
+    // processed, children are projected in field order, and the shared
+    // redaction and byte budgets are charged in the same order -- a
+    // `Table` key before its child, a `Quantity` unit after its child,
+    // an `Env` name before its default -- so a budget exhaustion reports
+    // the same limit the recursive walk reported. Any error aborts the
+    // whole projection, exactly as `?` did in the recursive version.
+    let mut stack: Vec<ProjectionFrame<'m>> = vec![ProjectionFrame::Node { id, depth }];
+    let mut pending: Option<Projected> = None;
+    while let Some(frame) = stack.pop() {
+        match frame {
+            ProjectionFrame::Node { id, depth } => {
+                if depth > PROJECTION_DEPTH {
+                    return Err(Error::Limit {
+                        kind: "projection depth",
+                        limit: PROJECTION_DEPTH as u64,
+                    });
                 }
-                // A projection is deterministic over the module's *content*,
-                // not its in-memory order, so fields are emitted sorted by
-                // their redacted name. Two names that redact to the same key
-                // would make a JSON reader drop one silently.
-                projected.sort_by(|a, b| a.0.cmp(&b.0));
-                if projected.windows(2).any(|pair| pair[0].0 == pair[1].0) {
-                    return Err(Error::Encode("two field names redact to the same key"));
+                *budget += 1;
+                if *budget > PROJECTION_NODE_BUDGET {
+                    return Err(Error::Limit {
+                        kind: "projection node budget",
+                        limit: PROJECTION_NODE_BUDGET as u64,
+                    });
                 }
-                Projected::Record(projected)
-            }
-            Inode::Secret(_) | Inode::SecretRef { .. } => Projected::Text(placeholder.to_string()),
-            Inode::Ref(id) => build_projected(
-                module,
-                Some(*id),
-                secrets,
-                hash_secrets,
-                placeholder,
-                depth + 1,
-                budget,
-                redaction,
-                bytes,
-            )?,
-            Inode::Env { name, default } => {
-                let name = redact_within(name, secrets, redaction)?;
-                charge_projection_bytes(bytes, &name)?;
-                // The default is a value, so it projects through the same
-                // recursive call as every other node (INF-INTEROP-06): the
-                // full redaction applies, and a secret default becomes the
-                // marker instead of rendering in plaintext. A default CAN
-                // be secret -- `Inode::Env.default` is an arbitrary node
-                // id with no kind check, and the suite itself builds an
-                // `Env` whose default is a `Secret` node. The recursion
-                // shares the depth, node-budget and byte counters, so a
-                // default cannot spend a second allowance.
-                let default = match default {
-                    Some(id) => Some(Box::new(build_projected(
-                        module,
-                        Some(*id),
-                        secrets,
-                        hash_secrets,
-                        placeholder,
-                        depth + 1,
-                        budget,
-                        redaction,
-                        bytes,
-                    )?)),
-                    None => None,
-                };
-                Projected::Env { name, default }
-            }
-            Inode::Interpolate { parts } => {
-                let mut text = String::new();
-                let mut tainted = false;
-                for part in parts {
-                    match part {
-                        InterpPart::Literal(literal) => text.push_str(literal),
-                        InterpPart::Expr(id) => {
-                            if resolves_to_secret(module, *id, 0, budget)? {
-                                tainted = true;
-                            } else {
-                                text.push_str("${}");
+                let produced: Option<Projected> = match id.and_then(|id| module.get(id)) {
+                    None => Some(Projected::Null),
+                    Some(node) => match node {
+                        Inode::Null => Some(Projected::Null),
+                        Inode::Bool(flag) => Some(Projected::Bool(*flag)),
+                        Inode::Int(number) => Some(Projected::Int(*number)),
+                        Inode::Float(number) => Some(Projected::Float(*number)),
+                        Inode::Str(text) => {
+                            let text = redacted_value_within(text, secrets, redaction)?;
+                            charge_projection_bytes(bytes, &text)?;
+                            Some(Projected::Text(text))
+                        }
+                        Inode::Ident(text) => {
+                            let text = redact_within(text, secrets, redaction)?;
+                            charge_projection_bytes(bytes, &text)?;
+                            Some(Projected::Text(text))
+                        }
+                        Inode::DurationMs(ms) => Some(Projected::DurationMs(*ms)),
+                        Inode::Quantity { value, unit } => {
+                            stack.push(ProjectionFrame::Quantity { unit });
+                            stack.push(ProjectionFrame::Node {
+                                id: Some(*value),
+                                depth: depth + 1,
+                            });
+                            None
+                        }
+                        Inode::Array { elements } => {
+                            stack.push(ProjectionFrame::Array {
+                                elements: elements.as_slice(),
+                                next: 0,
+                                items: Vec::with_capacity(elements.len()),
+                                depth,
+                            });
+                            None
+                        }
+                        Inode::Table { fields } => {
+                            stack.push(ProjectionFrame::Table {
+                                fields: fields.as_slice(),
+                                next: 0,
+                                key: None,
+                                projected: Vec::with_capacity(fields.len()),
+                                depth,
+                            });
+                            None
+                        }
+                        Inode::Secret(_) | Inode::SecretRef { .. } => {
+                            Some(Projected::Text(placeholder.to_string()))
+                        }
+                        Inode::Ref(id) => {
+                            stack.push(ProjectionFrame::Node {
+                                id: Some(*id),
+                                depth: depth + 1,
+                            });
+                            None
+                        }
+                        Inode::Env { name, default } => {
+                            let name = redact_within(name, secrets, redaction)?;
+                            charge_projection_bytes(bytes, &name)?;
+                            // The default is a value, so it projects through
+                            // the same walk as every other node
+                            // (INF-INTEROP-06): the full redaction applies,
+                            // and a secret default becomes the marker instead
+                            // of rendering in plaintext. A default CAN be
+                            // secret -- `Inode::Env.default` is an arbitrary
+                            // node id with no kind check, and the suite
+                            // itself builds an `Env` whose default is a
+                            // `Secret` node. The walk shares the depth,
+                            // node-budget and byte counters, so a default
+                            // cannot spend a second allowance.
+                            match default {
+                                Some(id) => {
+                                    stack.push(ProjectionFrame::Env { name });
+                                    stack.push(ProjectionFrame::Node {
+                                        id: Some(*id),
+                                        depth: depth + 1,
+                                    });
+                                    None
+                                }
+                                None => Some(Projected::Env {
+                                    name,
+                                    default: None,
+                                }),
                             }
                         }
-                    }
-                }
-                if tainted {
-                    Projected::Text(placeholder.to_string())
-                } else {
-                    let text = redacted_value_within(&text, secrets, redaction)?;
-                    charge_projection_bytes(bytes, &text)?;
-                    Projected::Text(text)
-                }
-            }
-            Inode::Binary { .. }
-            | Inode::Unary { .. }
-            | Inode::Constrained { .. }
-            | Inode::Patch(_)
-            | Inode::SchemaField(_)
-            | Inode::SchemaTable { .. }
-            | Inode::SchemaArray { .. }
-            | Inode::ContentAddressed { .. } => {
-                Projected::Expr(crate::view::node_kind_name(node.kind_code()))
-            }
-            Inode::Semantic { inner, .. } => build_projected(
-                module,
-                Some(*inner),
-                secrets,
-                hash_secrets,
-                placeholder,
-                depth + 1,
-                budget,
-                redaction,
-                bytes,
-            )?,
-            Inode::Blob {
-                hash,
-                size,
-                tainted,
-                media_type,
-                ..
-            } => {
-                // A blob hash is published verbatim. A hash that copies a
-                // 32-byte secret would publish it, so the projection refuses
-                // a hand-built module the encoder would already have refused.
-                if hash_secrets
-                    .iter()
-                    .any(|secret| !secret.is_empty() && secret.as_slice() == hash)
-                {
-                    return Err(Error::Encode("blob hash equals a secret"));
-                }
-                Projected::Blob {
-                    hash: *hash,
-                    size: *size,
-                    media_type: if *tainted {
-                        placeholder.to_string()
-                    } else {
-                        let media_type = redact_within(media_type, secrets, redaction)?;
-                        charge_projection_bytes(bytes, &media_type)?;
-                        media_type
+                        Inode::Interpolate { parts } => {
+                            let mut text = String::new();
+                            let mut tainted = false;
+                            for part in parts {
+                                match part {
+                                    InterpPart::Literal(literal) => text.push_str(literal),
+                                    InterpPart::Expr(id) => {
+                                        if resolves_to_secret(module, *id, 0, budget)? {
+                                            tainted = true;
+                                        } else {
+                                            text.push_str("${}");
+                                        }
+                                    }
+                                }
+                            }
+                            if tainted {
+                                Some(Projected::Text(placeholder.to_string()))
+                            } else {
+                                let text = redacted_value_within(&text, secrets, redaction)?;
+                                charge_projection_bytes(bytes, &text)?;
+                                Some(Projected::Text(text))
+                            }
+                        }
+                        Inode::Binary { .. }
+                        | Inode::Unary { .. }
+                        | Inode::Constrained { .. }
+                        | Inode::Patch(_)
+                        | Inode::SchemaField(_)
+                        | Inode::SchemaTable { .. }
+                        | Inode::SchemaArray { .. }
+                        | Inode::ContentAddressed { .. } => Some(Projected::Expr(
+                            crate::view::node_kind_name(node.kind_code()),
+                        )),
+                        Inode::Semantic { inner, .. } => {
+                            stack.push(ProjectionFrame::Node {
+                                id: Some(*inner),
+                                depth: depth + 1,
+                            });
+                            None
+                        }
+                        Inode::Blob {
+                            hash,
+                            size,
+                            tainted,
+                            media_type,
+                            ..
+                        } => {
+                            // A blob hash is published verbatim. A hash that
+                            // copies a 32-byte secret would publish it, so
+                            // the projection refuses a hand-built module the
+                            // encoder would already have refused.
+                            if hash_secrets
+                                .iter()
+                                .any(|secret| !secret.is_empty() && secret.as_slice() == hash)
+                            {
+                                return Err(Error::Encode("blob hash equals a secret"));
+                            }
+                            Some(Projected::Blob {
+                                hash: *hash,
+                                size: *size,
+                                media_type: if *tainted {
+                                    placeholder.to_string()
+                                } else {
+                                    let media_type = redact_within(media_type, secrets, redaction)?;
+                                    charge_projection_bytes(bytes, &media_type)?;
+                                    media_type
+                                },
+                                tainted: *tainted,
+                            })
+                        }
                     },
-                    tainted: *tainted,
+                };
+                if let Some(value) = produced {
+                    pending = Some(value);
                 }
             }
-        },
-    };
-    Ok(value)
+            ProjectionFrame::Quantity { unit } => {
+                let value = pending
+                    .take()
+                    .expect("a Quantity frame is only pushed with a child projection in flight");
+                // The unit is redacted after the child, exactly as the
+                // recursive walk did (the child is the first field).
+                let unit = redact_within(unit.name(), secrets, redaction)?;
+                charge_projection_bytes(bytes, &unit)?;
+                pending = Some(Projected::Quantity(Box::new(value), unit));
+            }
+            ProjectionFrame::Array {
+                elements,
+                mut next,
+                mut items,
+                depth,
+            } => {
+                if let Some(value) = pending.take() {
+                    items.push(value);
+                }
+                if next < elements.len() {
+                    let child = elements[next];
+                    next += 1;
+                    stack.push(ProjectionFrame::Array {
+                        elements,
+                        next,
+                        items,
+                        depth,
+                    });
+                    stack.push(ProjectionFrame::Node {
+                        id: Some(child),
+                        depth: depth + 1,
+                    });
+                } else {
+                    pending = Some(Projected::Array(items));
+                }
+            }
+            ProjectionFrame::Table {
+                fields,
+                mut next,
+                mut key,
+                mut projected,
+                depth,
+            } => {
+                if let Some(value) = pending.take() {
+                    let key = key
+                        .take()
+                        .expect("a Table frame with a pending child always holds its redacted key");
+                    projected.push((key, value));
+                }
+                if next < fields.len() {
+                    let (name, child) = &fields[next];
+                    // The key is redacted (and charged) before its child
+                    // is projected, exactly as the recursive walk did.
+                    let redacted = redact_within(name, secrets, redaction)?;
+                    charge_projection_bytes(bytes, &redacted)?;
+                    next += 1;
+                    stack.push(ProjectionFrame::Table {
+                        fields,
+                        next,
+                        key: Some(redacted),
+                        projected,
+                        depth,
+                    });
+                    stack.push(ProjectionFrame::Node {
+                        id: Some(*child),
+                        depth: depth + 1,
+                    });
+                } else {
+                    // A projection is deterministic over the module's
+                    // *content*, not its in-memory order, so fields are
+                    // emitted sorted by their redacted name. Two names
+                    // that redact to the same key would make a JSON reader
+                    // drop one silently.
+                    projected.sort_by(|a, b| a.0.cmp(&b.0));
+                    if projected.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+                        return Err(Error::Encode("two field names redact to the same key"));
+                    }
+                    pending = Some(Projected::Record(projected));
+                }
+            }
+            ProjectionFrame::Env { name } => {
+                let default = pending.take().map(Box::new);
+                pending = Some(Projected::Env { name, default });
+            }
+        }
+    }
+    Ok(pending.expect("the root Node frame always leaves one projection"))
 }
 
 // ---------------------------------------------------------------------------
@@ -2099,9 +2272,16 @@ mod projection {
     /// node is refused by `to_active_core` (no `active-core` 1.4.0
     /// counterpart; `TypeSpec::Blob` likewise); a module whose opaque
     /// extension payload contains a secret literal is refused by
-    /// `to_protobuf`; a projection deeper than 256 edges, past the
+    /// `to_protobuf`; a projection deeper than 4096 edges, past the
     /// 100 000-visit node budget, or with two names redacting to one key
-    /// is refused rather than truncated.
+    /// is refused rather than truncated. A protobuf projection whose
+    /// encoder work exceeds 64 MiB (`MAX_PROTOBUF_WORK`) is refused too:
+    /// the encoder copies each nested message into its parent, so the
+    /// work grows with the square of the depth -- a single-field
+    /// Record chain renders to depth 1914 and trips at 1915 (measured
+    /// INF-INTEROP-08; the JSON projection has no such ceiling). The
+    /// streaming encoder that would remove the quadratic cost is a
+    /// recorded follow-up, not this fix.
     ///
     /// # Example
     ///
@@ -2136,14 +2316,16 @@ mod projection {
     /// );
     /// ```
     pub fn to_redacted_json(module: &InfinityModule) -> Result<String> {
-        let value = to_serde(&project_root(module)?);
-        serde_json::to_string(&value).map_err(|_| Error::Encode("json projection failed"))
+        let mut out = String::new();
+        write_json(&project_root(module)?, false, &mut out);
+        Ok(out)
     }
 
     /// Pretty-printed form of [`to_redacted_json`].
     pub fn to_redacted_json_pretty(module: &InfinityModule) -> Result<String> {
-        let value = to_serde(&project_root(module)?);
-        serde_json::to_string_pretty(&value).map_err(|_| Error::Encode("json projection failed"))
+        let mut out = String::new();
+        write_json(&project_root(module)?, true, &mut out);
+        Ok(out)
     }
 
     /// Every secret literal in the module, as text, for the redaction helpers.
@@ -2154,12 +2336,129 @@ mod projection {
         secret_texts(module)
     }
 
-    /// Render a projected value as JSON.
-    fn to_serde(value: &Projected) -> serde_json::Value {
-        match value {
-            Projected::Null => serde_json::Value::Null,
-            Projected::Bool(flag) => serde_json::Value::from(*flag),
-            Projected::Int(number) => serde_json::Value::from(*number),
+    /// Write a projected value as JSON text.
+    ///
+    /// Iterative (INF-INTEROP-08): this replaces `to_serde`, which built a
+    /// `serde_json::Value` tree. The tree itself was built iteratively, but
+    /// serializing it (`serde_json::to_string`) and dropping it both recurse
+    /// once per level of depth -- a 4095-deep projection aborted the debug
+    /// test process with `STATUS_STACK_OVERFLOW` on the 2 MiB test-thread
+    /// stack, while the protobuf path (the same `Projected` tree, iterative
+    /// encode) refused cleanly on its work budget instead of aborting.
+    /// Writing text straight from the `Projected` tree removes both
+    /// recursions: an explicit frame stack replaces them, so a legal
+    /// 4095-deep module renders on a 256 KiB stack (pinned by the
+    /// small-stack tests in `tests/inf_interop08_projection_depth_tests.rs`).
+    ///
+    /// The bytes are unchanged: keys are emitted in the same insertion
+    /// order `serde_json::json!` produced under `preserve_order` (enabled
+    /// via `active-core` in the default build; the regression legs are
+    /// default and `--all-features`), strings and numbers are rendered by
+    /// `serde_json` itself so escaping and float formatting are identical,
+    /// and record keys are escaped exactly as `to_serde` escaped them.
+    /// Compact output matches `serde_json::to_string`; pretty output
+    /// matches `serde_json::to_string_pretty` (two-space indent).
+    fn write_json(value: &Projected, pretty: bool, out: &mut String) {
+        let mut stack: Vec<JsonFrame<'_>> = Vec::new();
+        push_json(value, 0, out, &mut stack);
+        while let Some(mut frame) = stack.pop() {
+            if !frame.started {
+                frame.started = true;
+                if frame.children.is_empty() {
+                    // `{}` / `[]`: the close follows the open at once.
+                    out.push(if frame.object { '}' } else { ']' });
+                    continue;
+                }
+                if pretty {
+                    out.push('\n');
+                    write_json_indent(out, frame.level + 1);
+                }
+            } else if frame.children.is_empty() {
+                // The last child was just written: close at this level.
+                if pretty {
+                    out.push('\n');
+                    write_json_indent(out, frame.level);
+                }
+                out.push(if frame.object { '}' } else { ']' });
+                continue;
+            } else {
+                out.push(',');
+                if pretty {
+                    out.push('\n');
+                    write_json_indent(out, frame.level + 1);
+                }
+            }
+            // Write the next child: its key (objects), then its value. The
+            // parent frame goes back first, so a child frame (if any) sits
+            // on top of it.
+            let (key, child) = frame
+                .children
+                .pop()
+                .expect("a non-empty frame always has a next child");
+            let level = frame.level;
+            if let Some(key) = key {
+                out.push_str(&json_string(&key));
+                out.push(':');
+                if pretty {
+                    out.push(' ');
+                }
+            }
+            match child {
+                JsonChild::Node(node) => {
+                    stack.push(frame);
+                    push_json(node, level + 1, out, &mut stack);
+                }
+                JsonChild::Raw(raw) => {
+                    out.push_str(&raw);
+                    stack.push(frame);
+                }
+                JsonChild::Object(fields) => {
+                    stack.push(frame);
+                    push_json_object(fields, level + 1, out, &mut stack);
+                }
+            }
+        }
+    }
+
+    /// One child of a JSON container.
+    enum JsonChild<'a> {
+        /// A projected value: a scalar writes inline, a composite pushes a frame.
+        Node(&'a Projected),
+        /// A pre-rendered JSON scalar (a quoted string, a number, `true` /
+        /// `false`) written verbatim.
+        Raw(String),
+        /// A nested object whose fields are children (the `$active.blob`
+        /// inner object); its fields are written like any object's.
+        Object(Vec<(String, JsonChild<'a>)>),
+    }
+
+    /// A JSON container being written: its children in reverse order (the
+    /// next child to write is last), whether it has written a child yet,
+    /// its indent level (pretty only), and whether it is an object.
+    struct JsonFrame<'a> {
+        children: Vec<(Option<String>, JsonChild<'a>)>,
+        started: bool,
+        level: usize,
+        object: bool,
+    }
+
+    /// Write one projected node: a scalar writes inline, a composite writes
+    /// its open token and pushes a frame. `level` is the node's own indent
+    /// level: its children sit at `level + 1`, its close token at `level`.
+    fn push_json<'a>(
+        node: &'a Projected,
+        level: usize,
+        out: &mut String,
+        stack: &mut Vec<JsonFrame<'a>>,
+    ) {
+        match node {
+            Projected::Null => out.push_str("null"),
+            Projected::Bool(flag) => out.push_str(if *flag { "true" } else { "false" }),
+            Projected::Int(number) => {
+                out.push_str(
+                    &serde_json::to_string(number).expect("an integer is always valid JSON"),
+                );
+            }
             Projected::Float(number) => {
                 // `serde_json::Value::from(f64)` yields `Value::Null` for a
                 // non-finite float, so a NaN or an infinity used to render as
@@ -2171,7 +2470,7 @@ mod projection {
                 // marker convention (`$env`, `$expr`, `$active.blob`). The tag
                 // is unambiguous: a real null renders as bare `null`, a real
                 // string as a bare JSON string, and a data record key starting
-                // with `$` is escaped by doubling in the `Record` arm above,
+                // with `$` is escaped by doubling in the `Record` arm below,
                 // so no data record can produce a bare `{"$float": ...}`
                 // object. The tag preserves the float class only, not NaN
                 // payload bits -- JSON has no vocabulary for them, and the
@@ -2179,53 +2478,121 @@ mod projection {
                 // NaN (`layout::canonical_f64`), so the class is exactly what
                 // the canonical form preserves.
                 if number.is_finite() {
-                    serde_json::Value::from(*number)
-                } else if number.is_nan() {
-                    serde_json::json!({ "$float": "NaN" })
-                } else if *number == f64::INFINITY {
-                    serde_json::json!({ "$float": "Infinity" })
+                    out.push_str(
+                        &serde_json::to_string(number)
+                            .expect("a finite float is always valid JSON"),
+                    );
                 } else {
-                    serde_json::json!({ "$float": "-Infinity" })
+                    let tag = if number.is_nan() {
+                        "NaN"
+                    } else if *number == f64::INFINITY {
+                        "Infinity"
+                    } else {
+                        "-Infinity"
+                    };
+                    push_json_object(
+                        vec![("$float".to_string(), JsonChild::Raw(json_string(tag)))],
+                        level,
+                        out,
+                        stack,
+                    );
                 }
             }
-            Projected::Text(text) => serde_json::Value::from(text.clone()),
-            Projected::DurationMs(ms) => serde_json::json!({ "ms": ms }),
-            Projected::Quantity(value, unit) => serde_json::json!({
-                "value": to_serde(value),
-                "unit": unit,
-            }),
+            Projected::Text(text) => out.push_str(&json_string(text)),
+            Projected::DurationMs(ms) => {
+                push_json_object(
+                    vec![(
+                        "ms".to_string(),
+                        JsonChild::Raw(
+                            serde_json::to_string(ms).expect("an integer is always valid JSON"),
+                        ),
+                    )],
+                    level,
+                    out,
+                    stack,
+                );
+            }
+            Projected::Quantity(value, unit) => {
+                push_json_object(
+                    vec![
+                        ("value".to_string(), JsonChild::Node(value)),
+                        ("unit".to_string(), JsonChild::Raw(json_string(unit))),
+                    ],
+                    level,
+                    out,
+                    stack,
+                );
+            }
             Projected::Array(items) => {
-                serde_json::Value::Array(items.iter().map(to_serde).collect())
+                out.push('[');
+                let mut children: Vec<(Option<String>, JsonChild<'_>)> = items
+                    .iter()
+                    .map(|item| (None, JsonChild::Node(item)))
+                    .collect();
+                children.reverse();
+                stack.push(JsonFrame {
+                    children,
+                    started: false,
+                    level,
+                    object: false,
+                });
             }
             Projected::Record(fields) => {
-                let mut map = serde_json::Map::new();
-                for (name, value) in fields {
-                    // A data key that starts with `$` would be byte-identical
-                    // to a JSON marker (`$env`, `$expr`, `$active.blob`), so it
-                    // is escaped here, in the JSON renderer only: the protobuf
-                    // projection has no markers and keeps the module's names.
-                    let mut key = name.clone();
-                    if key.starts_with('$') {
-                        key.insert(0, '$');
-                    }
-                    map.insert(key, to_serde(value));
-                }
-                serde_json::Value::Object(map)
+                out.push('{');
+                let mut children: Vec<(Option<String>, JsonChild<'_>)> = fields
+                    .iter()
+                    .map(|(name, value)| (Some(escape_json_key(name)), JsonChild::Node(value)))
+                    .collect();
+                children.reverse();
+                stack.push(JsonFrame {
+                    children,
+                    started: false,
+                    level,
+                    object: true,
+                });
             }
             Projected::Blob {
                 hash,
                 size,
                 media_type,
                 tainted,
-            } => serde_json::json!({
-                "$active.blob": {
-                    "hash": format!("blake3:{}", crate::ir::hash_hex(hash)),
-                    "size": size,
-                    "media_type": media_type,
-                    "tainted": tainted,
-                }
-            }),
-            Projected::Env { name, default } => match default {
+            } => {
+                // The inner object's fields are in `json!` insertion order
+                // (`hash`, `size`, `media_type`, `tainted`), as the
+                // pre-fix bytes prove.
+                let inner = vec![
+                    (
+                        "hash".to_string(),
+                        JsonChild::Raw(json_string(&format!(
+                            "blake3:{}",
+                            crate::ir::hash_hex(hash)
+                        ))),
+                    ),
+                    (
+                        "size".to_string(),
+                        JsonChild::Raw(
+                            serde_json::to_string(size).expect("an integer is always valid JSON"),
+                        ),
+                    ),
+                    (
+                        "media_type".to_string(),
+                        JsonChild::Raw(json_string(media_type)),
+                    ),
+                    (
+                        "tainted".to_string(),
+                        JsonChild::Raw(
+                            serde_json::to_string(tainted).expect("a boolean is always valid JSON"),
+                        ),
+                    ),
+                ];
+                push_json_object(
+                    vec![("$active.blob".to_string(), JsonChild::Object(inner))],
+                    level,
+                    out,
+                    stack,
+                );
+            }
+            Projected::Env { name, default } => {
                 // No default: exactly the shape Env always rendered,
                 // `{"$env": name}`. A default gains the field, as a nested
                 // projected value (INF-INTEROP-06): a string default stays
@@ -2235,12 +2602,67 @@ mod projection {
                 // a data record can never produce it, because a data key
                 // starting with `$` is escaped by doubling in the `Record`
                 // arm above.
-                Some(default) => {
-                    serde_json::json!({ "$env": name, "default": to_serde(default) })
+                let mut fields = vec![("$env".to_string(), JsonChild::Raw(json_string(name)))];
+                if let Some(default) = default {
+                    fields.push(("default".to_string(), JsonChild::Node(default)));
                 }
-                None => serde_json::json!({ "$env": name }),
-            },
-            Projected::Expr(kind) => serde_json::json!({ "$expr": kind }),
+                push_json_object(fields, level, out, stack);
+            }
+            Projected::Expr(kind) => {
+                push_json_object(
+                    vec![("$expr".to_string(), JsonChild::Raw(json_string(kind)))],
+                    level,
+                    out,
+                    stack,
+                );
+            }
+        }
+    }
+
+    /// Write the open token of an object and push its frame. The fields are
+    /// in emission order.
+    fn push_json_object<'a>(
+        fields: Vec<(String, JsonChild<'a>)>,
+        level: usize,
+        out: &mut String,
+        stack: &mut Vec<JsonFrame<'a>>,
+    ) {
+        out.push('{');
+        let mut children: Vec<(Option<String>, JsonChild<'_>)> = fields
+            .into_iter()
+            .map(|(key, child)| (Some(key), child))
+            .collect();
+        children.reverse();
+        stack.push(JsonFrame {
+            children,
+            started: false,
+            level,
+            object: true,
+        });
+    }
+
+    /// A string as JSON renders it: quoted, with `serde_json`'s escaping.
+    fn json_string(text: &str) -> String {
+        serde_json::to_string(text).expect("a string is always valid JSON")
+    }
+
+    /// A data record key as the JSON renderer emits it: a key starting with
+    /// `$` would be byte-identical to a JSON marker (`$env`, `$expr`,
+    /// `$active.blob`), so it is escaped by doubling, in the JSON renderer
+    /// only: the protobuf projection has no markers and keeps the module's
+    /// names.
+    fn escape_json_key(name: &str) -> String {
+        let mut key = name.to_string();
+        if key.starts_with('$') {
+            key.insert(0, '$');
+        }
+        key
+    }
+
+    /// One pretty-print indent level: two spaces, as `serde_json` writes.
+    fn write_json_indent(out: &mut String, level: usize) {
+        for _ in 0..level {
+            out.push_str("  ");
         }
     }
 
@@ -2956,4 +3378,70 @@ pub fn from_active_source(source: &str, name: &str) -> Result<InfinityModule> {
         }
     })?;
     from_active_core(&core)
+}
+
+#[cfg(test)]
+mod projection_depth_tests {
+    use super::*;
+
+    /// A module whose root is `depth` nested single-field Tables over one
+    /// leaf `Int(1)`: the root Table is at projection depth 0, so the leaf
+    /// sits at projection depth `depth`.
+    fn nested_tables(depth: usize) -> InfinityModule {
+        let mut module = InfinityModule::new();
+        let mut cur = module.push(Inode::Int(1));
+        for _ in 0..depth {
+            cur = module.push(Inode::Table {
+                fields: vec![("v".to_string(), cur)],
+            });
+        }
+        module.set_root(Some(cur));
+        module
+    }
+
+    /// Project a module's root without encoding it first, so the projection
+    /// ceiling itself is the only gate under test.
+    fn project_direct(module: &InfinityModule) -> Result<Projected> {
+        let secrets: Vec<String> = Vec::new();
+        let hash_secrets: Vec<Vec<u8>> = Vec::new();
+        let mut budget = 0usize;
+        let mut redaction = PROJECTION_REDACTION_BUDGET;
+        let mut bytes = 256usize << 20;
+        build_projected(
+            module,
+            module.root(),
+            &secrets,
+            &hash_secrets,
+            SECRET_MARKER,
+            0,
+            &mut budget,
+            &mut redaction,
+            &mut bytes,
+        )
+    }
+
+    /// INF-INTEROP-08: the projection ceiling is the codec's 4096, counted
+    /// in edges from the projected node. The leaf of a 4096-table module
+    /// sits at depth 4096 and projects; the leaf of a 4097-table module
+    /// sits at depth 4097 and is refused with `infinity/limit`. This pins
+    /// the ceiling itself: through the public API the codec refuses a
+    /// module past depth 4096 first (`infinity/depth`), so this refusal is
+    /// only reachable for a hand-built module projected without encoding.
+    #[test]
+    fn projection_depth_ceiling_is_4096_edges() {
+        let at = nested_tables(4096);
+        project_direct(&at).expect("a leaf at projection depth 4096 must project");
+        let past = nested_tables(4097);
+        let error =
+            project_direct(&past).expect_err("a leaf at projection depth 4097 must be refused");
+        assert_eq!(error.code(), "infinity/limit", "{error}");
+        match error {
+            Error::Limit { kind, limit } => {
+                assert_eq!(kind, "projection depth", "{error}");
+                assert_eq!(limit, PROJECTION_DEPTH as u64, "{error}");
+                assert_eq!(limit, 4096, "{error}");
+            }
+            other => panic!("expected Error::Limit, got {other:?}"),
+        }
+    }
 }

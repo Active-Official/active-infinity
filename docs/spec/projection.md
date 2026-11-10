@@ -284,15 +284,32 @@ projection is a complete copy of the AINF bytes, and neither is meant to be.
 
 ## 5. Depth and refusals
 
-A projection follows the graph recursively. It refuses, rather than approximates:
+A projection follows the graph iteratively (INF-INTEROP-08): the walk,
+the redaction check and both renderers run on explicit heap stacks, so
+no step recurses per level of module depth. It refuses, rather than
+approximates:
 
-- a module deeper than 256 edges from a projected node
-  (`PROJECTION_DEPTH`, `infinity/limit`, `projection depth limit 256
-  exceeded`); (This line used to say 1024 edges with code
-  `infinity/encode`; 1024 is the module depth ceiling, the projection
-  walk ceiling is 256 -- see the `PROJECTION_DEPTH` comment in
+- a module deeper than 4096 edges from a projected node
+  (`PROJECTION_DEPTH`, `infinity/limit`, `projection depth limit 4096
+  exceeded`). The ceiling is the codec's: `Limits::default().max_depth`
+  is 4096, counted in nodes from 1, while the projection counts edges
+  from 0, so the deepest node of a legal module sits at projection
+  depth 4095, one inside the ceiling; a module past the codec ceiling
+  is refused by the codec first, with `infinity/depth`, and the
+  projection check is defense in depth for a hand-built module
+  projected without encoding. (This line used to say 256 edges: the old
+  recursive walk needed the 256 ceiling because 600 nested tables
+  overflowed the debug stack -- see the `PROJECTION_DEPTH` comment in
   `src/interop.rs` -- and the 200-deep-ok / 300-deep-refused behaviour
-  proves it. The code is `infinity/limit`, the `Limit` display.)
+  proved it. The code is `infinity/limit`, the `Limit` display.)
+- a protobuf projection whose encoder work exceeds 64 MiB
+  (`MAX_PROTOBUF_WORK`, `infinity/limit`, `protobuf work bytes limit
+  67108864 exceeded`): the encoder copies each nested message into its
+  parent, so the work grows with the square of the depth -- a
+  single-field Record chain renders to depth 1914 and trips at 1915
+  (measured INF-INTEROP-08). The JSON projection has no such ceiling:
+  it writes straight from the tree. The streaming encoder that would
+  remove the quadratic cost is a recorded follow-up, not this fix.
 - a module with a cycle, a dangling reference, a duplicate binding or a
   duplicate field name, because `to_protobuf` requires a canonical image.
 

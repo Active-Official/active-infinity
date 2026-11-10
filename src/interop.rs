@@ -1843,6 +1843,9 @@ mod projection {
     /// - secrets (and strings equal to a secret literal) become [`SECRET_MARKER`];
     /// - blobs project their identity only (hash, size, media type, taint);
     /// - quantities project `{"value": n, "unit": "<name>"}`;
+    /// - non-finite floats project as a tagged object (`{"$float": "NaN"}`;
+    ///   `"Infinity"`, `"-Infinity"`), never as JSON `null`: a NaN used to
+    ///   render as `null`, indistinguishable from a real null (INF-INTEROP-03);
     /// - annotations and provenance project as data, never as executable text.
     pub fn to_redacted_json(module: &InfinityModule) -> Result<String> {
         let value = to_serde(&project_root(module)?);
@@ -1869,7 +1872,34 @@ mod projection {
             Projected::Null => serde_json::Value::Null,
             Projected::Bool(flag) => serde_json::Value::from(*flag),
             Projected::Int(number) => serde_json::Value::from(*number),
-            Projected::Float(number) => serde_json::Value::from(*number),
+            Projected::Float(number) => {
+                // `serde_json::Value::from(f64)` yields `Value::Null` for a
+                // non-finite float, so a NaN or an infinity used to render as
+                // JSON `null` -- silently, with no error and no marker,
+                // indistinguishable from a real null while the protobuf
+                // projection of the same module preserves the NaN bits
+                // (INF-INTEROP-03). A non-finite float is therefore rendered
+                // as a tagged object, following this renderer's existing
+                // marker convention (`$env`, `$expr`, `$active.blob`). The tag
+                // is unambiguous: a real null renders as bare `null`, a real
+                // string as a bare JSON string, and a data record key starting
+                // with `$` is escaped by doubling in the `Record` arm above,
+                // so no data record can produce a bare `{"$float": ...}`
+                // object. The tag preserves the float class only, not NaN
+                // payload bits -- JSON has no vocabulary for them, and the
+                // canonical form already normalizes every NaN to one quiet
+                // NaN (`layout::canonical_f64`), so the class is exactly what
+                // the canonical form preserves.
+                if number.is_finite() {
+                    serde_json::Value::from(*number)
+                } else if number.is_nan() {
+                    serde_json::json!({ "$float": "NaN" })
+                } else if *number == f64::INFINITY {
+                    serde_json::json!({ "$float": "Infinity" })
+                } else {
+                    serde_json::json!({ "$float": "-Infinity" })
+                }
+            }
             Projected::Text(text) => serde_json::Value::from(text.clone()),
             Projected::DurationMs(ms) => serde_json::json!({ "ms": ms }),
             Projected::Quantity(value, unit) => serde_json::json!({

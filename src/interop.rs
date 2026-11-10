@@ -590,9 +590,19 @@ mod bridge {
                     .map(|(name, id)| (name.clone(), active_core::NodeId(id.0)))
                     .collect(),
             },
-            Inode::Secret(secret) => CoreNode::Literal(CoreValue::Secret(
-                String::from_utf8_lossy(secret.expose()).into_owned(),
-            )),
+            Inode::Secret(_) => {
+                // `active-core` models a secret as a plain string, so lowering
+                // one would hand the plaintext to every consumer of the bridge
+                // (INF-INTEROP-04). The `has_secret` gate in `to_active_core`
+                // refuses secret-bearing modules first, so this arm is
+                // unreachable today -- but it must refuse on its own if the
+                // gate ever moves: defence in depth, matching the `Blob` and
+                // `ContentAddressed` arms below. Same message as the gate, so
+                // the error is identical whichever tripwire fires.
+                return Err(Error::Encode(
+                    "the active-core bridge does not export secret material; keep the module in Infinity",
+                ));
+            }
             Inode::SecretRef { locator } => CoreNode::Secret {
                 locator: active_core::NodeId(locator.0),
             },
@@ -772,6 +782,38 @@ mod bridge {
             "X005" => "active/X005-keys",
             "X006" => "active/X006-value-size",
             _ => "active/eval-error",
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// INF-INTEROP-04: the `Secret` arm of `convert_node` must refuse
+        /// on its own, past the `has_secret` gate. The gate in
+        /// `to_active_core` refuses secret-bearing modules first, so this
+        /// arm is unreachable through any public entry point today -- this
+        /// test calls the lowering function directly, so a future refactor
+        /// that moves or bypasses the gate cannot silently re-export secret
+        /// plaintext into `active-core`, where a secret is a plain string.
+        /// The arm reports exactly the gate's message, so the error is
+        /// identical whichever tripwire fires.
+        #[test]
+        fn convert_node_refuses_a_secret_node() {
+            let error = convert_node(&Inode::Secret(crate::ir::SecretBytes::from(
+                "hunter2-canary-interop04",
+            )))
+            .expect_err("a secret node must be refused by the lowering arm itself");
+            assert_eq!(error.code(), "infinity/encode", "{error}");
+            assert_eq!(
+                error.to_string(),
+                "cannot encode module: the active-core bridge does not export secret material; keep the module in Infinity",
+                "the arm must report exactly the gate's message, so the error is identical whichever tripwire fires"
+            );
+            assert!(
+                !error.to_string().contains("hunter2-canary-interop04"),
+                "the refusal must not carry the plaintext anywhere; got {error}"
+            );
         }
     }
 }

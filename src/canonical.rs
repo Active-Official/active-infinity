@@ -27,7 +27,7 @@
 // hand-written public surface.
 #![allow(missing_docs)]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::error::{Error, Result};
 use crate::ir::{
@@ -1372,12 +1372,13 @@ fn remap_node_in_place(node: &mut Inode, remap: &[NodeId]) -> Result<()> {
     Ok(())
 }
 
-/// Total bytes of rendered ordering keys one module may hold.
+/// Total bytes of ordering keys one module may hold.
 ///
 /// Every annotation subject and constraint expression needs a key, and a key is
-/// a full render of its subtree. The per-key ceiling bounds one key; this bound
-/// covers all of them, so a module with tens of thousands of large subjects is
-/// refused (`infinity/limit`) instead of driving peak memory to the sum.
+/// a render of its subtree — exact up to 1 MiB, a digest beyond it
+/// (INF-10). The per-key ceiling bounds one key; this bound covers all of
+/// them, so a module with tens of thousands of large subjects is refused
+/// (`infinity/limit`) instead of driving peak memory to the sum.
 pub(crate) const MAX_ANNOTATION_KEY_BYTES: usize = 64 << 20;
 
 /// Render a subject's content key once and remember its position.
@@ -1417,263 +1418,812 @@ fn key_index(
 /// are followed, never printed as ids. Secrets contribute a fixed marker, never
 /// their bytes.
 ///
-/// The render is exact up to [`KEY_BYTES`]: it never truncates, because a
-/// truncated key would fall back to id order and let arena construction leak
-/// into the hash again. A subtree past the byte or depth budget is refused
-/// (`infinity/limit`); an annotation subject that size is not schema.
+/// The key is the exact render while it fits in [`KEY_BYTES`] (1 MiB) — so
+/// every module the old key accepted keeps its bytes — and a Blake3 digest
+/// of the same content past it (INF-10). The old key refused a subtree
+/// past the byte budget or deeper than 256, although the wire allows
+/// strings to 64 MiB and depth to 4096: a legal module could not be
+/// encoded at all once it was annotated. A digest bounds the key without
+/// bounding the module, and the key keeps its injectivity (up to a Blake3
+/// collision, the same assumption the format already makes for content
+/// addressing).
+///
+/// There is no depth cap on the key any more. Depth is bounded upstream
+/// by `prepare()`, which validates the module at
+/// `Limits::default().max_depth` (4096, INF-09) before the order is
+/// derived, so the key never sees a deeper subtree — and the render is
+/// iterative (an explicit action stack, `render_key_exact`), because a
+/// recursive render aborted the process with a stack overflow in debug
+/// on chains deeper than ~150 (INF-15) and a legal 4096-deep chain must
+/// render without touching the call stack. Making the render iterative
+/// also removes INF-15's abort mechanism; INF-15 stays open in the
+/// registry until its own worker verifies and closes it.
+///
+/// The digest is a tree hash (`subtree_digest`), not a hash of the flat
+/// render: the flat render of a shared subtree can be exponential in
+/// its depth (a doubling DAG of 60 nodes renders ~2^60 bytes), so
+/// hashing the flat render would hang where the old key refused fast.
+/// The tree hash memoises by node id — a shared subtree is hashed once
+/// — and therefore costs O(subtree nodes + payload bytes). It mirrors
+/// the render's distinctions exactly (same payload, same framed-only
+/// parts, secrets folded to the same constant), so a subtree's digest
+/// and its exact render agree on what counts as different content.
+///
+/// The hashed form sorts before every exact render (it starts with a
+/// NUL byte, which no render's first byte can be), and the 64 MiB total
+/// (`MAX_ANNOTATION_KEY_BYTES`) still bounds all keys together: a module
+/// with tens of thousands of near-1 MiB subjects is still refused
+/// instead of driving peak memory to the sum.
 fn content_key_with(nodes: &[crate::ir::Inode], id: NodeId, framed: bool) -> Result<String> {
     const KEY_BYTES: usize = 1 << 20;
-    const KEY_DEPTH: u32 = 256;
 
-    fn text(out: &mut String, framed: bool, value: &str) -> Result<()> {
-        let mut needed = value.len();
-        let prefix = if framed {
-            // Length-prefix every textual component: a name may contain the
-            // separators the renderer uses, so an unframed key is not injective
-            // (`"G1a=i1b=i2"` has two spellings).
-            let prefix = format!("{}:", value.len());
-            needed = needed.saturating_add(prefix.len());
-            Some(prefix)
+    match render_key_exact(nodes, id, framed, KEY_BYTES)? {
+        Some(key) => Ok(key),
+        None => Ok(hashed_key(&subtree_digest(nodes, id, framed)?, framed)),
+    }
+}
+
+/// The hashed form of an over-budget ordering key.
+///
+/// The leading NUL byte is the point: no exact render starts with one
+/// (every render starts with a node tag, and even a framed secret
+/// renders as `6:SECRET`), so a hashed key can never equal — or sort
+/// among — the exact renders, and two hashed keys order by their digest
+/// alone. The mode letter keeps the framed and unframed digests
+/// visibly apart (they are computed from different content: the framed
+/// render carries length prefixes, named-unit names and schema-field
+/// slot markers the unframed one does not).
+fn hashed_key(digest: &[u8; 32], framed: bool) -> String {
+    let mut key = String::with_capacity(72);
+    key.push('\0');
+    key.push('H');
+    key.push(if framed { 'f' } else { 'u' });
+    key.push(':');
+    key.push_str(&crate::ir::hash_hex(digest));
+    key
+}
+
+/// A sink for the exact key render: it accumulates the render while it
+/// fits in the budget and records the moment it runs past it, instead
+/// of materialising a key that would then be thrown away.
+struct KeySink {
+    buf: String,
+    total: usize,
+    budget: usize,
+    over: bool,
+}
+
+impl KeySink {
+    fn new(budget: usize) -> Self {
+        Self {
+            buf: String::new(),
+            total: 0,
+            budget,
+            over: false,
+        }
+    }
+
+    fn push_str(&mut self, value: &str) {
+        if self.over {
+            return;
+        }
+        self.total = self.total.saturating_add(value.len());
+        if self.total > self.budget {
+            self.over = true;
+            return;
+        }
+        self.buf.push_str(value);
+    }
+
+    fn push_char(&mut self, value: char) {
+        if self.over {
+            return;
+        }
+        self.total = self.total.saturating_add(value.len_utf8());
+        if self.total > self.budget {
+            self.over = true;
+            return;
+        }
+        self.buf.push(value);
+    }
+
+    /// Write `value` exactly as the recursive render's `text()` did:
+    /// length-prefixed when `framed` (a name may contain the separators
+    /// the renderer uses, so an unframed key is not injective), bare
+    /// otherwise. The prefix bytes count toward the budget like any
+    /// other byte.
+    fn push_text(&mut self, framed: bool, value: &str) {
+        if framed {
+            self.push_str(&format!("{}:", value.len()));
+        }
+        self.push_str(value);
+    }
+}
+
+/// One pending step of the iterative key render.
+///
+/// The render is a depth-first walk with per-node prefix text, so a
+/// flat action stack replaces the recursion: `Visit` expands one node
+/// (prefix text inline, children pushed below), `Seq` resumes a
+/// sequence node at its next item (item text inline, the child's visit
+/// pushed above it), and `Comma` writes the `,` that follows one
+/// Array/Table item after its subtree has rendered. At most ~2 entries
+/// sit on the stack per level of depth, so the stack stays O(depth)
+/// — a wide node never materialises its items up front.
+enum RenderAction<'a> {
+    Visit(NodeId),
+    Comma,
+    Seq(&'a crate::ir::Inode, usize),
+}
+
+/// Render a subject's content key exactly, or report that it runs past
+/// `budget` bytes.
+///
+/// Returns `Ok(Some(key))` when the render fits, `Ok(None)` when it
+/// runs past the budget (the caller then takes the digest path), and
+/// `Err` for a dangling reference. The render aborts the moment the
+/// budget is passed, so the attempt costs O(budget) work: every node
+/// emits at least one byte, and a shared subtree is re-walked only
+/// until the budget trips.
+fn render_key_exact(
+    nodes: &[crate::ir::Inode],
+    id: NodeId,
+    framed: bool,
+    budget: usize,
+) -> Result<Option<String>> {
+    // Defence-in-depth: a cycle cannot reach here (`prepare()`
+    // validates acyclicity before the order is derived), but a cyclic
+    // graph would push forever — the valve turns that into an error
+    // instead of an unbounded stack. A valid render holds ~2 entries
+    // per level of depth (a sequence driver plus a pending comma), and
+    // depth is capped at 4096 by validate, so this is 8x headroom over
+    // the largest valid stack.
+    const MAX_RENDER_STACK: usize = 65_536;
+
+    let mut sink = KeySink::new(budget);
+    let mut stack: Vec<RenderAction<'_>> = Vec::new();
+    stack.push(RenderAction::Visit(id));
+    while let Some(action) = stack.pop() {
+        if stack.len() > MAX_RENDER_STACK {
+            return Err(Error::Encode(
+                "annotation key render exceeded the work limit",
+            ));
+        }
+        match action {
+            RenderAction::Visit(node_id) => {
+                let Some(node) = nodes.get(node_id.index()) else {
+                    return Err(Error::EncodeDangling(node_id.0));
+                };
+                render_key_prefix(node, framed, &mut sink, &mut stack);
+            }
+            RenderAction::Comma => sink.push_char(','),
+            RenderAction::Seq(node, index) => {
+                render_key_seq_item(node, index, framed, &mut sink, &mut stack);
+            }
+        }
+        if sink.over {
+            return Ok(None);
+        }
+    }
+    Ok(Some(sink.buf))
+}
+
+/// Write one node's prefix text and push its children, in render
+/// order. This is the old recursive `render()`'s per-node arm with the
+/// recursive calls replaced by pushes: children are pushed in reverse
+/// execution order, so the first child is on top.
+fn render_key_prefix<'a>(
+    node: &'a crate::ir::Inode,
+    framed: bool,
+    sink: &mut KeySink,
+    stack: &mut Vec<RenderAction<'a>>,
+) {
+    use crate::ir::Inode as I;
+    match node {
+        I::Null => sink.push_char('n'),
+        I::Bool(value) => sink.push_char(if *value { 't' } else { 'f' }),
+        I::Int(value) => {
+            sink.push_char('i');
+            sink.push_text(framed, &value.to_string());
+        }
+        I::Float(value) => {
+            sink.push_char('d');
+            sink.push_text(framed, &value.to_bits().to_string());
+        }
+        I::Str(value) => {
+            sink.push_char('s');
+            sink.push_text(framed, &value.len().to_string());
+            sink.push_char(':');
+            sink.push_text(framed, value);
+        }
+        I::DurationMs(ms) => {
+            sink.push_char('m');
+            sink.push_text(framed, &ms.to_string());
+        }
+        I::Quantity { value, unit } => {
+            sink.push_char('q');
+            sink.push_text(framed, &unit.discriminant().to_string());
+            if framed {
+                // Every named unit shares one discriminant; without the
+                // name two units render identically.
+                if let UnitTag::Named(name) = unit {
+                    sink.push_char('n');
+                    sink.push_text(framed, name);
+                }
+            }
+            sink.push_char(':');
+            stack.push(RenderAction::Visit(*value));
+        }
+        I::Array { .. } => {
+            sink.push_char('[');
+            stack.push(RenderAction::Seq(node, 0));
+        }
+        I::Table { .. } => {
+            sink.push_char('{');
+            stack.push(RenderAction::Seq(node, 0));
+        }
+        // A secret's content is never part of any key.
+        I::Secret(_) => sink.push_text(framed, "SECRET"),
+        I::SecretRef { locator } => {
+            sink.push_char('S');
+            stack.push(RenderAction::Visit(*locator));
+        }
+        I::Ref(target) => {
+            sink.push_char('R');
+            stack.push(RenderAction::Visit(*target));
+        }
+        I::Env { name, default } => {
+            sink.push_char('E');
+            sink.push_text(framed, name);
+            sink.push_char(':');
+            if let Some(default) = default {
+                stack.push(RenderAction::Visit(*default));
+            }
+        }
+        I::Ident(name) => {
+            sink.push_char('I');
+            sink.push_text(framed, name);
+        }
+        I::Interpolate { .. } => {
+            sink.push_char('T');
+            stack.push(RenderAction::Seq(node, 0));
+        }
+        I::Binary { op, lhs, rhs } => {
+            sink.push_char('b');
+            sink.push_text(framed, op.as_str());
+            sink.push_char(':');
+            stack.push(RenderAction::Visit(*rhs));
+            stack.push(RenderAction::Visit(*lhs));
+        }
+        I::Unary { op, expr } => {
+            sink.push_char('u');
+            sink.push_text(framed, op.as_str());
+            sink.push_char(':');
+            stack.push(RenderAction::Visit(*expr));
+        }
+        I::Constrained { target, constraint } => {
+            sink.push_char('c');
+            render_key_constraint(constraint, framed, sink);
+            stack.push(RenderAction::Visit(*target));
+        }
+        I::Patch(op) => {
+            sink.push_char('p');
+            match op {
+                crate::ir::PatchOp::Set { path, value } => {
+                    sink.push_char('s');
+                    sink.push_text(framed, path);
+                    stack.push(RenderAction::Visit(*value));
+                }
+                crate::ir::PatchOp::Remove { path } => {
+                    sink.push_char('r');
+                    sink.push_text(framed, path);
+                }
+                crate::ir::PatchOp::Rename { from, to } => {
+                    sink.push_char('n');
+                    sink.push_text(framed, from);
+                    sink.push_text(framed, to);
+                }
+            }
+        }
+        I::SchemaField(spec) => {
+            sink.push_char('F');
+            render_key_type_spec(&spec.typ, framed, sink);
+            stack.push(RenderAction::Seq(node, 0));
+        }
+        I::SchemaTable { closed, .. } => {
+            sink.push_char('G');
+            sink.push_char(if *closed { '1' } else { '0' });
+            stack.push(RenderAction::Seq(node, 0));
+        }
+        I::SchemaArray { element } => {
+            sink.push_char('A');
+            stack.push(RenderAction::Visit(*element));
+        }
+        I::Semantic { tag, inner } => {
+            sink.push_char('y');
+            sink.push_text(framed, tag.as_str());
+            stack.push(RenderAction::Visit(*inner));
+        }
+        I::ContentAddressed { media_type, data } => {
+            sink.push_char('C');
+            stack.push(RenderAction::Visit(*data));
+            stack.push(RenderAction::Visit(*media_type));
+        }
+        I::Blob {
+            hash,
+            size,
+            tainted,
+            media_type,
+            payload,
+        } => {
+            sink.push_char('B');
+            sink.push_text(framed, &crate::ir::hash_hex(hash));
+            sink.push_text(framed, &size.to_string());
+            sink.push_char(if *tainted { '1' } else { '0' });
+            sink.push_text(framed, media_type);
+            if let Some(payload) = payload {
+                sink.push_text(framed, &payload.len().to_string());
+            }
+        }
+    }
+}
+
+/// Write a constraint's payload, exactly as the old render did: the
+/// `Constraint` `Debug` redacts enum members and pattern text to a
+/// fixed marker, which would give two different constraints the same
+/// ordering key, so the payload is rendered explicitly instead.
+fn render_key_constraint(constraint: &crate::ir::Constraint, framed: bool, sink: &mut KeySink) {
+    use crate::ir::Constraint as C;
+    match constraint {
+        C::MinMax { min, max } => {
+            sink.push_char('M');
+            for bound in [min, max] {
+                match bound {
+                    Some(value) => {
+                        sink.push_char('v');
+                        sink.push_text(framed, &value.to_string());
+                    }
+                    None => sink.push_char('-'),
+                }
+            }
+        }
+        C::Enum(items) => {
+            sink.push_char('e');
+            // The encoder sorts enum members; the key must too.
+            let mut ordered: Vec<&String> = items.iter().collect();
+            ordered.sort();
+            for item in ordered {
+                sink.push_text(framed, &item.len().to_string());
+                sink.push_char(':');
+                sink.push_text(framed, item);
+            }
+        }
+        C::Pattern(pattern) => {
+            sink.push_char('p');
+            sink.push_text(framed, &pattern.len().to_string());
+            sink.push_char(':');
+            sink.push_text(framed, pattern);
+        }
+        C::Odd => sink.push_char('o'),
+        C::Custom(value) => {
+            sink.push_char('x');
+            sink.push_text(framed, &value.len().to_string());
+            sink.push_char(':');
+            sink.push_text(framed, value);
+        }
+    }
+}
+
+/// Write a schema field's type payload, exactly as the old render did:
+/// every id-bearing field is followed (as a child); only the type
+/// itself and the textual fields are written here.
+fn render_key_type_spec(spec: &crate::ir::TypeSpec, framed: bool, sink: &mut KeySink) {
+    use crate::ir::TypeSpec as T;
+    match spec {
+        T::Enum(members) => {
+            sink.push_char('E');
+            // The encoder sorts members before interning, so the key
+            // sorts them too: insertion order must not reach the hash.
+            let mut ordered: Vec<&String> = members.iter().collect();
+            ordered.sort();
+            for member in ordered {
+                sink.push_text(framed, &member.len().to_string());
+                sink.push_char(':');
+                sink.push_text(framed, member);
+            }
+        }
+        T::Table { closed } => {
+            sink.push_char('T');
+            sink.push_char(if *closed { '1' } else { '0' });
+        }
+        other => sink.push_text(framed, &format!("{other:?}")),
+    }
+}
+
+/// Render one item of a sequence node (`Array`, `Table`,
+/// `Interpolate`, `SchemaField`, `SchemaTable`), or the node's
+/// closing text when the items run out.
+///
+/// The item's pre-child text is written inline; the child's visit is
+/// pushed above the re-pushed driver, so the child renders before the
+/// next item starts — and a `,` (Array/Table only) is pushed between
+/// them, so it is written after the child's subtree, as the render did.
+fn render_key_seq_item<'a>(
+    node: &'a crate::ir::Inode,
+    index: usize,
+    framed: bool,
+    sink: &mut KeySink,
+    stack: &mut Vec<RenderAction<'a>>,
+) {
+    use crate::ir::Inode as I;
+    match node {
+        I::Array { elements } => {
+            let Some(element) = elements.get(index) else {
+                sink.push_char(']');
+                return;
+            };
+            stack.push(RenderAction::Seq(node, index + 1));
+            stack.push(RenderAction::Comma);
+            stack.push(RenderAction::Visit(*element));
+        }
+        I::Table { fields } => {
+            let Some((name, value)) = fields.get(index) else {
+                sink.push_char('}');
+                return;
+            };
+            sink.push_text(framed, &name.len().to_string());
+            sink.push_char(':');
+            sink.push_text(framed, name);
+            sink.push_char('=');
+            stack.push(RenderAction::Seq(node, index + 1));
+            stack.push(RenderAction::Comma);
+            stack.push(RenderAction::Visit(*value));
+        }
+        I::Interpolate { parts } => {
+            let Some(part) = parts.get(index) else {
+                sink.push_char('t');
+                return;
+            };
+            match part {
+                crate::ir::InterpPart::Literal(literal) => {
+                    sink.push_char('l');
+                    sink.push_text(framed, &literal.len().to_string());
+                    sink.push_char(':');
+                    sink.push_text(framed, literal);
+                    stack.push(RenderAction::Seq(node, index + 1));
+                }
+                crate::ir::InterpPart::Expr(expr) => {
+                    sink.push_char('e');
+                    stack.push(RenderAction::Seq(node, index + 1));
+                    stack.push(RenderAction::Visit(*expr));
+                }
+            }
+        }
+        I::SchemaField(spec) => {
+            // The slots in order; only the present ones are items.
+            let mut seen = 0;
+            let mut found: Option<(usize, NodeId)> = None;
+            for (slot, node) in [
+                spec.min,
+                spec.max,
+                spec.min_len,
+                spec.max_len,
+                spec.pattern,
+                spec.default,
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                if let Some(node) = node {
+                    if seen == index {
+                        found = Some((slot, node));
+                        break;
+                    }
+                    seen += 1;
+                }
+            }
+            let Some((slot, child)) = found else {
+                if let Some(spec_text) = &spec.deprecated {
+                    sink.push_char('!');
+                    sink.push_text(framed, spec_text);
+                }
+                return;
+            };
+            if framed {
+                // `min` and `max` both pointing at the same node used to
+                // render identically.
+                sink.push_char(char::from(b'a' + slot as u8));
+            }
+            stack.push(RenderAction::Seq(node, index + 1));
+            stack.push(RenderAction::Visit(child));
+        }
+        I::SchemaTable { fields, .. } => {
+            let Some((name, value)) = fields.get(index) else {
+                return;
+            };
+            sink.push_text(framed, name);
+            sink.push_char('=');
+            stack.push(RenderAction::Seq(node, index + 1));
+            stack.push(RenderAction::Visit(*value));
+        }
+        // `Seq` is only ever pushed for a sequence node.
+        _ => unreachable!("a sequence driver holds a sequence node"),
+    }
+}
+
+/// One frame of the iterative subtree digest: a node whose own payload
+/// is already in its hasher and whose children are being folded in,
+/// in order.
+struct DigestFrame {
+    id: NodeId,
+    hasher: blake3::Hasher,
+    children: Vec<NodeId>,
+    next: usize,
+}
+
+impl DigestFrame {
+    fn new(id: NodeId, node: &crate::ir::Inode, framed: bool) -> Self {
+        let mut hasher = blake3::Hasher::new();
+        digest_own(&mut hasher, node, framed);
+        Self {
+            id,
+            hasher,
+            children: node.children(),
+            next: 0,
+        }
+    }
+}
+
+/// A content digest for a subtree, used as the ordering key when the
+/// exact render runs past 1 MiB.
+///
+/// The digest is a Blake3 tree hash: each node's digest covers a
+/// length-prefixed encoding of the node's own payload — exactly the
+/// content the exact render writes, including the framed-only parts
+/// (named-unit names, schema-field slot markers) — followed by the
+/// 32-byte digests of its children in order. Two subtrees with
+/// different renders have different digests unless Blake3 collides
+/// (the same assumption the format already makes for content
+/// addressing); two with equal renders have equal digests.
+///
+/// The walk is iterative (an explicit stack of frames holding a
+/// running hasher each) and memoised by node id, so a shared subtree
+/// is hashed once: a doubling DAG costs O(subtree nodes + payload
+/// bytes), never O(render bytes).
+fn subtree_digest(nodes: &[crate::ir::Inode], root: NodeId, framed: bool) -> Result<[u8; 32]> {
+    let Some(root_node) = nodes.get(root.index()) else {
+        return Err(Error::EncodeDangling(root.0));
+    };
+    // Memoised by node id: a shared subtree is hashed once. Worst case
+    // the memo holds one 32-byte digest per node of the subject — a
+    // pathological 4M-node single subject costs ~200 MB transient — but
+    // that only ever happens for a subject the old key refused outright,
+    // and the module itself is already that large.
+    let mut memo: HashMap<NodeId, [u8; 32]> = HashMap::new();
+    // Defence-in-depth: a cycle cannot reach here (`prepare()`
+    // validates acyclicity before the order is derived), but without
+    // this set a cyclic graph would push frames forever.
+    let mut in_progress: HashSet<NodeId> = HashSet::new();
+    in_progress.insert(root);
+    let mut stack = vec![DigestFrame::new(root, root_node, framed)];
+    while !stack.is_empty() {
+        // Short borrows only: the frame is never held across a push or
+        // a pop of the stack itself.
+        let next_child = {
+            let frame = stack
+                .last()
+                .expect("the loop only runs on a non-empty stack");
+            if frame.next < frame.children.len() {
+                Some(frame.children[frame.next])
+            } else {
+                None
+            }
+        };
+        if let Some(child) = next_child {
+            {
+                let frame = stack
+                    .last_mut()
+                    .expect("the loop only runs on a non-empty stack");
+                frame.next += 1;
+            }
+            if let Some(digest) = memo.get(&child) {
+                let frame = stack
+                    .last_mut()
+                    .expect("the loop only runs on a non-empty stack");
+                frame.hasher.update(digest);
+                continue;
+            }
+            if !in_progress.insert(child) {
+                return Err(Error::Cycle { node: child.0 });
+            }
+            let Some(node) = nodes.get(child.index()) else {
+                return Err(Error::EncodeDangling(child.0));
+            };
+            stack.push(DigestFrame::new(child, node, framed));
+            continue;
+        }
+        let frame = stack
+            .pop()
+            .expect("the loop only runs on a non-empty stack");
+        let digest = *frame.hasher.finalize().as_bytes();
+        in_progress.remove(&frame.id);
+        memo.insert(frame.id, digest);
+        if let Some(parent) = stack.last_mut() {
+            parent.hasher.update(&digest);
         } else {
-            None
-        };
-        if out.len().saturating_add(needed) > KEY_BYTES {
-            return Err(Error::Limit {
-                kind: "annotation key bytes",
-                limit: KEY_BYTES as u64,
-            });
+            return Ok(digest);
         }
-        if let Some(prefix) = prefix {
-            out.push_str(&prefix);
-        }
-        out.push_str(value);
-        Ok(())
     }
+    unreachable!("the stack starts non-empty and only empties by returning the root digest");
+}
 
-    fn ch(out: &mut String, value: char) -> Result<()> {
-        if out.len() >= KEY_BYTES {
-            return Err(Error::Limit {
-                kind: "annotation key bytes",
-                limit: KEY_BYTES as u64,
-            });
-        }
-        out.push(value);
-        Ok(())
-    }
+/// Feed one length-prefixed byte string into a digest hasher: the
+/// length makes the encoding unambiguous, so `"ab" + "c"` and `"a" +
+/// "bc"` can never hash alike.
+fn digest_bytes(hasher: &mut blake3::Hasher, bytes: &[u8]) {
+    hasher.update(&(bytes.len() as u64).to_le_bytes());
+    hasher.update(bytes);
+}
 
-    fn render(
-        nodes: &[crate::ir::Inode],
-        framed: bool,
-        id: NodeId,
-        out: &mut String,
-        depth: u32,
-    ) -> Result<()> {
-        if depth > KEY_DEPTH {
-            return Err(Error::Limit {
-                kind: "annotation key depth",
-                limit: KEY_DEPTH as u64,
-            });
+fn digest_str(hasher: &mut blake3::Hasher, value: &str) {
+    digest_bytes(hasher, value.as_bytes());
+}
+
+fn digest_u64(hasher: &mut blake3::Hasher, value: u64) {
+    hasher.update(&value.to_le_bytes());
+}
+
+fn digest_bool(hasher: &mut blake3::Hasher, value: bool) {
+    hasher.update(&[u8::from(value)]);
+}
+
+/// Feed one node's own payload into its digest hasher: the variant
+/// tag, every scalar and string the exact render writes for this node
+/// (including the framed-only parts — named-unit names and
+/// schema-field slot markers), and the structure that says where the
+/// children go (counts, field names, part kinds, slot presence). The
+/// children themselves are folded in by the caller, as their 32-byte
+/// digests, in `children()` order.
+///
+/// This mirrors the exact render's distinctions exactly, and nothing
+/// else: secrets contribute the same fixed marker (never their bytes),
+/// blob payloads contribute only their length, and no arena id is ever
+/// fed — so equal renders give equal digests, different renders give
+/// different digests (up to a Blake3 collision), and the digest can
+/// stand in for the render as the ordering key.
+fn digest_own(hasher: &mut blake3::Hasher, node: &crate::ir::Inode, framed: bool) {
+    use crate::ir::Inode as I;
+    match node {
+        // One distinct tag byte per variant; the tags are internal to
+        // this hash and need no relation to the render's tag chars.
+        I::Null => {
+            hasher.update(&[0x01]);
         }
-        let Some(node) = nodes.get(id.index()) else {
-            return Err(Error::EncodeDangling(id.0));
-        };
-        use crate::ir::Inode as I;
-        match node {
-            I::Null => ch(out, 'n')?,
-            I::Bool(value) => ch(out, if *value { 't' } else { 'f' })?,
-            I::Int(value) => {
-                ch(out, 'i')?;
-                text(out, framed, &value.to_string())?;
-            }
-            I::Float(value) => {
-                ch(out, 'd')?;
-                text(out, framed, &value.to_bits().to_string())?;
-            }
-            I::Str(value) => {
-                ch(out, 's')?;
-                text(out, framed, &value.len().to_string())?;
-                ch(out, ':')?;
-                text(out, framed, value)?;
-            }
-            I::DurationMs(ms) => {
-                ch(out, 'm')?;
-                text(out, framed, &ms.to_string())?;
-            }
-            I::Quantity { value, unit } => {
-                ch(out, 'q')?;
-                text(out, framed, &unit.discriminant().to_string())?;
-                if framed {
-                    // Every named unit shares one discriminant; without the
-                    // name two units render identically.
-                    if let UnitTag::Named(name) = unit {
-                        ch(out, 'n')?;
-                        text(out, framed, name)?;
-                    }
-                }
-                ch(out, ':')?;
-                render(nodes, framed, *value, out, depth + 1)?;
-            }
-            I::Array { elements } => {
-                ch(out, '[')?;
-                for element in elements {
-                    render(nodes, framed, *element, out, depth + 1)?;
-                    ch(out, ',')?;
-                }
-                ch(out, ']')?;
-            }
-            I::Table { fields } => {
-                ch(out, '{')?;
-                for (name, value) in fields {
-                    text(out, framed, &name.len().to_string())?;
-                    ch(out, ':')?;
-                    text(out, framed, name)?;
-                    ch(out, '=')?;
-                    render(nodes, framed, *value, out, depth + 1)?;
-                    ch(out, ',')?;
-                }
-                ch(out, '}')?;
-            }
-            // A secret's content is never part of any key.
-            I::Secret(_) => text(out, framed, "SECRET")?,
-            I::SecretRef { locator } => {
-                ch(out, 'S')?;
-                render(nodes, framed, *locator, out, depth + 1)?;
-            }
-            I::Ref(target) => {
-                ch(out, 'R')?;
-                render(nodes, framed, *target, out, depth + 1)?;
-            }
-            I::Env { name, default } => {
-                ch(out, 'E')?;
-                text(out, framed, name)?;
-                ch(out, ':')?;
-                if let Some(default) = default {
-                    render(nodes, framed, *default, out, depth + 1)?;
+        I::Bool(value) => {
+            hasher.update(&[0x02]);
+            digest_bool(hasher, *value);
+        }
+        I::Int(value) => {
+            hasher.update(&[0x03]);
+            hasher.update(&value.to_le_bytes());
+        }
+        I::Float(value) => {
+            hasher.update(&[0x04]);
+            hasher.update(&value.to_bits().to_le_bytes());
+        }
+        I::Str(value) => {
+            hasher.update(&[0x05]);
+            digest_str(hasher, value);
+        }
+        I::DurationMs(ms) => {
+            hasher.update(&[0x06]);
+            digest_u64(hasher, *ms);
+        }
+        I::Quantity { unit, .. } => {
+            hasher.update(&[0x07]);
+            hasher.update(&unit.discriminant().to_le_bytes());
+            if framed {
+                if let UnitTag::Named(name) = unit {
+                    digest_str(hasher, name);
                 }
             }
-            I::Ident(name) => {
-                ch(out, 'I')?;
-                text(out, framed, name)?;
+        }
+        I::Array { elements } => {
+            hasher.update(&[0x08]);
+            digest_u64(hasher, elements.len() as u64);
+        }
+        I::Table { fields } => {
+            hasher.update(&[0x09]);
+            digest_u64(hasher, fields.len() as u64);
+            for (name, _) in fields {
+                digest_str(hasher, name);
             }
-            I::Interpolate { parts } => {
-                ch(out, 'T')?;
-                for part in parts {
-                    match part {
-                        crate::ir::InterpPart::Literal(literal) => {
-                            ch(out, 'l')?;
-                            text(out, framed, &literal.len().to_string())?;
-                            ch(out, ':')?;
-                            text(out, framed, literal)?;
-                        }
-                        crate::ir::InterpPart::Expr(expr) => {
-                            ch(out, 'e')?;
-                            render(nodes, framed, *expr, out, depth + 1)?;
-                        }
+        }
+        // A secret's content is never part of any key.
+        I::Secret(_) => {
+            hasher.update(&[0x0a]);
+            digest_str(hasher, "SECRET");
+        }
+        I::SecretRef { .. } => {
+            hasher.update(&[0x0b]);
+        }
+        I::Ref(_) => {
+            hasher.update(&[0x0c]);
+        }
+        I::Env { name, default } => {
+            hasher.update(&[0x0d]);
+            digest_str(hasher, name);
+            digest_bool(hasher, default.is_some());
+        }
+        I::Ident(name) => {
+            hasher.update(&[0x0e]);
+            digest_str(hasher, name);
+        }
+        I::Interpolate { parts } => {
+            hasher.update(&[0x0f]);
+            digest_u64(hasher, parts.len() as u64);
+            for part in parts {
+                match part {
+                    crate::ir::InterpPart::Literal(literal) => {
+                        hasher.update(b"l");
+                        digest_str(hasher, literal);
                     }
-                }
-                ch(out, 't')?;
-            }
-            I::Binary { op, lhs, rhs } => {
-                ch(out, 'b')?;
-                text(out, framed, op.as_str())?;
-                ch(out, ':')?;
-                render(nodes, framed, *lhs, out, depth + 1)?;
-                render(nodes, framed, *rhs, out, depth + 1)?;
-            }
-            I::Unary { op, expr } => {
-                ch(out, 'u')?;
-                text(out, framed, op.as_str())?;
-                ch(out, ':')?;
-                render(nodes, framed, *expr, out, depth + 1)?;
-            }
-            I::Constrained { target, constraint } => {
-                ch(out, 'c')?;
-                // `Constraint`'s Debug redacts enum members and pattern text to
-                // a fixed marker, which would give two different constraints the
-                // same ordering key. Render the payload instead.
-                match constraint {
-                    crate::ir::Constraint::MinMax { min, max } => {
-                        ch(out, 'M')?;
-                        for bound in [min, max] {
-                            match bound {
-                                Some(value) => {
-                                    ch(out, 'v')?;
-                                    text(out, framed, &value.to_string())?;
-                                }
-                                None => ch(out, '-')?,
-                            }
-                        }
-                    }
-                    crate::ir::Constraint::Enum(items) => {
-                        ch(out, 'e')?;
-                        // The encoder sorts enum members; the key must too.
-                        let mut ordered: Vec<&String> = items.iter().collect();
-                        ordered.sort();
-                        for item in ordered {
-                            text(out, framed, &item.len().to_string())?;
-                            ch(out, ':')?;
-                            text(out, framed, item)?;
-                        }
-                    }
-                    crate::ir::Constraint::Pattern(pattern) => {
-                        ch(out, 'p')?;
-                        text(out, framed, &pattern.len().to_string())?;
-                        ch(out, ':')?;
-                        text(out, framed, pattern)?;
-                    }
-                    crate::ir::Constraint::Odd => ch(out, 'o')?,
-                    crate::ir::Constraint::Custom(value) => {
-                        ch(out, 'x')?;
-                        text(out, framed, &value.len().to_string())?;
-                        ch(out, ':')?;
-                        text(out, framed, value)?;
-                    }
-                }
-                render(nodes, framed, *target, out, depth + 1)?;
-            }
-            I::Patch(op) => {
-                ch(out, 'p')?;
-                match op {
-                    crate::ir::PatchOp::Set { path, value } => {
-                        ch(out, 's')?;
-                        text(out, framed, path)?;
-                        render(nodes, framed, *value, out, depth + 1)?;
-                    }
-                    crate::ir::PatchOp::Remove { path } => {
-                        ch(out, 'r')?;
-                        text(out, framed, path)?;
-                    }
-                    crate::ir::PatchOp::Rename { from, to } => {
-                        ch(out, 'n')?;
-                        text(out, framed, from)?;
-                        text(out, framed, to)?;
+                    crate::ir::InterpPart::Expr(_) => {
+                        hasher.update(b"e");
                     }
                 }
             }
-            I::SchemaField(spec) => {
-                // Every id-bearing field is followed; only the type itself and
-                // the textual fields are written.
-                ch(out, 'F')?;
-                match &spec.typ {
-                    crate::ir::TypeSpec::Enum(members) => {
-                        ch(out, 'E')?;
-                        // The encoder sorts members before interning, so the key
-                        // sorts them too: insertion order must not reach the hash.
-                        let mut ordered: Vec<&String> = members.iter().collect();
-                        ordered.sort();
-                        for member in ordered {
-                            text(out, framed, &member.len().to_string())?;
-                            ch(out, ':')?;
-                            text(out, framed, member)?;
-                        }
-                    }
-                    crate::ir::TypeSpec::Table { closed } => {
-                        ch(out, 'T')?;
-                        ch(out, if *closed { '1' } else { '0' })?;
-                    }
-                    other => text(out, framed, &format!("{other:?}"))?,
+        }
+        I::Binary { op, .. } => {
+            hasher.update(&[0x10]);
+            digest_str(hasher, op.as_str());
+        }
+        I::Unary { op, .. } => {
+            hasher.update(&[0x11]);
+            digest_str(hasher, op.as_str());
+        }
+        I::Constrained { constraint, .. } => {
+            hasher.update(&[0x12]);
+            digest_constraint(hasher, constraint);
+        }
+        I::Patch(op) => {
+            hasher.update(&[0x13]);
+            match op {
+                crate::ir::PatchOp::Set { path, .. } => {
+                    hasher.update(b"s");
+                    digest_str(hasher, path);
                 }
-                for (slot, optional) in [
+                crate::ir::PatchOp::Remove { path } => {
+                    hasher.update(b"r");
+                    digest_str(hasher, path);
+                }
+                crate::ir::PatchOp::Rename { from, to } => {
+                    hasher.update(b"n");
+                    digest_str(hasher, from);
+                    digest_str(hasher, to);
+                }
+            }
+        }
+        I::SchemaField(spec) => {
+            hasher.update(&[0x14]);
+            digest_type_spec(hasher, &spec.typ);
+            // Which slots hold a child — the children are folded in
+            // in slot order, so the presence pattern says which slots
+            // the digests belong to.
+            for node in [
+                spec.min,
+                spec.max,
+                spec.min_len,
+                spec.max_len,
+                spec.pattern,
+                spec.default,
+            ] {
+                digest_bool(hasher, node.is_some());
+            }
+            if framed {
+                // `min` and `max` both pointing at the same node used to
+                // render identically.
+                for (slot, node) in [
                     spec.min,
                     spec.max,
                     spec.min_len,
@@ -1683,66 +2233,124 @@ fn content_key_with(nodes: &[crate::ir::Inode], id: NodeId, framed: bool) -> Res
                 ]
                 .into_iter()
                 .enumerate()
-                .flat_map(|(slot, node)| node.map(|node| (slot, node)))
                 {
-                    if framed {
-                        // `min` and `max` both pointing at the same node used to
-                        // render identically.
-                        ch(out, char::from(b'a' + slot as u8))?;
+                    if node.is_some() {
+                        hasher.update(&[b'a' + slot as u8]);
                     }
-                    render(nodes, framed, optional, out, depth + 1)?;
-                }
-                if let Some(spec_text) = &spec.deprecated {
-                    ch(out, '!')?;
-                    text(out, framed, spec_text)?;
                 }
             }
-            I::SchemaTable { fields, closed } => {
-                ch(out, 'G')?;
-                ch(out, if *closed { '1' } else { '0' })?;
-                for (name, value) in fields {
-                    text(out, framed, name)?;
-                    ch(out, '=')?;
-                    render(nodes, framed, *value, out, depth + 1)?;
+            match &spec.deprecated {
+                Some(text) => {
+                    digest_bool(hasher, true);
+                    digest_str(hasher, text);
                 }
+                None => digest_bool(hasher, false),
             }
-            I::SchemaArray { element } => {
-                ch(out, 'A')?;
-                render(nodes, framed, *element, out, depth + 1)?;
+        }
+        I::SchemaTable { fields, closed } => {
+            hasher.update(&[0x15]);
+            digest_bool(hasher, *closed);
+            digest_u64(hasher, fields.len() as u64);
+            for (name, _) in fields {
+                digest_str(hasher, name);
             }
-            I::Semantic { tag, inner } => {
-                ch(out, 'y')?;
-                text(out, framed, tag.as_str())?;
-                render(nodes, framed, *inner, out, depth + 1)?;
+        }
+        I::SchemaArray { .. } => {
+            hasher.update(&[0x16]);
+        }
+        I::Semantic { tag, .. } => {
+            hasher.update(&[0x17]);
+            digest_str(hasher, tag.as_str());
+        }
+        I::ContentAddressed { .. } => {
+            hasher.update(&[0x18]);
+        }
+        I::Blob {
+            hash,
+            size,
+            tainted,
+            media_type,
+            payload,
+        } => {
+            hasher.update(&[0x19]);
+            hasher.update(hash);
+            digest_u64(hasher, *size);
+            digest_bool(hasher, *tainted);
+            digest_str(hasher, media_type);
+            match payload {
+                Some(bytes) => {
+                    digest_bool(hasher, true);
+                    digest_u64(hasher, bytes.len() as u64);
+                }
+                None => digest_bool(hasher, false),
             }
-            I::ContentAddressed { media_type, data } => {
-                ch(out, 'C')?;
-                render(nodes, framed, *media_type, out, depth + 1)?;
-                render(nodes, framed, *data, out, depth + 1)?;
-            }
-            I::Blob {
-                hash,
-                size,
-                tainted,
-                media_type,
-                payload,
-            } => {
-                ch(out, 'B')?;
-                text(out, framed, &crate::ir::hash_hex(hash))?;
-                text(out, framed, &size.to_string())?;
-                ch(out, if *tainted { '1' } else { '0' })?;
-                text(out, framed, media_type)?;
-                if let Some(payload) = payload {
-                    text(out, framed, &payload.len().to_string())?;
+        }
+    }
+}
+
+/// Feed a constraint's payload into a digest hasher, mirroring
+/// `render_key_constraint`: the payload is rendered explicitly (not
+/// through `Debug`, which redacts enum members and pattern text).
+fn digest_constraint(hasher: &mut blake3::Hasher, constraint: &crate::ir::Constraint) {
+    use crate::ir::Constraint as C;
+    match constraint {
+        C::MinMax { min, max } => {
+            hasher.update(b"M");
+            for bound in [min, max] {
+                match bound {
+                    Some(value) => {
+                        hasher.update(b"v");
+                        hasher.update(&value.to_le_bytes());
+                    }
+                    None => {
+                        hasher.update(b"-");
+                    }
                 }
             }
         }
-        Ok(())
+        C::Enum(items) => {
+            hasher.update(b"e");
+            let mut ordered: Vec<&String> = items.iter().collect();
+            ordered.sort();
+            digest_u64(hasher, ordered.len() as u64);
+            for item in ordered {
+                digest_str(hasher, item);
+            }
+        }
+        C::Pattern(pattern) => {
+            hasher.update(b"p");
+            digest_str(hasher, pattern);
+        }
+        C::Odd => {
+            hasher.update(b"o");
+        }
+        C::Custom(value) => {
+            hasher.update(b"x");
+            digest_str(hasher, value);
+        }
     }
+}
 
-    let mut out = String::new();
-    render(nodes, framed, id, &mut out, 0)?;
-    Ok(out)
+/// Feed a schema field's type payload into a digest hasher, mirroring
+/// `render_key_type_spec`.
+fn digest_type_spec(hasher: &mut blake3::Hasher, spec: &crate::ir::TypeSpec) {
+    use crate::ir::TypeSpec as T;
+    match spec {
+        T::Enum(members) => {
+            hasher.update(b"E");
+            let mut ordered: Vec<&String> = members.iter().collect();
+            ordered.sort();
+            digest_u64(hasher, ordered.len() as u64);
+            for member in ordered {
+                digest_str(hasher, member);
+            }
+        }
+        T::Table { closed } => {
+            hasher.update(b"T");
+            digest_bool(hasher, *closed);
+        }
+        other => digest_str(hasher, &format!("{other:?}")),
+    }
 }
 
 /// The primary ordering key. Kept byte-identical to the pre-tie-break form so

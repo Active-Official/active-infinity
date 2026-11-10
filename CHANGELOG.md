@@ -31,7 +31,8 @@
   but fail `validate_canonical`; re-encode them to migrate.
 
 - **Canonical form**: annotation subjects and constraint expressions are numbered
-  in *content* order (a depth-limited, id-free rendering of the subtree) instead
+  in *content* order (an id-free rendering of the subtree — exact up to
+  1 MiB, a Blake3 digest of the same content beyond it; INF-10) instead
   of the order `annotate` was called, so the call order can no longer change the
   bytes. Hash-affecting only for modules whose annotation-only subjects were
   added out of content order.
@@ -62,6 +63,34 @@
   first refusal. Not hash-affecting for any module that decoded before:
   only modules past the ceiling change behaviour, and those never
   round-tripped at default limits.
+
+- **The annotation-subject ordering key accepts every legal module (INF-10).**
+  The key refused any subtree whose render exceeded 1 MiB or whose depth
+  exceeded 256 (`infinity/limit`), although the wire allows strings to
+  64 MiB and depth to 4096 — so a 2 MiB string, or a 300-deep chain, could
+  not be encoded at all once annotated, while the same subtree encoded
+  fine without the annotation. The key is now the exact render while it
+  fits in 1 MiB and a Blake3 digest of the same content past it: a digest
+  bounds the key without bounding the module, and the digest mirrors the
+  render's distinctions exactly (same payload, same framed-only parts,
+  secrets folded to the same constant), so the ordering keeps its
+  injectivity up to a Blake3 collision — the same assumption the format
+  already makes. There is no depth cap on the key any more; depth is
+  bounded upstream by `prepare()` at `Limits::default().max_depth`
+  (4096). The render is iterative (an explicit action stack) instead of
+  recursive, so a legal 4096-deep chain renders without touching the call
+  stack — this also removes the debug stack-overflow abort on annotated
+  chains deeper than ~150 (INF-15's mechanism; INF-15 stays open until
+  its own worker verifies and closes it). The digest is a tree hash,
+  memoised by node id, so a shared subtree is hashed once: a doubling
+  DAG whose flat render is ~2^60 bytes from 60 nodes encodes instead of
+  hanging. The 64 MiB total over all keys (`MAX_ANNOTATION_KEY_BYTES`)
+  is unchanged, so a module with tens of thousands of near-1 MiB
+  subjects is still refused. Not hash-affecting for any module that
+  encoded before: under-ceiling subjects keep their exact-render keys
+  byte for byte, and over-ceiling subjects never encoded at all — so no
+  dialect bump (the canonical-form rules for every previously encodable
+  module are unchanged).
 
 - **Store commits are atomic on filesystems without hard links (XPL-INF-05 /
   INF-L10).** `commit()` fell back to writing the object directly at its

@@ -292,3 +292,49 @@ fn a_cyclic_core_module_is_refused_not_aborted() {
     let error = from_active_core(&core).expect_err("a cycle is refused");
     assert_eq!(error.code(), "infinity/cycle", "{error}");
 }
+
+/// A caller-built `CoreModule` is arbitrary input: a reference chain
+/// deeper than the bridge's own ceiling is a refusal, not a stack abort
+/// (cross-cutting pass 1, #7) — and the INF-09 ceiling in
+/// `from_active_core` is defence-in-depth behind it: the bridge refuses
+/// at 256, long before the 4096 `validate_structure` ceiling could trip.
+///
+/// Arena order matters: the head of the chain is added first, so lowering
+/// it recurses the whole chain (the memo map only short-circuits targets
+/// already lowered). Arena order leaf-first would lower each node once
+/// without recursing at all — see the test below.
+#[test]
+fn a_very_deep_core_module_is_refused_not_aborted() {
+    use active_core::ir::{Module as CoreModule, Node as CoreNode, Value as CoreValue};
+
+    let mut core = CoreModule::new("deep");
+    for index in 0..300 {
+        core.add_node(CoreNode::Ref(active_core::NodeId(index + 1)));
+    }
+    let leaf = core.add_node(CoreNode::Literal(CoreValue::Int(0)));
+    assert_eq!(leaf, active_core::NodeId(300));
+    core.root = Some(active_core::NodeId(0));
+    let error = from_active_core(&core).expect_err("a 300-deep chain is refused");
+    assert_eq!(error.code(), "infinity/limit", "{error}");
+    assert!(error.to_string().contains("bridge depth"), "{error}");
+}
+
+/// The same 300-deep chain, arena order leaf-first: the memo map lowers
+/// each node once without recursing, and the lowered module is 301 deep
+/// — under the 4096 ceiling `from_active_core` enforces (INF-09) — so
+/// lowering (and a later `encode()`) still succeed. Deep-but-legal
+/// modules keep working; only modules past the ceiling are refused.
+#[test]
+fn a_deep_but_legal_core_module_still_lowers() {
+    use active_core::ir::{Module as CoreModule, Node as CoreNode, Value as CoreValue};
+
+    let mut core = CoreModule::new("deep-legal");
+    let mut current = core.add_node(CoreNode::Literal(CoreValue::Int(0)));
+    for _ in 0..300 {
+        current = core.add_node(CoreNode::Ref(current));
+    }
+    core.root = Some(current);
+    let module = from_active_core(&core).expect("a 301-deep module lowers");
+    assert_eq!(module.node_count(), 301);
+    encode(&module).expect("a 301-deep module encodes");
+}

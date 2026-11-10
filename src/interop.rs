@@ -186,7 +186,13 @@ mod bridge {
         for (node, kind) in annotations {
             out.annotate(node, kind);
         }
-        out.validate_structure(u32::MAX as u64, 0)?;
+        // Same ceiling as `prepare()` (INF-09): a `0` here used to mean
+        // "no ceiling", so a deep active-core module lowered fine and then
+        // produced an image the default decoder refused. Lowering now
+        // refuses it first, with `infinity/depth`. (In practice the
+        // bridge's own `MAX_BRIDGE_DEPTH` (256) trips first, so this is
+        // defence-in-depth for the lowering path, not a new refusal.)
+        out.validate_structure(u32::MAX as u64, crate::layout::Limits::default().max_depth)?;
         Ok(out)
     }
 
@@ -828,7 +834,9 @@ pub(crate) fn project_root(module: &InfinityModule) -> Result<Projected> {
     let image = crate::encode(module)?;
     let canonical = crate::decode(&image)?;
     let module = &canonical;
-    module.validate_structure(u32::MAX as u64, 4096)?;
+    // Named, not literal: the same default ceiling `prepare()` enforces
+    // (INF-09). The value is unchanged (4096).
+    module.validate_structure(u32::MAX as u64, crate::layout::Limits::default().max_depth)?;
     let secrets = secret_texts(module);
     let hash_secrets = secret_bytes(module);
     let mut budget = 0usize;

@@ -735,7 +735,11 @@ ceiling applies to **every** root (module root, bindings, annotation subjects) โ
 a second shallow root cannot hide a deep chain. Defaults accept
 real modules (millions of nodes) and refuse bombs; `Limits::strict()` is the
 profile for adversarial surfaces. There is no unlimited mode: `0` in a ceiling
-is rejected with `infinity/invalid-argument`. Canonicalization may add up to one
+is rejected with `infinity/invalid-argument`. Encoding enforces the same
+depth ceiling the decoder does: `prepare()` passes
+`Limits::default().max_depth` (4096), so a module deeper than that is
+refused at encode with `infinity/depth` instead of producing an image the
+default decoder refuses (INF-09). Canonicalization may add up to one
 node per interpolated locator part (promotion, ยง2 step 2); an image produced
 from a module at the node ceiling can therefore exceed it, which the validator
 reports as its node/edge ceiling error.

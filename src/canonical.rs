@@ -34,7 +34,7 @@ use crate::ir::{
     Annotation, AnnotationKind, Constraint, InfinityModule, Inode, InterpPart, NodeId, PatchOp,
     ProvValue, Provenance, SchemaFieldSpec, TypeSpec,
 };
-use crate::layout::canonical_f64;
+use crate::layout::{canonical_f64, Limits};
 use crate::unit::UnitTag;
 
 /// Deduplication key for a type table entry: code plus its aux payload.
@@ -122,7 +122,11 @@ pub(crate) fn is_canonical_nan(value: f64) -> bool {
 
 /// Canonicalize `module` into an index-resolved [`Prepared`] module.
 pub(crate) fn prepare(module: &InfinityModule) -> Result<Prepared> {
-    module.validate_structure(u32::MAX as u64, 0)?;
+    // The depth ceiling is the decoder's default ceiling (INF-09): a `0`
+    // here used to mean "no ceiling", so encode accepted modules deeper
+    // than `Limits::default().max_depth` that the default decoder then
+    // refused. Encode now refuses them first, with `infinity/depth`.
+    module.validate_structure(u32::MAX as u64, Limits::default().max_depth)?;
 
     // 1. Normalize node contents in place (field order, float bits).
     let canonical_nodes: Vec<Inode> = module.nodes().iter().map(normalize).collect();

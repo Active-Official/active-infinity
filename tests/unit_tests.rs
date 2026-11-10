@@ -809,9 +809,13 @@ fn an_empty_module_passes_the_graph_checks() {
     let module = InfinityModule::new();
     module.check_acyclic(0).expect("no nodes, no cycle");
     module.check_depth(4096).expect("no nodes, no depth fault");
-    module
+    // `0` is not "no ceiling" any more (INF-09): it is rejected, for an
+    // empty module exactly as for any other, as `Limits::check` rejects a
+    // zero `max_depth`.
+    let error = module
         .check_depth(0)
-        .expect("zero disables the ceiling, not the checks");
+        .expect_err("check_depth(0) is an argument error, even empty");
+    assert_eq!(error.code(), "infinity/invalid-argument");
     validate(&encode(&module).unwrap()).expect("the empty module validates");
 }
 

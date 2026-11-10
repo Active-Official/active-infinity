@@ -45,6 +45,24 @@
 
 ### Fixed
 
+- **Encode refuses modules deeper than the decoder's ceiling (INF-09).**
+  `validate_structure(max_depth=0)` read `0` as "no ceiling" while
+  `Limits::check` rejected `0` as invalid, and `prepare()` passed `0` —
+  so a 5000-deep chain encoded fine (200,264 bytes) but the default
+  decoder refused it with `infinity/depth`. `check_depth(0)` — and
+  therefore `validate_structure(..., 0)` — is now
+  `Error::InvalidArgument` ("max_depth must be non-zero"), the same
+  message `Limits::check` uses, so one value can never mean two things;
+  `prepare()` passes `Limits::default().max_depth` (4096), so encode
+  refuses what decode refuses, with `infinity/depth` naming the ceiling.
+  The `from_active_core` lowering path takes the same ceiling (its own
+  256-deep bridge cap still trips first), and `project_root` spells its
+  4096 as the same named default instead of a literal. A module at
+  depth 4096 still encodes, validates and decodes; depth 4097 is the
+  first refusal. Not hash-affecting for any module that decoded before:
+  only modules past the ceiling change behaviour, and those never
+  round-tripped at default limits.
+
 - **Store commits are atomic on filesystems without hard links (XPL-INF-05 /
   INF-L10).** `commit()` fell back to writing the object directly at its
   final name when hard links were unavailable (exFAT/FAT32, some network

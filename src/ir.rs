@@ -1856,7 +1856,10 @@ impl InfinityModule {
     /// before it normalizes.
     ///
     /// `max_nodes` and `max_depth` bound the work so a hostile module cannot
-    /// make this function hang or recurse without limit.
+    /// make this function hang or recurse without limit. `max_depth` is a
+    /// hard ceiling: `0` is rejected with `Error::InvalidArgument`, not
+    /// read as "unlimited" (INF-09) — the same value `Limits::check`
+    /// rejects, so the two can never disagree about what `0` means.
     pub fn validate_structure(&self, max_nodes: u64, max_depth: u32) -> Result<(), super::Error> {
         use super::Error;
         if self.nodes.len() as u64 > max_nodes {
@@ -2063,16 +2066,32 @@ impl InfinityModule {
     ///
     /// Each edge is examined exactly once, so a wide or diamond-shaped graph is
     /// linear rather than polynomial.
+    ///
+    /// `max_depth` is a hard ceiling in the same sense as
+    /// `Limits::max_depth`: depth is 1-based (a lone root has depth 1),
+    /// and `0` is rejected with `Error::InvalidArgument` — there is no
+    /// unlimited mode (INF-09). A `0` here used to mean "no ceiling",
+    /// while `Limits::check` rejected `0` as invalid, so one value meant
+    /// two opposite things and `prepare()` passed `0`: encode ran
+    /// unbounded while decode refused anything deeper than
+    /// `Limits::default().max_depth`. Every caller now passes a real
+    /// ceiling; `prepare()` passes `Limits::default().max_depth`, so
+    /// encode refuses what decode refuses.
     pub fn check_depth(&self, max_depth: u32) -> Result<(), super::Error> {
         use super::Error;
+        // Zero is not a ceiling: it is rejected here, for every module
+        // including an empty one, exactly as `Limits::check` rejects a
+        // zero `max_depth` — the ceiling is a property of the argument,
+        // not of the module, so the two can never disagree about what 0
+        // means. Callers that used to pass 0 for "unlimited" must pass a
+        // real ceiling (`Limits::default().max_depth`); there is no
+        // unlimited mode anywhere in the crate.
+        if max_depth == 0 {
+            return Err(Error::InvalidArgument("max_depth must be non-zero"));
+        }
         let count = self.nodes.len();
         if count == 0 {
             return Ok(());
-        }
-        if max_depth == 0 {
-            // Zero means "no depth ceiling", not "no checks": a direct caller
-            // still gets cycle detection.
-            return self.check_acyclic(count as u32);
         }
         let mut incoming = vec![0u32; count];
         for node in &self.nodes {
@@ -2097,7 +2116,10 @@ impl InfinityModule {
         let mut processed = 0u32;
         while let Some(node) = queue.pop_front() {
             processed += 1;
-            let next = depth[node as usize] + 1;
+            // Saturating: `depth` is bounded by the node count, so this
+            // cannot wrap in practice (INF-L13 defence-in-depth); a wrap
+            // would have turned a too-deep chain into a shallow one.
+            let next = depth[node as usize].saturating_add(1);
             for child in self.nodes[node as usize].children() {
                 if next > max_depth {
                     return Err(Error::Depth { limit: max_depth });

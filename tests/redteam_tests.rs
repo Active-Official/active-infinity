@@ -17,6 +17,9 @@ use active_infinity::{
     Section, UnitTag,
 };
 
+#[path = "deep_chain_image.rs"]
+mod deep_chain_image;
+
 fn fixture() -> InfinityModule {
     let mut module = InfinityModule::new();
     let name = module.push(Inode::Str("svc".into()));
@@ -176,14 +179,13 @@ fn threat_blob_substitution_and_tainted_payload() {
 
 #[test]
 fn threat_deep_and_wide_modules_hit_limits_not_the_stack() {
-    // A 100k-node chain: validation must be iterative and bounded.
-    let mut chain = InfinityModule::new();
-    let mut current = chain.push(Inode::Int(0));
-    for _ in 0..20_000 {
-        current = chain.push(Inode::Ref(current));
-    }
-    chain.set_root(Some(current));
-    let bytes = encode(&chain).unwrap();
+    // A 20k-deep chain as wire bytes: validation must be iterative and
+    // bounded. The image is hand-built, not encoded: the encoder refuses
+    // modules deeper than `Limits::default().max_depth` (INF-09), so
+    // `encode()` of this module is itself the refusal the INF-09 tests
+    // pin — the wire image is what lets this test still exercise the
+    // validator's deep-chain path at all.
+    let bytes = deep_chain_image::build_ref_chain_image(20_001);
     let deep = DecodeOpts {
         limits: Limits {
             max_depth: 100_000,

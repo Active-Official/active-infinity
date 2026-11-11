@@ -378,8 +378,13 @@ impl<'a> Validated<'a> {
         if count == 0 {
             return 0;
         }
-        let offset = self.header.span(Section::Strings).offset as usize + count as usize * 4;
-        read_u32(self.buf, offset).unwrap_or(0)
+        // `validate_layout` proved the section end is exactly the heap end
+        // (`section_end` reads this same word), so the length is the validated
+        // end minus the heap start -- no buffer read, and no `unwrap_or(0)`
+        // silently masking a truncated table (INF-L03).
+        let heap = self.header.span(Section::Strings).offset as u64 + (count as u64 + 1) * 4;
+        let len = self.ends[Section::Strings as usize].saturating_sub(heap);
+        len.min(u32::MAX as u64) as u32
     }
 
     /// Borrow string `id` directly from the buffer (zero copy).
@@ -392,9 +397,22 @@ impl<'a> Validated<'a> {
         let start = read_u32(self.buf, table + id as usize * 4)?;
         let end = read_u32(self.buf, table + id as usize * 4 + 4)?;
         let heap = table + (count as usize + 1) * 4;
-        let bytes = &self.buf[heap + start as usize..heap + end as usize];
+        // The range is data-dependent (both ends come from the table), so a
+        // per-call check is what keeps a validator gap -- or a buffer mutated
+        // after validation -- from turning into a panic here (INF-L03).
+        // `buf.get` alone is not enough: an end past the section end but
+        // inside the buffer would silently read the next section's bytes.
+        // `blob()`/`secret()` already check the range against `ends` this way.
+        let start = heap
+            .checked_add(start as usize)
+            .ok_or(Error::StringRef(id))?;
+        let end = heap.checked_add(end as usize).ok_or(Error::StringRef(id))?;
+        if end > self.ends[Section::Strings as usize] as usize {
+            return Err(Error::StringRef(id));
+        }
+        let bytes = self.buf.get(start..end).ok_or(Error::StringRef(id))?;
         std::str::from_utf8(bytes).map_err(|_| Error::Utf8 {
-            offset: (heap + start as usize) as u64,
+            offset: start as u64,
         })
     }
 
@@ -404,11 +422,15 @@ impl<'a> Validated<'a> {
         if count == 0 {
             return 0;
         }
-        let table = self.header.span(Section::Blobs).offset as usize;
-        let last = table + (count as usize - 1) * BLOB_ENTRY_SIZE;
-        let off = read_u32(self.buf, last + 32).unwrap_or(0);
-        let len = read_u32(self.buf, last + 36).unwrap_or(0);
-        off.saturating_add(len)
+        // `validate_layout` proved the section end is exactly the heap end
+        // (`section_end` sums the entry lengths), and `check_blobs` proved
+        // the payloads contiguous from the heap start, so the length is the
+        // validated end minus the heap start -- no buffer read, and no
+        // `unwrap_or(0)` silently masking a truncated table (INF-L03).
+        let heap =
+            self.header.span(Section::Blobs).offset as u64 + count as u64 * BLOB_ENTRY_SIZE as u64;
+        let len = self.ends[Section::Blobs as usize].saturating_sub(heap);
+        len.min(u32::MAX as u64) as u32
     }
 
     /// Read a blob index entry: (hash, offset-in-heap, length).
@@ -422,8 +444,18 @@ impl<'a> Validated<'a> {
         }
         let offset =
             self.header.span(Section::Blobs).offset as usize + id as usize * BLOB_ENTRY_SIZE;
+        let end = offset.checked_add(32).ok_or(Error::Blob {
+            id,
+            reason: "entry out of range",
+        })?;
+        // Same unchecked-slice class as `hash_entry` (INF-L03): the range is
+        // index-derived and layout-validated, so this is defence in depth --
+        // a validator gap must report `Error::Blob`, never panic.
         let mut hash = [0u8; 32];
-        hash.copy_from_slice(&self.buf[offset..offset + 32]);
+        hash.copy_from_slice(self.buf.get(offset..end).ok_or(Error::Blob {
+            id,
+            reason: "entry out of range",
+        })?);
         Ok((
             hash,
             read_u32(self.buf, offset + 32)?,
@@ -581,8 +613,18 @@ impl<'a> Validated<'a> {
             });
         }
         let offset = self.header.span(Section::Hashes).offset as usize + index as usize * 32;
+        let end = offset.checked_add(32).ok_or(Error::Offset {
+            section: "hashes",
+            offset: offset as u64,
+        })?;
+        // `validate_layout` proved the table is inside the buffer, so this
+        // `get` is defence in depth (INF-L03): a validator gap must report
+        // `Error::Offset`, never panic -- the same shape `node()` already uses.
         let mut hash = [0u8; 32];
-        hash.copy_from_slice(&self.buf[offset..offset + 32]);
+        hash.copy_from_slice(self.buf.get(offset..end).ok_or(Error::Offset {
+            section: "hashes",
+            offset: offset as u64,
+        })?);
         Ok(hash)
     }
 

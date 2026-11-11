@@ -1232,6 +1232,95 @@ pub(crate) fn redact_within(text: &str, secrets: &[String], budget: &mut usize) 
     Ok(delete_secrets(text, secrets))
 }
 
+/// Redact secret bytes out of a raw payload, charging one shared scan budget.
+///
+/// Byte-level sibling of [`redact_within`]: a payload that is not UTF-8
+/// cannot be redacted as text, so the secrets are replaced in the raw bytes
+/// instead and the caller hashes the result (INF-MERGE-02). The hash of
+/// redacted bytes never contains secret material, and two payloads that
+/// differ only in secret bytes redact alike -- the same rule the UTF-8
+/// branch applies with [`redact_text`]. The budget charge mirrors
+/// [`crate::canonical::redaction_cost`] (one scan per secret, eight passes), and exhaustion
+/// fails closed with the same limit error as [`redact_within`].
+pub(crate) fn redact_bytes_within(
+    payload: &[u8],
+    secrets: &[Vec<u8>],
+    budget: &mut usize,
+) -> Result<Vec<u8>> {
+    let cost = secrets
+        .len()
+        .saturating_mul(payload.len().max(1))
+        .saturating_mul(8);
+    if cost > *budget {
+        return Err(Error::Limit {
+            kind: "projection redaction scan bytes",
+            limit: PROJECTION_REDACTION_BUDGET as u64,
+        });
+    }
+    *budget -= cost;
+    Ok(redact_bytes(payload, secrets))
+}
+
+/// Replace every occurrence of each secret in `payload` with the marker.
+///
+/// The loop mirrors [`crate::canonical::redact_text`]: longest first, then
+/// lexicographic, so the result does not depend on the order of the secret
+/// table; a replacement can join the bytes around it into a new secret, so a
+/// pass repeats until the payload is clean (at most eight passes, then the
+/// whole payload collapses to the marker). When the marker itself contains a
+/// secret, no replacement is safe and a payload holding a secret collapses
+/// to the empty string instead. The working buffer is zeroed on drop, like
+/// the text path's, because it holds secret bytes until they are replaced.
+fn redact_bytes(payload: &[u8], secrets: &[Vec<u8>]) -> Vec<u8> {
+    let marker = hiding_placeholder_text(secrets);
+    let mut out = zeroize::Zeroizing::new(payload.to_vec());
+    for _ in 0..8 {
+        let mut matched: Vec<&Vec<u8>> = secrets
+            .iter()
+            .filter(|secret| !secret.is_empty() && contains_bytes(&out, secret))
+            .collect();
+        if matched.is_empty() {
+            return out.to_vec();
+        }
+        if marker.is_empty() {
+            return Vec::new();
+        }
+        matched.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
+        for secret in matched {
+            out = zeroize::Zeroizing::new(replace_bytes(&out, secret, marker.as_bytes()));
+        }
+    }
+    marker.as_bytes().to_vec()
+}
+
+/// Whether `needle` occurs anywhere in `haystack` (an empty needle never
+/// matches: replacing it would be meaningless).
+fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
+    !needle.is_empty()
+        && haystack.len() >= needle.len()
+        && haystack
+            .windows(needle.len())
+            .any(|window| window == needle)
+}
+
+/// Replace every non-overlapping occurrence of `needle` in `haystack` with
+/// `replacement`, left to right -- the byte equivalent of `str::replace`.
+fn replace_bytes(haystack: &[u8], needle: &[u8], replacement: &[u8]) -> Vec<u8> {
+    assert!(!needle.is_empty(), "replace_bytes: empty needle");
+    let mut out = Vec::with_capacity(haystack.len());
+    let mut rest = haystack;
+    while let Some(pos) = rest
+        .windows(needle.len())
+        .position(|window| window == needle)
+    {
+        out.extend_from_slice(&rest[..pos]);
+        out.extend_from_slice(replacement);
+        rest = &rest[pos + needle.len()..];
+    }
+    out.extend_from_slice(rest);
+    out
+}
+
 /// Remove every secret occurrence until the text is clean.
 ///
 /// Used when [`SECRET_MARKER`] itself contains a secret and therefore cannot be

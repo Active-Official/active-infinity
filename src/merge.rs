@@ -26,7 +26,9 @@
 //! one side only is taken, and a component changed differently on both sides is
 //! a conflict. Free text in metadata is compared **redacted** (secret literals
 //! are replaced by the marker first), so a metadata comparison cannot be used
-//! to guess a secret.
+//! to guess a secret. A binary extension payload is hashed over its redacted
+//! bytes (INF-MERGE-02), so the same rule holds where there is no text to
+//! redact.
 //!
 //! Work is bounded by a node budget: every subtree comparison materialises only
 //! the reachable cone of that subtree (never the whole module), imported
@@ -735,8 +737,10 @@ impl Ctx<'_> {
         }
 
         // Extensions: one set, sorted by tag, compared through redacted
-        // payloads. A payload that is not text cannot be redacted, so a set
-        // holding one next to a secret is never compared: it conflicts.
+        // payloads. A payload that is not text is redacted at the byte level
+        // and hashed (INF-MERGE-02), so a set holding one next to a secret
+        // compares like any other; only a redaction-budget exhaustion still
+        // refuses the comparison and conflicts.
         let mut extensions_budget = self.redaction.get();
         let left_key = extensions_key(self.left, &mut extensions_budget);
         let right_key = extensions_key(self.right, &mut extensions_budget);
@@ -1153,23 +1157,46 @@ fn provenance_key(
 }
 
 /// A deterministic rendering of the extension set with payloads redacted when
-/// they are text.
+/// they are text, and hashed over their redacted bytes when they are not.
 ///
-/// `None` means the set cannot be compared safely: a secret is present and a
-/// payload is not UTF-8, so redaction would not be faithful.
+/// `None` means the set cannot be compared within the redaction budget: the
+/// scan budget is exhausted, so the caller fails closed with a conflict.
+/// (INF-MERGE-02 used to return `None` here for every non-UTF-8 payload next
+/// to a secret, which made any such module unmergeable even for a no-op
+/// merge; the binary arm below is what replaced that refusal.)
 fn extensions_key(module: &InfinityModule, budget: &mut usize) -> Option<String> {
     let secrets = crate::interop::secret_texts(module);
     let mut extensions = module.extensions().to_vec();
     extensions.sort_by_key(|(tag, _)| *tag);
     let mut out = String::new();
+    // Raw secret bytes, computed once and only when a payload is not UTF-8:
+    // the text path works on the lossy `secret_texts`, which would never
+    // match a non-UTF-8 secret against its own copy.
+    let mut byte_secrets: Option<Vec<Vec<u8>>> = None;
     for (tag, payload) in extensions {
         out.push_str(&format!("{tag}:{}:", payload.len()));
         if secrets.is_empty() {
             out.push_str(&hex(&payload));
         } else {
-            let text = std::str::from_utf8(&payload).ok()?;
-            let text = crate::interop::redact_within(text, &secrets, budget).ok()?;
-            out.push_str(&format!("{}:{}", text.len(), text));
+            match std::str::from_utf8(&payload) {
+                Ok(text) => {
+                    let text = crate::interop::redact_within(text, &secrets, budget).ok()?;
+                    out.push_str(&format!("{}:{}", text.len(), text));
+                }
+                Err(_) => {
+                    // Not UTF-8 (INF-MERGE-02): redact at the byte level and
+                    // hash the result. The hash is over the redacted bytes,
+                    // so the key never holds secret material, and two payloads
+                    // that differ only in secret bytes redact alike -- the
+                    // same rule the text arm applies. `H:` keeps the hash arm
+                    // unambiguous against the `len:text` arm above.
+                    let raw_secrets =
+                        byte_secrets.get_or_insert_with(|| crate::interop::secret_bytes(module));
+                    let redacted =
+                        crate::interop::redact_bytes_within(&payload, raw_secrets, budget).ok()?;
+                    out.push_str(&format!("H:{}", hex(blake3::hash(&redacted).as_bytes())));
+                }
+            }
         }
         out.push(';');
     }

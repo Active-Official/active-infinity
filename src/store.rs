@@ -219,21 +219,29 @@ impl Store {
     /// like an absent one (see `store_read_fault`): the ceiling is a
     /// property of the handle, and a stricter handle never learns an
     /// object's size from the error code.
+    ///
+    /// Every failure answers with the one generic message "object is absent
+    /// or unreadable" (INF-L09): an absent name, a malformed planted file,
+    /// a non-file at the object path, an oversized planted file and a valid
+    /// image stored under another hash's name are indistinguishable. The
+    /// read, validation and hash-check faults all collapse to that message,
+    /// so a prober who can plant (or observe) a file under a chosen name
+    /// learns nothing about what the name holds.
     pub fn get(&self, hash: &[u8; 32]) -> Result<Vec<u8>> {
         // One answer for "no such object": a planted file larger than the
         // ceiling must not be distinguishable from an absent one by its code
         // (cross-cutting pass 1, #9).
         let image =
             read_bounded(&self.path_for(hash), self.object_limit()).map_err(store_read_fault)?;
-        // Every fault a planted object can raise is the store's own code: the
-        // path is derived from the caller's hash, so a validation code would
-        // distinguish an absent name from a malformed one (pass 2, #9).
-        let meta = validate_canonical(&image, self.limits).map_err(|error| match error {
-            Error::Store(_) => error,
-            _ => Error::Store("object is absent or unreadable"),
-        })?;
+        // Every fault a planted object can raise collapses to the one
+        // generic message: the path is derived from the caller's hash, so a
+        // validation code would distinguish an absent name from a malformed
+        // one (pass 2, #9), and a `Store` error passed through here would
+        // do the same if validation ever gained one (INF-L09).
+        let meta = validate_canonical(&image, self.limits)
+            .map_err(|_| Error::Store("object is absent or unreadable"))?;
         if &meta.content_hash != hash {
-            return Err(Error::Store("object does not match its key"));
+            return Err(Error::Store("object is absent or unreadable"));
         }
         Ok(image)
     }
@@ -865,16 +873,19 @@ fn hex32(hash: &[u8; 32]) -> String {
     out
 }
 
-/// Report any object-read fault as the store's own code.
+/// Report any object-read fault as the one generic store message.
 ///
 /// The path is derived from a hash the caller chose, so an over-sized planted
 /// object would otherwise answer `infinity/limit` and tell a prober that the
-/// name exists.
-fn store_read_fault(error: Error) -> Error {
-    match error {
-        Error::Store(_) => error,
-        _ => Error::Store("object is absent or unreadable"),
-    }
+/// name exists. The same holds for the distinct messages `read_bounded`
+/// itself produces ("object not found", "object is not a regular file",
+/// "cannot inspect object", "cannot read object", "object changed while it
+/// was opened"): passing any of them through would let a prober distinguish
+/// an absent name from a planted file (INF-L09). Every fault collapses to
+/// "object is absent or unreadable", so `get` has exactly one failure
+/// answer whatever the name holds.
+fn store_read_fault(_error: Error) -> Error {
+    Error::Store("object is absent or unreadable")
 }
 
 #[cfg(test)]

@@ -26,17 +26,18 @@ use crate::ir::{
     TypeSpec,
 };
 use crate::layout::{
-    align8, dialect_hash, EncodeOpts, Header, Section, SectionSpan, ANN_KIND_AI_IMMUTABLE,
-    ANN_KIND_CONSTRAINT, ANN_KIND_INTENT, AUX_CONSTRAINT_CUSTOM, AUX_CONSTRAINT_ENUM_ITEM,
-    AUX_CONSTRAINT_MAX, AUX_CONSTRAINT_MIN, AUX_CONSTRAINT_PATTERN, AUX_PATCH_PATH,
-    AUX_PATCH_RENAME_TO, AUX_PATCH_VALUE, AUX_SCHEMA_DEFAULT, AUX_SCHEMA_DEPRECATED,
-    AUX_SCHEMA_MAX, AUX_SCHEMA_MAX_LEN, AUX_SCHEMA_MIN, AUX_SCHEMA_MIN_LEN, AUX_SCHEMA_PATTERN,
-    AUX_TYPE_ENUM_ITEM, AUX_TYPE_TABLE, CONSTRAINT_KIND_CUSTOM, CONSTRAINT_KIND_ENUM,
-    CONSTRAINT_KIND_MIN_MAX, CONSTRAINT_KIND_ODD, CONSTRAINT_KIND_PATTERN, EXT_DIR_SIZE,
-    FLAG_ANNOTATIONS, FLAG_CANONICAL, FLAG_EXTENSIONS, FLAG_PROVENANCE, FLAG_SECRETS,
-    FLAG_STREAMED, FORMAT_MAJOR, FORMAT_MINOR, HEADER_SIZE, NODE_FLAG_0, NODE_FLAG_1,
-    NODE_RECORD_SIZE, PART_EXPR, PART_LITERAL, PATCH_KIND_REMOVE, PATCH_KIND_RENAME,
-    PATCH_KIND_SET, PROV_HEADER_SIZE,
+    align8, dialect_hash, EncodeOpts, Header, Section, SectionSpan, ANNOTATION_SIZE,
+    ANN_KIND_AI_IMMUTABLE, ANN_KIND_CONSTRAINT, ANN_KIND_INTENT, AUX_CONSTRAINT_CUSTOM,
+    AUX_CONSTRAINT_ENUM_ITEM, AUX_CONSTRAINT_MAX, AUX_CONSTRAINT_MIN, AUX_CONSTRAINT_PATTERN,
+    AUX_PATCH_PATH, AUX_PATCH_RENAME_TO, AUX_PATCH_VALUE, AUX_SCHEMA_DEFAULT,
+    AUX_SCHEMA_DEPRECATED, AUX_SCHEMA_MAX, AUX_SCHEMA_MAX_LEN, AUX_SCHEMA_MIN, AUX_SCHEMA_MIN_LEN,
+    AUX_SCHEMA_PATTERN, AUX_SIZE, AUX_TYPE_ENUM_ITEM, AUX_TYPE_TABLE, BLOB_ENTRY_SIZE, CHILD_SIZE,
+    CONSTRAINT_KIND_CUSTOM, CONSTRAINT_KIND_ENUM, CONSTRAINT_KIND_MIN_MAX, CONSTRAINT_KIND_ODD,
+    CONSTRAINT_KIND_PATTERN, EDGE_SIZE, EXT_DIR_SIZE, FIELD_SIZE, FLAG_ANNOTATIONS, FLAG_CANONICAL,
+    FLAG_EXTENSIONS, FLAG_PROVENANCE, FLAG_SECRETS, FLAG_STREAMED, FORMAT_MAJOR, FORMAT_MINOR,
+    HEADER_SIZE, NODE_FLAG_0, NODE_FLAG_1, NODE_RECORD_SIZE, NUM_SIZE, PART_EXPR, PART_LITERAL,
+    PART_SIZE, PATCH_KIND_REMOVE, PATCH_KIND_RENAME, PATCH_KIND_SET, PROV_ENTRY_SIZE,
+    PROV_HEADER_SIZE, SECRET_ENTRY_SIZE, TYPE_SIZE, UNIT_SIZE,
 };
 
 /// One wire node record.
@@ -115,45 +116,243 @@ pub fn encode_into_with(
         module.check_reachable()?;
     }
     let prepared = prepare(module)?;
-    // Fail fast when the payloads alone cannot fit the 4 GiB address space.
-    // The final `u32::try_from(image.len())` still guards the exact size; this
-    // check runs before the encoder allocates the heaps.
-    estimate_image_size(&prepared)?;
+    // The exact-size check runs inside `encode_prepared_into` (INF-L05):
+    // it needs the built node tables, so it cannot run here, but it still
+    // runs before the encoder allocates the image itself.
     encode_prepared_into(&prepared, opts, out)
 }
 
-/// Reject an image whose payloads cannot fit the u32 offset space before
-/// allocating it.
-fn estimate_image_size(prepared: &crate::canonical::Prepared) -> Result<()> {
+/// The scalar inputs to the exact image-size computation (INF-L05).
+///
+/// Every field is a count or a byte sum in `u64`, so the computation below
+/// needs no table allocation of its own: the boundary tests feed it counts
+/// past 4 GiB directly, without building a multi-gigabyte module.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct ImageSizeCounts {
+    /// Node records (`Section::Nodes`).
+    nodes: u64,
+    /// Child ids (`Section::Children`).
+    children: u64,
+    /// Table/schema-table fields (`Section::Fields`).
+    fields: u64,
+    /// Interpolation parts (`Section::Parts`).
+    parts: u64,
+    /// Derived edges (`Section::Edges`).
+    edges: u64,
+    /// Annotations (`Section::Annotations`).
+    annotations: u64,
+    /// Aux entries: node-table aux plus every type's aux (`Section::Aux`).
+    aux: u64,
+    /// Type records (`Section::Types`).
+    types: u64,
+    /// Unit records (`Section::Units`).
+    units: u64,
+    /// Number records (`Section::Numbers`).
+    numbers: u64,
+    /// Hash records (`Section::Hashes`).
+    hashes: u64,
+    /// Bindings, excluding the root entry the wire always writes
+    /// (`Section::Bindings`).
+    bindings: u64,
+    /// Number of interned strings (`Section::Strings`).
+    strings: u64,
+    /// Sum of the interned string lengths in bytes.
+    string_bytes: u64,
+    /// Blob table entries (`Section::Blobs`).
+    blobs: u64,
+    /// Payload bytes actually emitted: only `has_payload` blobs carry bytes
+    /// in the image; a detached blob contributes its 40-byte entry alone.
+    blob_payload_bytes: u64,
+    /// Secret heap entries (`Section::Secrets`).
+    secrets: u64,
+    /// Sum of the secret lengths in bytes.
+    secret_bytes: u64,
+    /// Extension directory entries (`Section::Extensions`).
+    extensions: u64,
+    /// Sum of the extension payload lengths, each rounded up to 8 bytes
+    /// (the encoder pads every payload, `encode_extensions`).
+    extension_bytes: u64,
+    /// Provenance block bytes: `0` when there is no provenance, else
+    /// `PROV_HEADER_SIZE + PROV_ENTRY_SIZE * entries`.
+    provenance_bytes: u64,
+}
+
+/// Add `amount` to `total`, refusing with [`Error::TooLarge`] on overflow.
+///
+/// An overflow here means the size is astronomically past the u32 offset
+/// space, so refusing is correct even though the arithmetic itself wrapped.
+fn size_add(total: u64, amount: u64) -> Result<u64> {
+    total.checked_add(amount).ok_or(Error::TooLarge)
+}
+
+/// Multiply `count` by `stride`, refusing with [`Error::TooLarge`] on
+/// overflow (same reasoning as [`size_add`]).
+fn size_mul(count: u64, stride: u64) -> Result<u64> {
+    count.checked_mul(stride).ok_or(Error::TooLarge)
+}
+
+/// Padding bytes `pad` appends after a section of `len` bytes: every section
+/// starts on an 8-byte boundary, so a section's pad depends only on its own
+/// length.
+fn size_pad(len: u64) -> u64 {
+    (8 - len % 8) % 8
+}
+
+/// Compute the exact size, in bytes, of the image `encode_prepared_into`
+/// is about to write, or refuse with [`Error::TooLarge`] when it cannot fit
+/// the u32 offset space (INF-L05).
+///
+/// This replaces `estimate_image_size`, which summed only nodes, types,
+/// units, numbers, hashes, bindings, strings, blobs, secrets and extensions
+/// — a lower bound that omitted children (64 MiB at the decode limits, and
+/// unbounded on encode, where `prepare()` enforces no table limits),
+/// fields (256 MiB), parts, edges (128 MiB), annotations, aux (128 MiB)
+/// and the provenance block. Its stated purpose — "fail fast … before the
+/// encoder allocates the heaps" — therefore failed for images whose omitted
+/// tables push the true size past 4 GiB: the encoder allocated most of 4 GiB
+/// before the final `u32::try_from(image.len())` failed with `TooLarge`.
+///
+/// The size is now exact, not an estimate, because every section's byte
+/// count is a fixed function of the built tables and the prepared module,
+/// and every section starts 8-byte aligned (the header is 224 bytes and
+/// each section is padded back to alignment before the next starts):
+///
+/// * nodes `32 * nodes`; children `4 * children` plus its pad; fields
+///   `16 * fields`; parts `8 * parts`; edges `8 * edges`;
+/// * strings: `sum(len) + 4 * (strings + 1)` plus its pad when non-empty
+///   (one offset per string plus the trailing heap length), `0` when empty;
+/// * blobs: `40 * blobs +` emitted payload bytes, plus its pad;
+/// * annotations `16 * annotations`; provenance `96 + 16 * entries` when
+///   present, else `0`;
+/// * extensions: `16 * extensions + sum(align8(payload len))`;
+/// * units `8 * units`; types `16 * types`; aux `8 * aux`; numbers
+///   `8 * numbers`;
+/// * secrets: `sum(len + 8)` plus its pad;
+/// * hashes `32 * hashes`; bindings `8 * (bindings + 1)` — the wire always
+///   writes the root entry first, even with no bindings.
+///
+/// The old estimate also under-counted three counted sections by a few
+/// bytes each (bindings missed the root entry, strings missed the trailing
+/// heap length, extensions missed per-payload alignment padding) and
+/// over-counted detached blobs (it charged `payload_len` for every blob,
+/// but only `has_payload` blobs emit payload bytes); all three are exact
+/// now. Only the four sections whose entry size is not a multiple of 8 —
+/// children, strings, blobs, secrets — can carry a pad at all, so the pad
+/// terms are exact too, and the total is always a multiple of 8.
+///
+/// The check runs after `build_node_tables` — the tables are what the
+/// omitted sizes are read from — but before `image` is cleared or reserved,
+/// so a too-large module still fails before the encoder allocates the
+/// image. Building the tables is not the allocation this guards: the tables
+/// are proportional to the module the caller already holds, while the image
+/// would be a second ~4 GiB. The final `u32::try_from(image.len())` in
+/// `encode_prepared_into` stays as the exact-size backstop.
+fn exact_image_size(prepared: &Prepared, tables: &NodeTables, edges: &[(u32, u32)]) -> Result<u64> {
+    let mut counts = ImageSizeCounts {
+        nodes: prepared.nodes.len() as u64,
+        children: tables.children.len() as u64,
+        fields: tables.fields.len() as u64,
+        parts: tables.parts.len() as u64,
+        edges: edges.len() as u64,
+        annotations: prepared.annotations.len() as u64,
+        aux: tables.aux.len() as u64,
+        types: prepared.types.len() as u64,
+        units: prepared.units.len() as u64,
+        numbers: prepared.numbers.len() as u64,
+        hashes: prepared.hashes.len() as u64,
+        bindings: prepared.bindings.len() as u64,
+        strings: prepared.strings.len() as u64,
+        blobs: prepared.blobs.len() as u64,
+        extensions: prepared.extensions.len() as u64,
+        ..ImageSizeCounts::default()
+    };
+    for text in &prepared.strings {
+        counts.string_bytes = size_add(counts.string_bytes, text.len() as u64)?;
+    }
+    for blob in &prepared.blobs {
+        if blob.has_payload {
+            counts.blob_payload_bytes = size_add(counts.blob_payload_bytes, blob.payload_len)?;
+        }
+    }
+    for bytes in prepared.secret_bytes() {
+        counts.secrets = size_add(counts.secrets, 1)?;
+        counts.secret_bytes = size_add(counts.secret_bytes, bytes.len() as u64)?;
+    }
+    for (_, payload) in &prepared.extensions {
+        counts.extension_bytes = size_add(counts.extension_bytes, align8(payload.len() as u64))?;
+    }
+    for prepared_type in &prepared.types {
+        counts.aux = size_add(counts.aux, prepared_type.aux.len() as u64)?;
+    }
+    counts.provenance_bytes = match &prepared.provenance {
+        Some(prov) => size_add(
+            PROV_HEADER_SIZE as u64,
+            size_mul(prov.entries.len() as u64, PROV_ENTRY_SIZE as u64)?,
+        )?,
+        None => 0,
+    };
+    image_size_from_counts(&counts)
+}
+
+/// The pure arithmetic half of [`exact_image_size`]: the exact image size
+/// for scalar counts, with no table allocation.
+///
+/// Kept separate so the boundary tests can feed it counts past 4 GiB
+/// directly — building a real multi-gigabyte module to exercise the same
+/// path would allocate gigabytes on the test machine for no extra signal:
+/// the counts are the function's whole input, and `exact_image_size` above
+/// is a mechanical transcription of the tables into counts.
+fn image_size_from_counts(counts: &ImageSizeCounts) -> Result<u64> {
     let mut total: u64 = HEADER_SIZE as u64;
-    total = total.saturating_add(prepared.nodes.len() as u64 * NODE_RECORD_SIZE as u64);
-    total = total.saturating_add(prepared.types.len() as u64 * 16);
-    total = total.saturating_add(prepared.units.len() as u64 * 8);
-    total = total.saturating_add(prepared.numbers.len() as u64 * 8);
-    total = total.saturating_add(prepared.hashes.len() as u64 * 32);
-    total = total.saturating_add(prepared.bindings.len() as u64 * 8);
-    total = total.saturating_add(
-        prepared
-            .strings
-            .iter()
-            .fold(0u64, |sum, text| sum.saturating_add(text.len() as u64 + 4)),
-    );
-    total = total.saturating_add(
-        prepared
-            .blobs
-            .iter()
-            .fold(0u64, |sum, blob| sum.saturating_add(blob.payload_len + 40)),
-    );
-    total = total.saturating_add(prepared.secret_bytes().fold(0u64, |sum, bytes| {
-        sum.saturating_add(bytes.len() as u64 + 8)
-    }));
-    total = total.saturating_add(prepared.extensions.iter().fold(0u64, |sum, (_, payload)| {
-        sum.saturating_add(payload.len() as u64 + 16)
-    }));
+    total = size_add(total, size_mul(counts.nodes, NODE_RECORD_SIZE as u64)?)?;
+    let children = size_mul(counts.children, CHILD_SIZE as u64)?;
+    total = size_add(total, size_add(children, size_pad(children))?)?;
+    total = size_add(total, size_mul(counts.fields, FIELD_SIZE as u64)?)?;
+    total = size_add(total, size_mul(counts.parts, PART_SIZE as u64)?)?;
+    total = size_add(total, size_mul(counts.edges, EDGE_SIZE as u64)?)?;
+    if counts.strings > 0 {
+        let strings = size_add(
+            counts.string_bytes,
+            size_mul(
+                size_add(counts.strings, 1)?,
+                4, // one u32 offset per string, plus the trailing heap length
+            )?,
+        )?;
+        total = size_add(total, size_add(strings, size_pad(strings))?)?;
+    }
+    let blobs = size_add(
+        size_mul(counts.blobs, BLOB_ENTRY_SIZE as u64)?,
+        counts.blob_payload_bytes,
+    )?;
+    total = size_add(total, size_add(blobs, size_pad(blobs))?)?;
+    total = size_add(total, size_mul(counts.annotations, ANNOTATION_SIZE as u64)?)?;
+    total = size_add(total, counts.provenance_bytes)?;
+    total = size_add(
+        total,
+        size_add(
+            size_mul(counts.extensions, EXT_DIR_SIZE as u64)?,
+            counts.extension_bytes,
+        )?,
+    )?;
+    total = size_add(total, size_mul(counts.units, UNIT_SIZE as u64)?)?;
+    total = size_add(total, size_mul(counts.types, TYPE_SIZE as u64)?)?;
+    total = size_add(total, size_mul(counts.aux, AUX_SIZE as u64)?)?;
+    total = size_add(total, size_mul(counts.numbers, NUM_SIZE as u64)?)?;
+    let secrets = size_add(
+        size_mul(counts.secrets, SECRET_ENTRY_SIZE as u64)?,
+        counts.secret_bytes,
+    )?;
+    total = size_add(total, size_add(secrets, size_pad(secrets))?)?;
+    // One 32-byte Blake3 hash per entry; there is no HASH_SIZE constant.
+    total = size_add(total, size_mul(counts.hashes, 32)?)?;
+    total = size_add(
+        total,
+        size_mul(size_add(counts.bindings, 1)?, 8)?, // root entry + one per binding
+    )?;
     if total > u32::MAX as u64 {
         return Err(Error::TooLarge);
     }
-    Ok(())
+    Ok(total)
 }
 
 /// Encode a batch, reusing the capacity of every output buffer.
@@ -210,6 +409,15 @@ pub(crate) fn encode_prepared_into(
 
     let tables = build_node_tables(prepared)?;
 
+    // INF-L05: the exact size is computed from the built tables (children,
+    // fields, parts, aux, edges, provenance) before the image is allocated,
+    // so a module whose true size cannot fit the u32 offset space fails
+    // here instead of after allocating most of 4 GiB. The edges are derived
+    // here — moved up from the edges section, where they were previously
+    // computed — because the size check needs their count.
+    let edges = derive_edges(prepared);
+    exact_image_size(prepared, &tables, &edges)?;
+
     let capacity = HEADER_SIZE + prepared.nodes.len() * NODE_RECORD_SIZE;
     image.clear();
     image.reserve(capacity);
@@ -264,7 +472,7 @@ pub(crate) fn encode_prepared_into(
     pad(image);
 
     // --- edges (derived) ----------------------------------------------
-    let edges = derive_edges(prepared);
+    // (Derived above, before the INF-L05 size check, which needs the count.)
     set_span(&mut header, image.as_slice(), Section::Edges, edges.len())?;
     for (from, to) in &edges {
         image.extend_from_slice(&from.to_le_bytes());
@@ -1002,4 +1210,389 @@ fn encode_extensions(
         pad(image);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ir::{ProvEntry, ProvValue, Provenance, SchemaFieldSpec, SecretBytes, TypeSpec};
+    use crate::unit::UnitTag;
+
+    /// Estimated size of `module` through the same path `encode` takes:
+    /// prepare, build the node tables, derive the edges, exact-size.
+    fn estimated_len(module: &InfinityModule) -> u64 {
+        let prepared = prepare(module).expect("test module must prepare");
+        let tables = build_node_tables(&prepared).expect("test module must build tables");
+        let edges = derive_edges(&prepared);
+        exact_image_size(&prepared, &tables, &edges).expect("test module must fit")
+    }
+
+    /// Assert the estimate equals the emitted image length, and that the
+    /// image's own header total agrees with both.
+    fn assert_estimate_is_exact(module: &InfinityModule) {
+        let image = encode(module).expect("test module must encode");
+        let estimated = estimated_len(module);
+        assert_eq!(
+            estimated,
+            image.len() as u64,
+            "exact size {estimated} != emitted image length {}",
+            image.len()
+        );
+        let header = Header::parse(&image).expect("encoded image must parse");
+        assert_eq!(
+            header.total_size,
+            image.len() as u64,
+            "header total_size {} != emitted image length {}",
+            header.total_size,
+            image.len()
+        );
+    }
+
+    /// A module that exercises every section the encoder emits, with odd
+    /// counts/lengths wherever a section can carry alignment padding, so a
+    /// missed pad term shows up as an exactness failure: 19 children
+    /// (76 bytes + 4 pad), 3 table fields, 3 interpolation parts, 5
+    /// constrained + 3 patch nodes (aux), 3 annotations, a 4-entry
+    /// provenance block, extensions of length 1/7/8/9 (align8), a
+    /// payload blob plus a detached blob, a 7-byte secret (pad), a named
+    /// unit, an enum type (type aux), 2 bindings plus the root entry.
+    fn kitchen_sink_module() -> InfinityModule {
+        let mut module = InfinityModule::new();
+        let int_a = module.push(Inode::Int(7));
+        let int_b = module.push(Inode::Int(-3));
+        let float = module.push(Inode::Float(1.5));
+        let boolean = module.push(Inode::Bool(true));
+        let duration = module.push(Inode::DurationMs(1_234));
+        let str_a = module.push(Inode::Str("a".into()));
+        let str_b = module.push(Inode::Str("ab".into()));
+        let str_c = module.push(Inode::Str("abcde".into()));
+        let table = module.push(Inode::Table {
+            fields: vec![
+                ("one".into(), int_a),
+                ("two".into(), str_a),
+                ("three".into(), int_b),
+            ],
+        });
+        let schema_field = module.push(Inode::SchemaField(SchemaFieldSpec {
+            typ: TypeSpec::Enum(vec!["red".into(), "blue".into()]),
+            min: Some(int_a),
+            max: Some(int_b),
+            min_len: Some(int_a),
+            max_len: Some(int_b),
+            pattern: Some(str_b),
+            default: Some(int_a),
+            deprecated: Some("use the new field".into()),
+        }));
+        let schema_table = module.push(Inode::SchemaTable {
+            fields: vec![("field".into(), schema_field), ("other".into(), int_a)],
+            closed: true,
+        });
+        let interp = module.push(Inode::Interpolate {
+            parts: vec![
+                InterpPart::Literal("pre-".into()),
+                InterpPart::Expr(int_a),
+                InterpPart::Literal("-post".into()),
+            ],
+        });
+        let constrained_min_max = module.push(Inode::Constrained {
+            target: int_a,
+            constraint: Constraint::MinMax {
+                min: Some(-10),
+                max: Some(10),
+            },
+        });
+        let constrained_enum = module.push(Inode::Constrained {
+            target: int_a,
+            constraint: Constraint::Enum(vec!["x".into(), "y".into(), "z".into()]),
+        });
+        let constrained_pattern = module.push(Inode::Constrained {
+            target: str_a,
+            constraint: Constraint::Pattern("[a-z]+".into()),
+        });
+        let constrained_custom = module.push(Inode::Constrained {
+            target: int_a,
+            constraint: Constraint::Custom("is-prime".into()),
+        });
+        let constrained_odd = module.push(Inode::Constrained {
+            target: int_a,
+            constraint: Constraint::Odd,
+        });
+        let patch_set = module.push(Inode::Patch(PatchOp::Set {
+            path: "a.b".into(),
+            value: int_a,
+        }));
+        let patch_remove = module.push(Inode::Patch(PatchOp::Remove { path: "a.c".into() }));
+        let patch_rename = module.push(Inode::Patch(PatchOp::Rename {
+            from: "a.d".into(),
+            to: "a.e".into(),
+        }));
+        let payload_hash = *blake3::hash(b"abc").as_bytes();
+        let blob_with_payload = module.push(Inode::Blob {
+            hash: payload_hash,
+            size: 3,
+            tainted: false,
+            media_type: "text/plain".into(),
+            payload: Some(b"abc".to_vec()),
+        });
+        let blob_detached = module.push(Inode::Blob {
+            hash: [7u8; 32],
+            size: 1000,
+            tainted: false,
+            media_type: String::new(),
+            payload: None,
+        });
+        let secret = module.push(Inode::Secret(SecretBytes::new(b"s3cr3t!".to_vec())));
+        let quantity = module.push(Inode::Quantity {
+            value: int_a,
+            unit: UnitTag::Named("metre".into()),
+        });
+        module.annotate(table, AnnotationKind::Intent("table intent".into()));
+        module.annotate(
+            table,
+            AnnotationKind::Constraint {
+                source: "x > 0".into(),
+                expr: int_a,
+            },
+        );
+        module.annotate(interp, AnnotationKind::AiImmutable(true));
+        module.set_provenance(Some(Provenance {
+            producer: Some("inf-l05-test".into()),
+            timestamp_ms: 1_700_000_000_000,
+            model: Some("test-model".into()),
+            tool: Some("test-tool".into()),
+            parent: Some([9u8; 32]),
+            entries: vec![
+                ProvEntry {
+                    key: "a-text".into(),
+                    value: ProvValue::Text("hello".into()),
+                },
+                ProvEntry {
+                    key: "b-int".into(),
+                    value: ProvValue::Int(-42),
+                },
+                ProvEntry {
+                    key: "c-flag".into(),
+                    value: ProvValue::Flag(true),
+                },
+                ProvEntry {
+                    key: "d-hash".into(),
+                    value: ProvValue::Hash([3u8; 32]),
+                },
+            ],
+        }));
+        module.add_extension(1, b"x".to_vec());
+        module.add_extension(2, b"1234567".to_vec());
+        module.add_extension(3, b"12345678".to_vec());
+        module.add_extension(4, b"123456789".to_vec());
+        module.bind("first", int_a);
+        module.bind("second", table);
+        // 19 elements: 19 * 4 = 76 bytes of children, plus a 4-byte pad.
+        let root = module.push(Inode::Array {
+            elements: vec![
+                table,
+                schema_table,
+                interp,
+                constrained_min_max,
+                constrained_enum,
+                constrained_pattern,
+                constrained_custom,
+                constrained_odd,
+                patch_set,
+                patch_remove,
+                patch_rename,
+                blob_with_payload,
+                blob_detached,
+                secret,
+                quantity,
+                float,
+                boolean,
+                duration,
+                str_c,
+            ],
+        });
+        module.set_root(Some(root));
+        module
+    }
+
+    #[test]
+    fn estimate_is_exact_for_a_module_using_every_section() {
+        assert_estimate_is_exact(&kitchen_sink_module());
+    }
+
+    #[test]
+    fn estimate_is_exact_for_small_modules() {
+        // A single Int root: no bindings, no strings, no children — the
+        // wire still writes the root binding entry, so the bindings term
+        // is `(0 + 1) * 8`, not `0`.
+        let mut module = InfinityModule::new();
+        let root = module.push(Inode::Int(0));
+        module.set_root(Some(root));
+        assert_estimate_is_exact(&module);
+
+        // One string root: the strings section is one offset plus the
+        // trailing heap length plus the bytes, plus its pad.
+        let mut module = InfinityModule::new();
+        let root = module.push(Inode::Str("hello".into()));
+        module.set_root(Some(root));
+        assert_estimate_is_exact(&module);
+
+        // One binding, no root: the bindings section is the root entry plus
+        // the one binding.
+        let mut module = InfinityModule::new();
+        let node = module.push(Inode::Int(1));
+        module.bind("only", node);
+        assert_estimate_is_exact(&module);
+
+        // One child: 4 bytes of children plus a 4-byte pad.
+        let mut module = InfinityModule::new();
+        let child = module.push(Inode::Int(1));
+        let root = module.push(Inode::Array {
+            elements: vec![child],
+        });
+        module.set_root(Some(root));
+        assert_estimate_is_exact(&module);
+
+        // Two children: 8 bytes, no pad.
+        let mut module = InfinityModule::new();
+        let first = module.push(Inode::Int(1));
+        let second = module.push(Inode::Int(2));
+        let root = module.push(Inode::Array {
+            elements: vec![first, second],
+        });
+        module.set_root(Some(root));
+        assert_estimate_is_exact(&module);
+
+        // An empty array root: zero children, zero pad.
+        let mut module = InfinityModule::new();
+        let root = module.push(Inode::Array { elements: vec![] });
+        module.set_root(Some(root));
+        assert_estimate_is_exact(&module);
+
+        // A lone secret: 8-byte entry plus the bytes, plus its pad.
+        let mut module = InfinityModule::new();
+        let secret = module.push(Inode::Secret(SecretBytes::new(b"pw".to_vec())));
+        module.set_root(Some(secret));
+        assert_estimate_is_exact(&module);
+
+        // Provenance with no entries: the 96-byte block alone.
+        let mut module = InfinityModule::new();
+        let root = module.push(Inode::Int(1));
+        module.set_root(Some(root));
+        module.set_provenance(Some(Provenance {
+            producer: None,
+            timestamp_ms: 0,
+            model: None,
+            tool: None,
+            parent: None,
+            entries: vec![],
+        }));
+        assert_estimate_is_exact(&module);
+
+        // One extension with an empty payload: directory entry only.
+        let mut module = InfinityModule::new();
+        let root = module.push(Inode::Int(1));
+        module.set_root(Some(root));
+        module.add_extension(1, Vec::new());
+        assert_estimate_is_exact(&module);
+    }
+
+    #[test]
+    fn estimate_rejects_each_omitted_table_past_4gib() {
+        // One witness per table the old estimate omitted: the old formula
+        // returns `Ok` for all of these (its total is 288 — header plus two
+        // node records — because it never reads the omitted table), while
+        // the exact size is past `u32::MAX`. The old totals were computed
+        // from the HEAD formula; see the INF-L05 record §3.2.
+        let base = ImageSizeCounts {
+            nodes: 2,
+            ..ImageSizeCounts::default()
+        };
+        for (name, counts) in [
+            (
+                "children",
+                ImageSizeCounts {
+                    children: 1 << 30,
+                    edges: 1,
+                    ..base
+                },
+            ),
+            (
+                "fields",
+                ImageSizeCounts {
+                    fields: 1 << 28,
+                    ..base
+                },
+            ),
+            (
+                "parts",
+                ImageSizeCounts {
+                    parts: 1 << 29,
+                    ..base
+                },
+            ),
+            (
+                "edges",
+                ImageSizeCounts {
+                    edges: 1 << 29,
+                    ..base
+                },
+            ),
+            (
+                "annotations",
+                ImageSizeCounts {
+                    annotations: 1 << 28,
+                    ..base
+                },
+            ),
+            (
+                "aux",
+                ImageSizeCounts {
+                    aux: 1 << 29,
+                    ..base
+                },
+            ),
+            (
+                "provenance",
+                ImageSizeCounts {
+                    provenance_bytes: 1 << 32,
+                    ..base
+                },
+            ),
+        ] {
+            assert!(
+                matches!(image_size_from_counts(&counts), Err(Error::TooLarge)),
+                "{name} past 4 GiB must be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn estimate_accepts_the_largest_attainable_size() {
+        assert_eq!(size_pad(0), 0);
+        assert_eq!(size_pad(1), 7);
+        assert_eq!(size_pad(4), 4);
+        assert_eq!(size_pad(8), 0);
+        assert_eq!(size_pad(9), 7);
+        // Totals are always a multiple of 8 (every section is padded to
+        // alignment), so the largest size that fits is `u32::MAX - 7` =
+        // 4_294_967_288, and 8 bytes more is refused.
+        let base = ImageSizeCounts {
+            nodes: 2,
+            edges: 1,
+            ..ImageSizeCounts::default()
+        };
+        let fitting = ImageSizeCounts {
+            children: 1_073_741_746,
+            ..base
+        };
+        assert_eq!(image_size_from_counts(&fitting), Ok(4_294_967_288));
+        let too_big = ImageSizeCounts {
+            children: 1_073_741_748,
+            ..base
+        };
+        assert!(
+            matches!(image_size_from_counts(&too_big), Err(Error::TooLarge)),
+            "8 bytes past the largest attainable size must be refused"
+        );
+    }
 }

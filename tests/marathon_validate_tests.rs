@@ -123,9 +123,10 @@ fn node_offset(bytes: &[u8], index: usize) -> usize {
 
 #[test]
 fn a_non_zero_node_reserved_byte_is_refused() {
-    // Bytes 2..4 of every 32-byte node record are reserved. They are hashed, so
-    // an image carrying them validates while re-encoding to different bytes:
-    // two bytes per node of data hidden inside the module identity.
+    // Bytes 2..4 of every 32-byte node record are reserved and must be zero.
+    // They are hashed, so flipping one breaks the content hash; the hash is
+    // recomputed here so the refusal under test comes from `node()` itself,
+    // which rejects a non-zero reserved byte outright.
     for index in 0..3 {
         let mut bytes = image();
         let at = node_offset(&bytes, index);

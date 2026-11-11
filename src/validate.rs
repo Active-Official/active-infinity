@@ -297,9 +297,10 @@ impl<'a> Validated<'a> {
             offset: offset as u64,
         })?;
         // Bytes 2..4 of a node record are reserved and must be zero. They are
-        // covered by the content hash, so an image with a non-zero reserved byte
-        // validates but cannot re-encode to itself: two bytes per node of hidden
-        // data inside the module's identity.
+        // covered by the content hash, so flipping one also breaks the hash --
+        // and even with a recomputed hash the image is refused below: a
+        // non-zero reserved byte fails validation outright, so no hidden data
+        // can ride inside the module's identity.
         if rec[2] != 0 || rec[3] != 0 {
             return Err(Error::Node {
                 id: id.0,

@@ -43,16 +43,17 @@ impl NodeView {
     /// Number of child entries the record declares.
     ///
     /// This is an **upper bound** on node references for a mixed record: an
-    /// `Interpolate` counts its literal parts, a `Constrained` counts every aux
+    /// `Interpolate` counts its literal parts, a `Constrained` counts its target plus every aux
     /// entry (some are strings), a `Patch` counts path aux entries. Use
     /// [`InfinityView::children`] for the node references themselves.
     pub fn count(&self) -> u64 {
         match self.kind {
             7 | 8 | 14 | 20 => self.b,
             15 | 24 => 2,
+            17 => self.c.saturating_add(1),
             18 | 19 => self.c,
             12 => u64::from(self.a != u32::MAX as u64),
-            6 | 10 | 11 | 16 | 17 | 21 | 22 => 1,
+            6 | 10 | 11 | 16 | 21 | 22 => 1,
             _ => 0,
         }
     }

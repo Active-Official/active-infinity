@@ -24,7 +24,14 @@
 //!
 //! Bindings, provenance and extensions are base-aware: a component changed on
 //! one side only is taken, and a component changed differently on both sides is
-//! a conflict. Free text in metadata is compared **redacted** (secret literals
+//! a conflict. When a `TakeRight` decision replaces a subtree, annotations
+//! and bindings naming nodes inside the replaced subtree follow the import:
+//! each replaced node is repointed at the node in the same structural
+//! position in the imported copy (INF-MERGE-03, NF-MERGE01-01). A node with
+//! no counterpart there — the right side renamed or restructured it —
+//! loses its annotation or binding instead of ghosting the stale value
+//! back into the module, and a node that still survives through another
+//! field keeps its original annotation or binding. Free text in metadata is compared **redacted** (secret literals
 //! are replaced by the marker first), so a metadata comparison cannot be used
 //! to guess a secret. A binary extension payload is hashed over its redacted
 //! bytes (INF-MERGE-02), so the same rule holds where there is no text to
@@ -242,6 +249,9 @@ pub fn merge(
 
     let mut merged = left.clone();
     let mut imported = 0usize;
+    // Filled by the apply steps below and consumed by
+    // `reconcile_metadata` before the final encode.
+    let mut state = RemapState::default();
     let mut additions: Vec<(String, NodeId)> = Vec::new();
     if let Some(root) = merged.root() {
         // Copy right-hand subtrees before mutating the root table, so the
@@ -257,6 +267,17 @@ pub fn merge(
                     });
                 }
                 additions.push((name.clone(), copied));
+                // A TakeRight replaces the left subtree this field held:
+                // annotations and bindings naming its nodes must follow
+                // the import (INF-MERGE-03, NF-MERGE01-01). The walk
+                // reads the left cone from `merged`, which still holds
+                // the left nodes under their left ids — imports only
+                // append nodes, so nothing here has moved yet. A field
+                // the left side never had (added on the right, or added
+                // on both sides) has no left cone to walk.
+                if let Some(left_id) = left_map.get(name.as_str()).copied() {
+                    ctx.remap_cone(&merged, right, left_id, *id, copied, &mut state)?;
+                }
             }
         }
         let removed: BTreeSet<&str> = decisions
@@ -266,6 +287,16 @@ pub fn merge(
                 _ => None,
             })
             .collect();
+        // A Delete orphans the whole left cone of the field (INF-MERGE-03
+        // drop side): the left table still names it here, before the
+        // rewrite below removes the field.
+        for (name, decision) in &decisions {
+            if let Decision::Delete = decision {
+                if let Some(left_id) = left_map.get(name.as_str()).copied() {
+                    ctx.collect_cone(&merged, left_id, &mut state)?;
+                }
+            }
+        }
         let table = merged
             .node_mut(root)
             .map_err(|_| Error::Encode("merged root disappeared"))?;
@@ -314,10 +345,26 @@ pub fn merge(
         let Some(table) = table else {
             return Err(Error::Encode("merged nested table disappeared"));
         };
-        apply_nested(&mut merged, right, table, children, &mut imported)?;
+        apply_nested(
+            &mut merged,
+            right,
+            table,
+            children,
+            &mut imported,
+            &ctx,
+            &mut state,
+        )?;
     }
 
-    apply_metadata(&mut merged, right, plan, &mut imported)?;
+    apply_metadata(&mut merged, right, plan, &mut imported, &ctx, &mut state)?;
+
+    // Annotations and bindings whose subject was replaced by an import
+    // follow the imported node; ones whose subject the decisions orphaned
+    // are dropped (INF-MERGE-03, NF-MERGE01-01). This runs before the
+    // canonical encode below, so the stale nodes it unroots are dropped
+    // with the rest of the unselected fragments.
+    let live = ctx.field_reachable(&merged)?;
+    reconcile_metadata(&mut merged, &state.remap, &state.orphaned, &live);
 
     // Canonicalize: this drops any fragment nodes the selected subtree does not
     // reach and validates the result. The drop is explicit here (INF-04): a
@@ -358,6 +405,19 @@ enum Decision {
     /// itself conflicts makes the whole table a conflict instead (see
     /// `Ctx::decide`), so a `MergeNested` tree never contains a `Conflict`.
     MergeNested(Vec<(String, Decision)>),
+}
+
+/// The annotation/binding remap state threaded through the apply steps
+/// (INF-MERGE-03, NF-MERGE01-01).
+///
+/// `remap` maps a left node to the imported node that replaced it, for
+/// every node a `TakeRight` replaced; `orphaned` holds every node a
+/// decision orphaned, whether or not it mapped. Grouping the two keeps
+/// the apply functions under clippy's argument limit.
+#[derive(Default)]
+struct RemapState {
+    remap: BTreeMap<NodeId, NodeId>,
+    orphaned: BTreeSet<NodeId>,
 }
 
 /// One module-level component the field merge does not own.
@@ -793,6 +853,231 @@ impl Ctx<'_> {
         keys.sort();
         Ok(keys)
     }
+
+    /// Remap annotations and bindings off a left subtree that a `TakeRight`
+    /// decision replaced with an imported copy of the right subtree
+    /// (INF-MERGE-03, NF-MERGE01-01).
+    ///
+    /// `merged` holds the left module's nodes under their left ids (the
+    /// merge starts as `left.clone()` and imports only append nodes), so
+    /// the left cone is read from `merged` itself; `from` is the right
+    /// module, and `merged_root` is the imported copy of `right_root`
+    /// already in `merged`. The walk visits every node of the left cone —
+    /// paired with the node at the same structural position in the right
+    /// and imported cones when the shapes agree — and records two things
+    /// in `state`:
+    ///
+    /// * `remap`: left node -> imported node, for nodes whose counterpart
+    ///   exists. The first mapping wins: a left node shared by two
+    ///   replaced fields maps to the copy reached first, in sorted field
+    ///   order, and the other copy is left unannotated (the sharing
+    ///   itself is broken by the double import, R2-INF-MRG-06).
+    /// * `orphaned`: every node of the left cone, whether or not it
+    ///   mapped, so the post-pass can tell a replaced node from a node
+    ///   that was never in any field.
+    ///
+    /// Children are paired by field name for tables (left and right may
+    /// list fields in different orders), by index for arrays, and
+    /// positionally for the other fixed-shape variants (same variant on
+    /// all three sides, same child layout). `Interpolate` and
+    /// `SchemaField` never pair: their child lists are filtered or
+    /// optional projections, so a positional pairing could match
+    /// unrelated nodes. A shape change anywhere below a node stops the
+    /// pairing for that subtree, but the walk still descends the left
+    /// side so the orphaned set stays complete. Every visited node and
+    /// every traversed edge is charged to the merge work budget, like
+    /// `has_secret` charges its walk, so a hostile wide cone fails
+    /// closed with `Limit` instead of walking unbounded.
+    fn remap_cone(
+        &self,
+        merged: &InfinityModule,
+        from: &InfinityModule,
+        left_root: NodeId,
+        right_root: NodeId,
+        merged_root: NodeId,
+        state: &mut RemapState,
+    ) -> Result<()> {
+        let mut visited: BTreeSet<NodeId> = BTreeSet::new();
+        let mut stack: Vec<(NodeId, Option<(NodeId, NodeId)>)> =
+            vec![(left_root, Some((right_root, merged_root)))];
+        while let Some((left_id, pair)) = stack.pop() {
+            if !visited.insert(left_id) {
+                continue;
+            }
+            self.charge(1)?;
+            state.orphaned.insert(left_id);
+            let left_node = merged.get(left_id).ok_or(Error::NodeRef(left_id.0))?;
+            // The left children to descend into, each with its
+            // counterpart pair when one exists.
+            let mut descend: Vec<(NodeId, Option<(NodeId, NodeId)>)> = Vec::new();
+            match pair {
+                None => {
+                    for child in left_node.children() {
+                        descend.push((child, None));
+                    }
+                }
+                Some((right_id, merged_id)) => {
+                    state.remap.entry(left_id).or_insert(merged_id);
+                    let right_node = from.get(right_id).ok_or(Error::NodeRef(right_id.0))?;
+                    let merged_node = merged.get(merged_id).ok_or(Error::NodeRef(merged_id.0))?;
+                    match (left_node, right_node, merged_node) {
+                        (
+                            Inode::Table {
+                                fields: left_fields,
+                            },
+                            Inode::Table {
+                                fields: right_fields,
+                            },
+                            Inode::Table {
+                                fields: merged_fields,
+                            },
+                        )
+                        | (
+                            Inode::SchemaTable {
+                                fields: left_fields,
+                                ..
+                            },
+                            Inode::SchemaTable {
+                                fields: right_fields,
+                                ..
+                            },
+                            Inode::SchemaTable {
+                                fields: merged_fields,
+                                ..
+                            },
+                        ) => {
+                            let right_map: BTreeMap<&str, NodeId> = right_fields
+                                .iter()
+                                .map(|(name, id)| (name.as_str(), *id))
+                                .collect();
+                            let merged_map: BTreeMap<&str, NodeId> = merged_fields
+                                .iter()
+                                .map(|(name, id)| (name.as_str(), *id))
+                                .collect();
+                            for (name, child) in left_fields {
+                                match (right_map.get(name.as_str()), merged_map.get(name.as_str()))
+                                {
+                                    (Some(right_child), Some(merged_child)) => {
+                                        descend.push((*child, Some((*right_child, *merged_child))))
+                                    }
+                                    _ => descend.push((*child, None)),
+                                }
+                            }
+                        }
+                        (
+                            Inode::Array {
+                                elements: left_elements,
+                            },
+                            Inode::Array {
+                                elements: right_elements,
+                            },
+                            Inode::Array {
+                                elements: merged_elements,
+                            },
+                        ) => {
+                            for (index, child) in left_elements.iter().enumerate() {
+                                match (right_elements.get(index), merged_elements.get(index)) {
+                                    (Some(right_child), Some(merged_child)) => {
+                                        descend.push((*child, Some((*right_child, *merged_child))))
+                                    }
+                                    _ => descend.push((*child, None)),
+                                }
+                            }
+                        }
+                        (left, right, merged_node)
+                            if std::mem::discriminant(left) == std::mem::discriminant(right)
+                                && std::mem::discriminant(right)
+                                    == std::mem::discriminant(merged_node)
+                                && !matches!(
+                                    left,
+                                    Inode::Interpolate { .. } | Inode::SchemaField(_)
+                                ) =>
+                        {
+                            // Fixed-shape variants: the child lists are
+                            // positional projections of the node, so the
+                            // same index is the same logical child on all
+                            // three sides. A shorter list on either side
+                            // leaves the tail unpaired.
+                            let left_children = left.children();
+                            let right_children = right.children();
+                            let merged_children = merged_node.children();
+                            for (index, child) in left_children.iter().enumerate() {
+                                match (right_children.get(index), merged_children.get(index)) {
+                                    (Some(right_child), Some(merged_child)) => {
+                                        descend.push((*child, Some((*right_child, *merged_child))))
+                                    }
+                                    _ => descend.push((*child, None)),
+                                }
+                            }
+                        }
+                        _ => {
+                            // The shapes differ below this node (a table
+                            // became a leaf, a field was renamed, a
+                            // variant changed): the subtree has no
+                            // counterparts, but it is still orphaned.
+                            for child in left_node.children() {
+                                descend.push((child, None));
+                            }
+                        }
+                    }
+                }
+            }
+            self.charge(descend.len())?;
+            stack.extend(descend);
+        }
+        Ok(())
+    }
+
+    /// Collect every node of the cone rooted at `root` in `module` into
+    /// `state.orphaned` (INF-MERGE-03 drop side: a `Delete` decision orphans
+    /// the whole left cone, so annotations and bindings naming its nodes
+    /// must go with it when nothing else keeps them alive).
+    fn collect_cone(
+        &self,
+        module: &InfinityModule,
+        root: NodeId,
+        state: &mut RemapState,
+    ) -> Result<()> {
+        let mut visited: BTreeSet<NodeId> = BTreeSet::new();
+        let mut stack = vec![root];
+        while let Some(id) = stack.pop() {
+            if !visited.insert(id) {
+                continue;
+            }
+            self.charge(1)?;
+            state.orphaned.insert(id);
+            let node = module.get(id).ok_or(Error::NodeRef(id.0))?;
+            let children = node.children();
+            self.charge(children.len())?;
+            stack.extend(children);
+        }
+        Ok(())
+    }
+
+    /// The nodes reachable from the merged root table through field
+    /// children only (INF-MERGE-03). Bindings and annotations are
+    /// deliberately not seeds: a node kept alive only by a stale
+    /// annotation or binding is exactly what the post-pass must recognise
+    /// as orphaned. A node that survives through a field is live wherever
+    /// else it is named.
+    fn field_reachable(&self, merged: &InfinityModule) -> Result<BTreeSet<NodeId>> {
+        let mut live: BTreeSet<NodeId> = BTreeSet::new();
+        let Some(root) = merged.root() else {
+            return Err(Error::Encode("merged root disappeared"));
+        };
+        let mut stack = vec![root];
+        while let Some(id) = stack.pop() {
+            if !live.insert(id) {
+                continue;
+            }
+            self.charge(1)?;
+            let node = merged.get(id).ok_or(Error::NodeRef(id.0))?;
+            let children = node.children();
+            self.charge(children.len())?;
+            stack.extend(children);
+        }
+        Ok(live)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -804,6 +1089,8 @@ fn apply_metadata(
     right: &InfinityModule,
     plan: MetaPlan,
     imported: &mut usize,
+    ctx: &Ctx,
+    state: &mut RemapState,
 ) -> Result<()> {
     if !plan.bindings.is_empty() {
         let mut bindings: BTreeMap<String, NodeId> = merged.bindings().iter().cloned().collect();
@@ -813,6 +1100,7 @@ fn apply_metadata(
                     bindings.remove(&name);
                 }
                 BindingAction::TakeRight(id) => {
+                    let old = bindings.get(&name).copied();
                     let (copied, nodes) = import_subtree(merged, right, id)?;
                     *imported = imported.saturating_add(nodes);
                     if *imported > MAX_MERGE_NODES {
@@ -822,6 +1110,13 @@ fn apply_metadata(
                         });
                     }
                     bindings.insert(name, copied);
+                    // The old binding target's cone is replaced by the
+                    // import (INF-MERGE-03): annotations and bindings
+                    // naming its nodes follow it, as for a field. A
+                    // binding the left side never had has no old cone.
+                    if let Some(old) = old {
+                        ctx.remap_cone(merged, right, old, id, copied, state)?;
+                    }
                 }
             }
         }
@@ -849,13 +1144,20 @@ fn apply_metadata(
 /// `MergeNested` children recurse into their own table. The child ids are
 /// read before any import — imports append nodes, so those ids stay valid
 /// — and the recursion depth is bounded by construction: the decision tree
-/// was built under `MAX_CONFLICT_DEPTH`.
+/// was built under `MAX_CONFLICT_DEPTH`. `TakeRight` and `Delete` arms
+/// also record the replacement in `state` (see `Ctx::remap_cone`), so
+/// annotations and bindings follow the import
+/// (INF-MERGE-03, NF-MERGE01-01); the `slots` snapshot below is what
+/// names the left cone, since the table still holds the left ids until
+/// the rewrite at the end of this function.
 fn apply_nested(
     into: &mut InfinityModule,
     from: &InfinityModule,
     table: NodeId,
     decisions: &[(String, Decision)],
     imported: &mut usize,
+    ctx: &Ctx,
+    state: &mut RemapState,
 ) -> Result<()> {
     // Snapshot the table's current field slots before any import: the
     // borrow must end before `import_subtree` takes `into` mutably.
@@ -881,8 +1183,29 @@ fn apply_nested(
                     });
                 }
                 additions.push((name.clone(), copied));
+                // The nested slot's left cone is replaced by the import
+                // (INF-MERGE-03, NF-MERGE01-01), exactly as at the root.
+                // The snapshot still holds the left id: the rewrite has
+                // not run yet. A field the left side never had has no
+                // left cone to walk.
+                if let Some(left_id) = slots
+                    .iter()
+                    .find(|(field, _)| field == name)
+                    .map(|(_, id)| *id)
+                {
+                    ctx.remap_cone(into, from, left_id, *id, copied, state)?;
+                }
             }
             Decision::Delete => {
+                // The nested slot's left cone is orphaned by the delete
+                // (INF-MERGE-03 drop side).
+                if let Some(left_id) = slots
+                    .iter()
+                    .find(|(field, _)| field == name)
+                    .map(|(_, id)| *id)
+                {
+                    ctx.collect_cone(into, left_id, state)?;
+                }
                 removed.insert(name.as_str());
             }
             Decision::MergeNested(children) => {
@@ -929,9 +1252,78 @@ fn apply_nested(
     // Recurse into the nested tables: their node ids were read before this
     // rewrite and are unaffected by it.
     for (child, children) in nested {
-        apply_nested(into, from, child, children, imported)?;
+        apply_nested(into, from, child, children, imported, ctx, state)?;
     }
     Ok(())
+}
+
+/// Repoint and prune annotations and bindings after the field decisions
+/// (INF-MERGE-03, NF-MERGE01-01).
+///
+/// First, every recorded replacement is applied, but only where the old
+/// node is no longer live: an annotation or binding whose subject still
+/// survives through a field keeps its original node (the replacement
+/// broke a sharing, it did not orphan the value). `repoint_annotations`
+/// moves both subjects and constraint expressions and drops the exact
+/// duplicates a repoint can create. Then every annotation and binding
+/// naming a node the decisions orphaned — in `orphaned` and not live —
+/// is dropped: its home is gone, so keeping it would ghost the stale
+/// value back into the module. A node that was never orphaned is kept
+/// even when it is not field-reachable (a binding-only node, for
+/// instance): the merge replaced nothing under it.
+fn reconcile_metadata(
+    merged: &mut InfinityModule,
+    remap: &BTreeMap<NodeId, NodeId>,
+    orphaned: &BTreeSet<NodeId>,
+    live: &BTreeSet<NodeId>,
+) {
+    if remap.is_empty() && orphaned.is_empty() {
+        return;
+    }
+    for (old, new) in remap {
+        if !live.contains(old) {
+            merged.repoint_annotations(*old, *new);
+        }
+    }
+    if !remap.is_empty() || !orphaned.is_empty() {
+        let bindings: Vec<(String, NodeId)> = merged.bindings().to_vec();
+        merged.clear_bindings();
+        for (name, target) in bindings {
+            // Repoint first: a replaced node follows its import. Then
+            // drop what is left pointing at an orphaned node — a
+            // binding target is a root, so keeping it would ghost the
+            // stale value back in (INF-MERGE-03 binding twin on the
+            // Delete/rename path). A repointed target is an imported
+            // node, never orphaned, so the drop cannot fire on it; a
+            // live target is kept by the live-guard, as for annotations.
+            let target = match remap.get(&target) {
+                Some(new) if !live.contains(&target) => *new,
+                _ => target,
+            };
+            if orphaned.contains(&target) && !live.contains(&target) {
+                continue;
+            }
+            merged.bind(name, target);
+        }
+    }
+    let mut kept: Vec<(NodeId, AnnotationKind)> = Vec::with_capacity(merged.annotations().len());
+    for annotation in merged.annotations() {
+        if orphaned.contains(&annotation.node) && !live.contains(&annotation.node) {
+            continue;
+        }
+        if let AnnotationKind::Constraint { expr, .. } = &annotation.kind {
+            if orphaned.contains(expr) && !live.contains(expr) {
+                continue;
+            }
+        }
+        kept.push((annotation.node, annotation.kind.clone()));
+    }
+    if kept.len() != merged.annotations().len() {
+        merged.clear_annotations();
+        for (node, kind) in kept {
+            merged.annotate(node, kind);
+        }
+    }
 }
 
 /// Copy the reachable cone of `id` into `into`, returning the new root and the

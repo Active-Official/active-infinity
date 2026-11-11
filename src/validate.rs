@@ -148,7 +148,7 @@ impl<'a> Validated<'a> {
         validated.check_annotations()?;
         validated.check_provenance(limits)?;
         validated.check_extensions()?;
-        validated.check_reachability(limits)?;
+        validated.check_reachability()?;
         validated.check_acyclic()?;
         validated.check_depth(limits)?;
 
@@ -2479,7 +2479,7 @@ impl<'a> Validated<'a> {
         Ok(())
     }
 
-    fn check_reachability(&self, limits: Limits) -> Result<()> {
+    fn check_reachability(&self) -> Result<()> {
         self.check_bindings()?;
         // The bindings section's first word is the root id; it must be either the
         // sentinel or an existing node, even when the module holds no nodes.
@@ -2533,7 +2533,6 @@ impl<'a> Validated<'a> {
                 reason: "unreachable node",
             });
         }
-        let _ = limits;
         Ok(())
     }
 
@@ -2576,7 +2575,10 @@ impl<'a> Validated<'a> {
         let mut processed = 0u32;
         while let Some(node) = queue.pop_front() {
             processed += 1;
-            let next = depth[node as usize] + 1;
+            // Saturating: `depth` is bounded by the node count, so this
+            // cannot wrap in practice (INF-L13 defence-in-depth); a wrap
+            // would have turned a too-deep chain into a shallow one.
+            let next = depth[node as usize].saturating_add(1);
             let rec = self.node(NodeId(node))?;
             self.node_children_into(&rec, &mut scratch)?;
             for child in &scratch {

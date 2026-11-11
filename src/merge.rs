@@ -40,7 +40,10 @@
 //! Work is bounded by a node budget: every subtree comparison materialises only
 //! the reachable cone of that subtree (never the whole module), imported
 //! right-hand nodes are charged against [`MAX_MERGE_NODES`], and a total visit
-//! budget [`MAX_MERGE_WORK`] stops a pathological conflict walk.
+//! budget [`MAX_MERGE_WORK`] stops a pathological conflict walk. The output
+//! ceiling is checked on the kept-node count before the final encode
+//! (INF-MERGE-04), so an over-ceiling merge is refused without paying for a
+//! canonical encode + decode of a module that is thrown away.
 
 use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
@@ -366,6 +369,25 @@ pub fn merge(
     let live = ctx.field_reachable(&merged)?;
     reconcile_metadata(&mut merged, &state.remap, &state.orphaned, &live);
 
+    // The output ceiling, checked BEFORE the canonical encode (INF-MERGE-04):
+    // a clean merge imports at most one right-hand cone on top of the left
+    // module, so the result can be twice an input, and refusing that only
+    // after a full encode + decode pays the whole canonicalisation for a
+    // module that is thrown away. Count what the encoder will keep — the
+    // closure of `merged.roots()` — not the arena: `merged` still holds
+    // every node a decision orphaned (the left cone a TakeRight replaced,
+    // a deleted field's cone), and the encoder drops those with
+    // `drop_unreachable`, so an arena count would refuse merges whose
+    // output fits. The post-decode check below stays as the exact
+    // backstop, so a miscount here can only ever refuse late, never
+    // wrongly and never silently.
+    if output_node_count(&merged)? > MAX_MERGE_NODES {
+        return Err(Error::Limit {
+            kind: "merge output nodes",
+            limit: MAX_MERGE_NODES as u64,
+        });
+    }
+
     // Canonicalize: this drops any fragment nodes the selected subtree does not
     // reach and validates the result. The drop is explicit here (INF-04): a
     // merge keeps only the selected subtree, so the unselected fragment nodes
@@ -381,7 +403,10 @@ pub fn merge(
     let module = decode(&image)?;
     // A clean merge imports at most one right-hand cone on top of the left
     // module, so the result can be twice an input. Keep the returned module
-    // under the same ceiling a caller needed to hand in.
+    // under the same ceiling a caller needed to hand in. This is the exact
+    // backstop for the pre-encode check above: it catches anything the
+    // kept-node count missed, and it is what refused over-ceiling outputs
+    // before INF-MERGE-04 — after paying the encode + decode.
     if module.node_count() > MAX_MERGE_NODES {
         return Err(Error::Limit {
             kind: "merge output nodes",
@@ -389,6 +414,40 @@ pub fn merge(
         });
     }
     Ok(Merge::Clean(Box::new(module)))
+}
+
+/// Nodes the canonical encode of `merged` will keep: the closure of its
+/// roots — the root table, binding targets, annotation subjects and
+/// constraint expressions — the same root set `canonical_order` walks, so
+/// the encoder emits exactly one record per counted node and `decode` of
+/// the image reports this same count.
+///
+/// This is deliberately NOT `merged.node_count()`: the arena still holds
+/// every node a decision orphaned, and counting those would refuse merges
+/// whose output fits (INF-MERGE-04, test 4). It is also not the root-only
+/// `field_reachable` set: a binding target or annotation subject no field
+/// reaches is a root for the encoder, so it counts here (INF-MERGE-04,
+/// test 5).
+///
+/// Uncharged: the walk visits each arena node at most once, and the arena
+/// is bounded by construction — left holds at most `MAX_MERGE_NODES`
+/// nodes (checked at the merge entry) and imports are capped at
+/// `MAX_MERGE_NODES` by the same counter — so no input can stretch it
+/// past O(`MAX_MERGE_NODES`). Charging it could tip a large legitimate
+/// merge into `Limit("merge work")`, the INF-MERGE-06 failure mode, for a
+/// check whose purpose is to avoid work. The merge entry already does
+/// uncharged structural walks (`validate_structure`) on the same scale.
+fn output_node_count(merged: &InfinityModule) -> Result<usize> {
+    let mut live: BTreeSet<NodeId> = BTreeSet::new();
+    let mut stack: Vec<NodeId> = merged.roots();
+    while let Some(id) = stack.pop() {
+        if !live.insert(id) {
+            continue;
+        }
+        let node = merged.get(id).ok_or(Error::NodeRef(id.0))?;
+        stack.extend(node.children());
+    }
+    Ok(live.len())
 }
 
 // ---------------------------------------------------------------------------

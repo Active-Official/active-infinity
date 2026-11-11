@@ -95,7 +95,9 @@ pub fn encode_with(module: &InfinityModule, opts: EncodeOpts) -> Result<Vec<u8>>
 ///
 /// The buffer is cleared and refilled. A caller that encodes repeatedly (a
 /// server, a store, a test harness) pays one allocation instead of one per
-/// image; the bytes are identical to [`encode`].
+/// image; the bytes are identical to [`encode`]. On error the buffer is
+/// left empty (INF-L06): a failed encode never leaves the previous image
+/// behind for a caller to mistake for the new one.
 pub fn encode_into(module: &InfinityModule, out: &mut Vec<u8>) -> Result<()> {
     encode_into_with(module, out, EncodeOpts::default())
 }
@@ -107,11 +109,23 @@ pub fn encode_into(module: &InfinityModule, out: &mut Vec<u8>) -> Result<()> {
 /// silently delete data — including secrets — and return `Ok` (INF-04).
 /// The wire validator refuses unreachable nodes for the same reason; the
 /// in-memory and wire rules now agree.
+///
+/// On error `out` is empty (INF-L06): it is cleared here, before the
+/// reachability check and `prepare()`, so a failure in either leaves no
+/// stale image behind, and it is cleared again if emission itself fails
+/// after writing has begun, so a partial image never survives either.
 pub fn encode_into_with(
     module: &InfinityModule,
     out: &mut Vec<u8>,
     opts: EncodeOpts,
 ) -> Result<()> {
+    // INF-L06: clear first, before anything can fail. On a `prepare()`
+    // failure this used to return `Err` with `out` still holding the
+    // previous image — a caller that read `out` without checking the `Err`
+    // (or that retried) could publish or use a stale image for the wrong
+    // module. Clearing preserves capacity, so the buffer-reuse contract is
+    // unchanged; only the bytes go.
+    out.clear();
     if !opts.drop_unreachable {
         module.check_reachable()?;
     }
@@ -119,7 +133,19 @@ pub fn encode_into_with(
     // The exact-size check runs inside `encode_prepared_into` (INF-L05):
     // it needs the built node tables, so it cannot run here, but it still
     // runs before the encoder allocates the image itself.
-    encode_prepared_into(&prepared, opts, out)
+    match encode_prepared_into(&prepared, opts, out) {
+        Ok(()) => Ok(()),
+        Err(err) => {
+            // INF-L06: emission can still fail after writing has begun (an
+            // encoder fault on a prepared module — unreachable from the
+            // public API, since `prepare()` validates the invariants
+            // emission relies on, but not impossible for a future fallible
+            // step). A partial image is the same hazard as a stale one, so
+            // it goes too: `Err` always leaves `out` empty.
+            out.clear();
+            Err(err)
+        }
+    }
 }
 
 /// The scalar inputs to the exact image-size computation (INF-L05).
@@ -360,12 +386,26 @@ fn image_size_from_counts(counts: &ImageSizeCounts) -> Result<u64> {
 /// `out` is resized to the batch length; existing buffers keep their capacity.
 /// This is the batch path a server uses to encode many modules per tick
 /// without an allocation per image.
+///
+/// Every slot is cleared at entry (INF-L06), so a failed batch never leaves
+/// a stale image anywhere: the slots before the failure hold the fresh
+/// images for their modules, and the failed slot and every later slot are
+/// empty. On success the result is identical to encoding each module in
+/// turn; clearing preserves capacity, so the reuse contract is unchanged.
 pub fn encode_many<'a, I>(modules: I, out: &mut Vec<Vec<u8>>) -> Result<()>
 where
     I: IntoIterator<Item = &'a InfinityModule>,
 {
     let modules: Vec<&InfinityModule> = modules.into_iter().collect();
     out.resize_with(modules.len(), Vec::new);
+    // INF-L06: clear every slot up front. `encode_into` already clears the
+    // failed slot itself, but the slots after the failure are never reached
+    // by the loop — without this they would keep the previous batch's
+    // images, and a caller reading past the failure would see a stale image
+    // for the wrong module. `clear` keeps each buffer's capacity.
+    for buffer in out.iter_mut() {
+        buffer.clear();
+    }
     for (buffer, module) in out.iter_mut().zip(modules) {
         encode_into(module, buffer)?;
     }
@@ -487,9 +527,13 @@ pub(crate) fn encode_prepared_into(
         let mut heap_len = 0u32;
         for string in &prepared.strings {
             image.extend_from_slice(&heap_len.to_le_bytes());
-            heap_len = heap_len
-                .checked_add(string.len() as u32)
-                .ok_or(Error::TooLarge)?;
+            // INF-L06: the length conversion is checked, like
+            // `encode_extensions` already does. The INF-L05 exact-size
+            // check refuses any module past 4 GiB before emission, so this
+            // cannot wrap in practice — but the site must not depend on a
+            // distant gate for its own correctness.
+            let len = u32::try_from(string.len()).map_err(|_| Error::TooLarge)?;
+            heap_len = heap_len.checked_add(len).ok_or(Error::TooLarge)?;
         }
         image.extend_from_slice(&heap_len.to_le_bytes());
         for string in &prepared.strings {
@@ -503,7 +547,11 @@ pub(crate) fn encode_prepared_into(
     header.span_mut(Section::Blobs).count = prepared.blobs.len() as u32;
     let mut blob_heap_len = 0u32;
     for blob in &prepared.blobs {
-        let len = blob.payload_len as u32;
+        // INF-L06: checked, as in the strings heap above. `payload_len` is
+        // the materialised payload length (0 for a detached blob), and the
+        // INF-L05 exact-size check already bounds it — this is defence in
+        // depth, so the entry length cannot wrap if the gate ever moves.
+        let len = u32::try_from(blob.payload_len).map_err(|_| Error::TooLarge)?;
         image.extend_from_slice(&blob.hash);
         image.extend_from_slice(&blob_heap_len.to_le_bytes());
         image.extend_from_slice(&len.to_le_bytes());
@@ -661,11 +709,13 @@ pub(crate) fn encode_prepared_into(
     header.span_mut(Section::Secrets).count = prepared.secret_count() as u32;
     let mut secret_heap = 0u32;
     for secret in prepared.secret_bytes() {
+        // INF-L06: checked, as in the strings and blobs heaps. One
+        // conversion serves both uses — the entry length and the heap
+        // accumulation — so they cannot disagree.
+        let len = u32::try_from(secret.len()).map_err(|_| Error::TooLarge)?;
         image.extend_from_slice(&secret_heap.to_le_bytes());
-        image.extend_from_slice(&(secret.len() as u32).to_le_bytes());
-        secret_heap = secret_heap
-            .checked_add(secret.len() as u32)
-            .ok_or(Error::TooLarge)?;
+        image.extend_from_slice(&len.to_le_bytes());
+        secret_heap = secret_heap.checked_add(len).ok_or(Error::TooLarge)?;
     }
     for secret in prepared.secret_bytes() {
         image.extend_from_slice(secret);

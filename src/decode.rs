@@ -17,8 +17,60 @@ use crate::ir::{
     Annotation, AnnotationKind, Constraint, InfinityModule, Inode, InterpPart, NodeId, PatchOp,
     ProvEntry, ProvValue, Provenance, SchemaFieldSpec, TypeSpec,
 };
-use crate::layout::{DecodeOpts, ANN_KIND_AI_IMMUTABLE, ANN_KIND_CONSTRAINT, ANN_KIND_INTENT};
+use crate::layout::{
+    DecodeOpts, Section, ANN_KIND_AI_IMMUTABLE, ANN_KIND_CONSTRAINT, ANN_KIND_INTENT,
+};
 use crate::validate::Validated;
+
+/// Defence-in-depth (INF-L01): every cast and range in this file is safe
+/// *conditional* on the `Validated` invariant -- the validator range-checks
+/// each record before any decoder runs -- but nothing in this file checked
+/// that locally. These helpers make the decoder defend itself as well, so
+/// a future `Validated` constructor or a validator regression turns into a
+/// clean `Error::Node` / `Error::Type` instead of a truncating `as` cast, a
+/// wrapping range, or a `Vec::with_capacity` abort. On a validated image
+/// every check passes (ranges are bounded by totals far below 2^32), so the
+/// behaviour is unchanged.
+///
+/// Checked `u64 -> u32` for a node-record field; `Error::Node` on overflow.
+fn node_u32(value: u64, id: u32) -> Result<u32> {
+    u32::try_from(value).map_err(|_| Error::Node {
+        id,
+        reason: "record field out of u32 range",
+    })
+}
+
+/// Checked `start + len` for a `u32` node-table range; `Error::Node` on
+/// overflow. The loop that follows still fails cleanly through the
+/// bounds-checked accessor if the range runs past the table.
+fn node_range_end(start: u32, len: u32, id: u32) -> Result<u32> {
+    start.checked_add(len).ok_or(Error::Node {
+        id,
+        reason: "record range overflows u32",
+    })
+}
+
+/// Checked `start + len` for a `u32` type-table range; `Error::Type` on
+/// overflow.
+fn type_range_end(start: u32, len: u32, id: u32) -> Result<u32> {
+    start.checked_add(len).ok_or(Error::Type {
+        id,
+        reason: "type range overflows u32",
+    })
+}
+
+/// Bound a `Vec::with_capacity` hint (INF-L01): `rec.b` is a `u64` straight
+/// off the wire record, and `with_capacity` aborts on capacity overflow
+/// *before* any bounds check runs. Cap the hint at the size of the table
+/// the range draws from -- a validated image never asks for more (the
+/// validator packs each node's range inside its table), so the cap is
+/// behaviour-preserving -- and let the loop below fail cleanly on the first
+/// out-of-range accessor if the validator ever regresses.
+fn capacity_hint(want: u64, table_entries: u32) -> usize {
+    usize::try_from(want)
+        .unwrap_or(usize::MAX)
+        .min(table_entries as usize)
+}
 
 /// Decode with default options (hash verified, canonical form proved --
 /// INF-02). Use `decode_with(bytes, DecodeOpts { verify_canonical: false,
@@ -125,13 +177,14 @@ fn check_decoded_budget(validated: &Validated<'_>) -> Result<()> {
     // strings, and only its `AUX_TYPE_ENUM_ITEM` aux records do. The sum is
     // saturated, not budget-checked, here: it is only a per-type figure, and
     // the budget trips when a `SchemaField` actually charges it below.
-    let type_count = validated.span(crate::layout::Section::Types).count as usize;
-    let mut type_cost: Vec<u64> = Vec::with_capacity(type_count);
+    let type_count = validated.span(crate::layout::Section::Types).count;
+    let mut type_cost: Vec<u64> = Vec::with_capacity(type_count as usize);
     for index in 0..type_count {
-        let (code, _flags, start, len) = validated.type_entry(index as u32)?;
+        let (code, _flags, start, len) = validated.type_entry(index)?;
         let mut cost: u64 = 0;
         if code == 8 {
-            for offset in start..start + len {
+            let end = type_range_end(start, len, index)?;
+            for offset in start..end {
                 let (tag, value) = validated.aux(offset)?;
                 if tag == crate::layout::AUX_TYPE_ENUM_ITEM {
                     cost = cost.saturating_add(validated.string(value)?.len() as u64);
@@ -146,25 +199,37 @@ fn check_decoded_budget(validated: &Validated<'_>) -> Result<()> {
         let rec = validated.node(id)?;
         match rec.kind {
             4 => charge(&mut total, validated.string(rec.aux)?.len() as u64)?,
-            6 => charge(&mut total, validated.unit_name_len(rec.a as u32)?)?,
+            6 => charge(
+                &mut total,
+                validated.unit_name_len(node_u32(rec.a, index)?)?,
+            )?,
             8 | 20 => {
-                for offset in rec.a..rec.a + rec.b {
-                    let (name, _node) = validated.field(offset as u32)?;
+                let start = node_u32(rec.a, index)?;
+                let end = node_range_end(start, node_u32(rec.b, index)?, index)?;
+                for offset in start..end {
+                    let (name, _node) = validated.field(offset)?;
                     charge(&mut total, validated.string(name)?.len() as u64)?;
                 }
             }
-            9 => charge(&mut total, validated.secret(rec.a as u32)?.len() as u64)?,
+            9 => charge(
+                &mut total,
+                validated.secret(node_u32(rec.a, index)?)?.len() as u64,
+            )?,
             12 | 13 => charge(&mut total, validated.string(rec.aux)?.len() as u64)?,
             14 => {
-                for offset in rec.a..rec.a + rec.b {
-                    let (tag, value) = validated.part(offset as u32)?;
+                let start = node_u32(rec.a, index)?;
+                let end = node_range_end(start, node_u32(rec.b, index)?, index)?;
+                for offset in start..end {
+                    let (tag, value) = validated.part(offset)?;
                     if tag == crate::layout::PART_LITERAL {
                         charge(&mut total, validated.string(value)?.len() as u64)?;
                     }
                 }
             }
             17 => {
-                for offset in rec.b as u32..rec.b as u32 + rec.c as u32 {
+                let start = node_u32(rec.b, index)?;
+                let end = node_range_end(start, node_u32(rec.c, index)?, index)?;
+                for offset in start..end {
                     let (tag, value) = validated.aux(offset)?;
                     if tag == crate::layout::AUX_CONSTRAINT_ENUM_ITEM
                         || tag == crate::layout::AUX_CONSTRAINT_PATTERN
@@ -175,7 +240,9 @@ fn check_decoded_budget(validated: &Validated<'_>) -> Result<()> {
                 }
             }
             18 => {
-                for offset in rec.b as u32..rec.b as u32 + rec.c as u32 {
+                let start = node_u32(rec.b, index)?;
+                let end = node_range_end(start, node_u32(rec.c, index)?, index)?;
+                for offset in start..end {
                     let (tag, value) = validated.aux(offset)?;
                     if tag == crate::layout::AUX_PATCH_PATH
                         || tag == crate::layout::AUX_PATCH_RENAME_TO
@@ -189,7 +256,9 @@ fn check_decoded_budget(validated: &Validated<'_>) -> Result<()> {
                     &mut total,
                     type_cost.get(rec.aux as usize).copied().unwrap_or(0),
                 )?;
-                for offset in rec.b as u32..rec.b as u32 + rec.c as u32 {
+                let start = node_u32(rec.b, index)?;
+                let end = node_range_end(start, node_u32(rec.c, index)?, index)?;
+                for offset in start..end {
                     let (tag, value) = validated.aux(offset)?;
                     if tag == crate::layout::AUX_SCHEMA_DEPRECATED {
                         charge(&mut total, validated.string(value)?.len() as u64)?;
@@ -199,7 +268,10 @@ fn check_decoded_budget(validated: &Validated<'_>) -> Result<()> {
             23 => {
                 charge(&mut total, validated.string(rec.aux)?.len() as u64)?;
                 if rec.flags & crate::layout::NODE_FLAG_1 != 0 {
-                    charge(&mut total, validated.blob(rec.a as u32)?.len() as u64)?;
+                    charge(
+                        &mut total,
+                        validated.blob(node_u32(rec.a, index)?)?.len() as u64,
+                    )?;
                 }
             }
             _ => {}
@@ -244,43 +316,54 @@ fn decode_node(validated: &Validated<'_>, id: NodeId) -> Result<Inode> {
         5 => Inode::DurationMs(rec.a),
         6 => Inode::Quantity {
             value: NodeId(rec.aux),
-            unit: validated.unit(rec.a as u32)?,
+            unit: validated.unit(node_u32(rec.a, id.0)?)?,
         },
         7 => {
-            let mut elements = Vec::with_capacity(rec.b as usize);
-            for offset in rec.a..rec.a + rec.b {
-                elements.push(NodeId(validated.child(offset as u32)?));
+            let start = node_u32(rec.a, id.0)?;
+            let end = node_range_end(start, node_u32(rec.b, id.0)?, id.0)?;
+            let mut elements = Vec::with_capacity(capacity_hint(
+                rec.b,
+                validated.span(Section::Children).count,
+            ));
+            for offset in start..end {
+                elements.push(NodeId(validated.child(offset)?));
             }
             Inode::Array { elements }
         }
         8 => {
-            let mut fields = Vec::with_capacity(rec.b as usize);
-            for offset in rec.a..rec.a + rec.b {
-                let (name, node) = validated.field(offset as u32)?;
+            let start = node_u32(rec.a, id.0)?;
+            let end = node_range_end(start, node_u32(rec.b, id.0)?, id.0)?;
+            let mut fields =
+                Vec::with_capacity(capacity_hint(rec.b, validated.span(Section::Fields).count));
+            for offset in start..end {
+                let (name, node) = validated.field(offset)?;
                 fields.push((validated.string(name)?.to_string(), node));
             }
             Inode::Table { fields }
         }
         9 => Inode::Secret(crate::ir::SecretBytes::new(
-            validated.secret(rec.a as u32)?.to_vec(),
+            validated.secret(node_u32(rec.a, id.0)?)?.to_vec(),
         )),
         10 => Inode::SecretRef {
-            locator: NodeId(rec.a as u32),
+            locator: NodeId(node_u32(rec.a, id.0)?),
         },
-        11 => Inode::Ref(NodeId(rec.a as u32)),
+        11 => Inode::Ref(NodeId(node_u32(rec.a, id.0)?)),
         12 => Inode::Env {
             name: validated.string(rec.aux)?.to_string(),
             default: if rec.a == u32::MAX as u64 {
                 None
             } else {
-                Some(NodeId(rec.a as u32))
+                Some(NodeId(node_u32(rec.a, id.0)?))
             },
         },
         13 => Inode::Ident(validated.string(rec.aux)?.to_string()),
         14 => {
-            let mut parts = Vec::with_capacity(rec.b as usize);
-            for offset in rec.a..rec.a + rec.b {
-                let (tag, value) = validated.part(offset as u32)?;
+            let start = node_u32(rec.a, id.0)?;
+            let end = node_range_end(start, node_u32(rec.b, id.0)?, id.0)?;
+            let mut parts =
+                Vec::with_capacity(capacity_hint(rec.b, validated.span(Section::Parts).count));
+            for offset in start..end {
+                let (tag, value) = validated.part(offset)?;
                 parts.push(match tag {
                     crate::layout::PART_LITERAL => {
                         InterpPart::Literal(validated.string(value)?.to_string())
@@ -295,38 +378,47 @@ fn decode_node(validated: &Validated<'_>, id: NodeId) -> Result<Inode> {
                 id: id.0,
                 reason: "unknown binary operator",
             })?,
-            lhs: NodeId(rec.a as u32),
-            rhs: NodeId(rec.b as u32),
+            lhs: NodeId(node_u32(rec.a, id.0)?),
+            rhs: NodeId(node_u32(rec.b, id.0)?),
         },
         16 => Inode::Unary {
             op: crate::ir::UnOp::from_code(rec.aux).ok_or(Error::Node {
                 id: id.0,
                 reason: "unknown unary operator",
             })?,
-            expr: NodeId(rec.a as u32),
+            expr: NodeId(node_u32(rec.a, id.0)?),
         },
         17 => Inode::Constrained {
-            target: NodeId(rec.a as u32),
-            constraint: decode_constraint(validated, id, rec.aux, rec.b as u32, rec.c as u32)?,
+            target: NodeId(node_u32(rec.a, id.0)?),
+            constraint: decode_constraint(
+                validated,
+                id,
+                rec.aux,
+                node_u32(rec.b, id.0)?,
+                node_u32(rec.c, id.0)?,
+            )?,
         },
         18 => Inode::Patch(decode_patch(
             validated,
             id,
             rec.aux,
-            rec.b as u32,
-            rec.c as u32,
+            node_u32(rec.b, id.0)?,
+            node_u32(rec.c, id.0)?,
         )?),
         19 => Inode::SchemaField(decode_schema_field(
             validated,
             id,
             rec.aux,
-            rec.b as u32,
-            rec.c as u32,
+            node_u32(rec.b, id.0)?,
+            node_u32(rec.c, id.0)?,
         )?),
         20 => {
-            let mut fields = Vec::with_capacity(rec.b as usize);
-            for offset in rec.a..rec.a + rec.b {
-                let (name, node) = validated.field(offset as u32)?;
+            let start = node_u32(rec.a, id.0)?;
+            let end = node_range_end(start, node_u32(rec.b, id.0)?, id.0)?;
+            let mut fields =
+                Vec::with_capacity(capacity_hint(rec.b, validated.span(Section::Fields).count));
+            for offset in start..end {
+                let (name, node) = validated.field(offset)?;
                 fields.push((validated.string(name)?.to_string(), node));
             }
             Inode::SchemaTable {
@@ -335,19 +427,20 @@ fn decode_node(validated: &Validated<'_>, id: NodeId) -> Result<Inode> {
             }
         }
         21 => Inode::SchemaArray {
-            element: NodeId(rec.a as u32),
+            element: NodeId(node_u32(rec.a, id.0)?),
         },
         22 => Inode::Semantic {
             tag: crate::ir::SemanticTag::from_code(rec.aux).ok_or(Error::Node {
                 id: id.0,
                 reason: "unknown semantic tag",
             })?,
-            inner: NodeId(rec.a as u32),
+            inner: NodeId(node_u32(rec.a, id.0)?),
         },
         23 => {
-            let (hash, _, _) = validated.blob_entry(rec.a as u32)?;
+            let blob_id = node_u32(rec.a, id.0)?;
+            let (hash, _, _) = validated.blob_entry(blob_id)?;
             let payload = if rec.flags & crate::layout::NODE_FLAG_1 != 0 {
-                Some(validated.blob(rec.a as u32)?.to_vec())
+                Some(validated.blob(blob_id)?.to_vec())
             } else {
                 None
             };
@@ -360,8 +453,8 @@ fn decode_node(validated: &Validated<'_>, id: NodeId) -> Result<Inode> {
             }
         }
         24 => Inode::ContentAddressed {
-            media_type: NodeId(rec.a as u32),
-            data: NodeId(rec.b as u32),
+            media_type: NodeId(node_u32(rec.a, id.0)?),
+            data: NodeId(node_u32(rec.b, id.0)?),
         },
         _ => {
             return Err(Error::Node {
@@ -385,7 +478,8 @@ fn decode_constraint(
     let mut items = Vec::new();
     let mut pattern = None;
     let mut custom = None;
-    for offset in start..start + len {
+    let end = node_range_end(start, len, id.0)?;
+    for offset in start..end {
         let (tag, value) = validated.aux(offset)?;
         match tag {
             crate::layout::AUX_CONSTRAINT_MIN => min = Some(validated.number(value)?),
@@ -441,7 +535,8 @@ fn decode_patch(
     let mut path = None;
     let mut value = None;
     let mut to = None;
-    for offset in start..start + len {
+    let end = node_range_end(start, len, id.0)?;
+    for offset in start..end {
         let (tag, item) = validated.aux(offset)?;
         match tag {
             crate::layout::AUX_PATCH_PATH => path = Some(validated.string(item)?.to_string()),
@@ -494,7 +589,8 @@ fn decode_schema_field(
 ) -> Result<SchemaFieldSpec> {
     let typ = decode_type(validated, type_id)?;
     let mut spec = SchemaFieldSpec::bare(typ);
-    for offset in start..start + len {
+    let end = node_range_end(start, len, id.0)?;
+    for offset in start..end {
         let (tag, value) = validated.aux(offset)?;
         match tag {
             crate::layout::AUX_SCHEMA_MIN => spec.min = Some(NodeId(value)),
@@ -532,7 +628,8 @@ fn decode_type(validated: &Validated<'_>, index: u32) -> Result<TypeSpec> {
         },
         8 => {
             let mut items = Vec::new();
-            for offset in start..start + len {
+            let end = type_range_end(start, len, index)?;
+            for offset in start..end {
                 let (tag, value) = validated.aux(offset)?;
                 if tag != crate::layout::AUX_TYPE_ENUM_ITEM {
                     return Err(Error::Type {
@@ -604,4 +701,50 @@ pub fn provenance_pairs(prov: &Provenance) -> Vec<(String, ProvValue)> {
         .collect();
     pairs.sort_by(|a, b| a.0.cmp(&b.0));
     pairs
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn inf_l01_node_u32_accepts_in_range_rejects_above_u32_max() {
+        assert_eq!(node_u32(0, 7).unwrap(), 0);
+        assert_eq!(node_u32(u32::MAX as u64, 7).unwrap(), u32::MAX);
+        for value in [u32::MAX as u64 + 1, u64::MAX] {
+            let err = node_u32(value, 7).unwrap_err();
+            assert_eq!(err.code(), "infinity/node");
+            assert!(matches!(err, Error::Node { id: 7, .. }));
+        }
+    }
+
+    #[test]
+    fn inf_l01_node_range_end_rejects_overflow() {
+        assert_eq!(node_range_end(0, 0, 7).unwrap(), 0);
+        assert_eq!(node_range_end(100, 200, 7).unwrap(), 300);
+        assert_eq!(node_range_end(0, u32::MAX, 7).unwrap(), u32::MAX);
+        for (start, len) in [(u32::MAX, 1), (1, u32::MAX), (u32::MAX, u32::MAX)] {
+            let err = node_range_end(start, len, 7).unwrap_err();
+            assert_eq!(err.code(), "infinity/node");
+            assert!(matches!(err, Error::Node { id: 7, .. }));
+        }
+    }
+
+    #[test]
+    fn inf_l01_type_range_end_rejects_overflow() {
+        assert_eq!(type_range_end(10, 20, 3).unwrap(), 30);
+        let err = type_range_end(u32::MAX, 1, 3).unwrap_err();
+        assert_eq!(err.code(), "infinity/type");
+        assert!(matches!(err, Error::Type { id: 3, .. }));
+    }
+
+    #[test]
+    fn inf_l01_capacity_hint_caps_at_table_size() {
+        assert_eq!(capacity_hint(0, 5), 0);
+        assert_eq!(capacity_hint(3, 5), 3);
+        assert_eq!(capacity_hint(5, 5), 5);
+        assert_eq!(capacity_hint(6, 5), 5);
+        assert_eq!(capacity_hint(u64::MAX, 5), 5);
+        assert_eq!(capacity_hint(u64::MAX, 0), 0);
+    }
 }

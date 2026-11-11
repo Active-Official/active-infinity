@@ -1829,17 +1829,43 @@ impl InfinityModule {
         roots
     }
 
-    /// Derived dependency edges, direction dependency → dependent, sorted and
-    /// deduplicated. Nodes that reference where they are referenced from are
-    /// normal; the graph is a DAG after [`Self::validate_structure`].
-    /// Dependency edges `(dependency, dependent)`.
+    /// Structural dependency edges, direction dependency -> dependent, sorted
+    /// and deduplicated: exactly the wire edge table.
     ///
-    /// Node references plus the expression an annotation depends on: a
-    /// constraint annotation on a subject depends on its expression, and a graph
-    /// query that omitted it would report an incomplete dependency set. The wire
-    /// edge table is still derived from node references only; an annotation edge
-    /// is not a structural edge and does not participate in acyclicity.
+    /// One edge per node reference (`Inode::children()`), so this is the
+    /// same set `encode` writes (`encode::derive_edges`) and the validator
+    /// demands (`validate::check_edges`): a downstream consumer (RPC graph
+    /// queries, store indexing, merge) that reads `edges()` sees the graph
+    /// the wire sees -- same edges, same counts, same acyclicity.
+    ///
+    /// A Constraint annotation's expression is NOT a structural edge: the
+    /// wire edge table is derived from node references only, and an
+    /// annotation edge does not participate in acyclicity. The full
+    /// dependency set, annotation-expression edges included, is
+    /// [`Self::edges_including_annotations`].
     pub fn edges(&self) -> Vec<(NodeId, NodeId)> {
+        let mut edges = Vec::new();
+        for (index, node) in self.nodes.iter().enumerate() {
+            let dependent = NodeId(index as u32);
+            for child in node.children() {
+                edges.push((child, dependent));
+            }
+        }
+        edges.sort_unstable();
+        edges.dedup();
+        edges
+    }
+    /// Dependency edges including annotation-expression edges, direction
+    /// dependency -> dependent, sorted and deduplicated.
+    ///
+    /// The structural edges of [`Self::edges`] plus one edge
+    /// `(expr, subject)` per Constraint annotation: a constraint annotation
+    /// on a subject depends on its expression, and a graph query that
+    /// omitted it would report an incomplete dependency set. These extra
+    /// edges are not structural -- the wire edge table omits them and they
+    /// do not participate in acyclicity -- so a consumer that needs the
+    /// graph the wire sees must use [`Self::edges`].
+    pub fn edges_including_annotations(&self) -> Vec<(NodeId, NodeId)> {
         let mut edges = Vec::new();
         for (index, node) in self.nodes.iter().enumerate() {
             let dependent = NodeId(index as u32);
@@ -1857,11 +1883,21 @@ impl InfinityModule {
         edges
     }
 
-    /// Reverse adjacency (dependent → dependencies).
-    /// Reverse adjacency (`dependent` -> dependencies).
-    ///
-    /// Includes the expression an annotation depends on; see [`Self::edges`].
+    /// Reverse adjacency (dependent -> dependencies), over the structural
+    /// edges of [`Self::edges`]: node references only, no
+    /// annotation-expression edges. The full set is
+    /// [`Self::dependency_map_including_annotations`].
     pub fn dependency_map(&self) -> HashMap<NodeId, Vec<NodeId>> {
+        let mut map: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+        for (index, node) in self.nodes.iter().enumerate() {
+            map.insert(NodeId(index as u32), node.children());
+        }
+        map
+    }
+    /// Reverse adjacency (dependent -> dependencies), including the
+    /// expression a Constraint annotation depends on; see
+    /// [`Self::edges_including_annotations`].
+    pub fn dependency_map_including_annotations(&self) -> HashMap<NodeId, Vec<NodeId>> {
         let mut map: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
         for (index, node) in self.nodes.iter().enumerate() {
             map.insert(NodeId(index as u32), node.children());

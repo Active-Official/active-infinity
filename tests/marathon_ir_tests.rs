@@ -161,12 +161,27 @@ fn an_annotation_expression_is_a_dependency_edge() {
             expr: expression,
         },
     );
-    let edges = module.edges();
+    // INF-L04: the annotation-expression edge is a dependency edge, but
+    // not a structural one -- it lives in the including set only, never in
+    // `edges()` / `dependency_map()`, which match the wire edge table.
+    assert!(
+        !module.edges().contains(&(expression, subject)),
+        "the structural edge set must not carry the annotation edge: {:?}",
+        module.edges()
+    );
+    assert!(
+        !module
+            .dependency_map()
+            .get(&subject)
+            .is_some_and(|deps| deps.contains(&expression)),
+        "the structural reverse map must not carry the annotation edge"
+    );
+    let edges = module.edges_including_annotations();
     assert!(
         edges.contains(&(expression, subject)),
         "the annotation edge is missing: {edges:?}"
     );
-    let map = module.dependency_map();
+    let map = module.dependency_map_including_annotations();
     assert!(
         map.get(&subject)
             .is_some_and(|deps| deps.contains(&expression)),

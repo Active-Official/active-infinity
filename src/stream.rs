@@ -25,7 +25,12 @@
 //!
 //! Every frame carries its own length and a truncated Blake3 checksum, so
 //! corruption is detected at the frame boundary instead of surfacing as a
-//! confusing parse error later.
+//! confusing parse error later. The checksum is integrity only: eight bytes
+//! give a 2^32 birthday bound, so a colliding frame pair can be forged; it
+//! detects random corruption, never forgery, and proves nothing about who
+//! sent the frame. Authenticity comes only from a signature (a `SignedImage`
+//! envelope) or the full 32-byte content hash verified at `End` — never
+//! from the frame checksum (INF-L11(c)).
 
 // Module-level: item docs for this layer live in docs/spec/layout.md and
 // docs/spec/streaming.md; the crate root keeps deny(missing_docs) for the
@@ -144,11 +149,14 @@ impl Frame {
     /// Panics when `payload` is larger than [`MAX_FRAME_PAYLOAD`]: the frame
     /// length is a `u32` and a larger payload cannot be represented, so the
     /// infallible constructor refuses the caller bug instead of emitting a
-    /// corrupt frame.
+    /// corrupt frame. `new` stays infallible on purpose: the crate is past
+    /// 1.0, so making it fallible would be a breaking change for a Low,
+    /// and the fallible form already exists — a caller that accepts a size
+    /// from input uses [`Frame::try_new`] instead (INF-L11(b)).
     pub fn new(kind: FrameKind, sequence: u64, payload: Vec<u8>) -> Self {
         assert!(
             payload.len() <= MAX_FRAME_PAYLOAD as usize,
-            "frame payload exceeds MAX_FRAME_PAYLOAD"
+            "frame payload exceeds MAX_FRAME_PAYLOAD (use Frame::try_new for a payload size a caller cannot prove)"
         );
         Frame {
             kind,
@@ -174,11 +182,28 @@ impl Frame {
     }
 
     /// Serialize the frame with its header and checksum.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the payload is larger than [`MAX_FRAME_PAYLOAD`]: a
+    /// `Frame` that large violates the type's invariant, and it can only
+    /// exist because a caller built it by hand — the fields are public —
+    /// or mutated one after construction. Hand-built frames use
+    /// [`Frame::try_to_bytes`] instead (INF-L11(b)).
     pub fn to_bytes(&self) -> Vec<u8> {
-        assert!(
-            self.payload.len() <= MAX_FRAME_PAYLOAD as usize,
-            "frame payload exceeds MAX_FRAME_PAYLOAD"
-        );
+        self.try_to_bytes()
+            .expect("frame payload exceeds MAX_FRAME_PAYLOAD (use Frame::try_to_bytes for a frame built by hand)")
+    }
+
+    /// Fallible form of [`Frame::to_bytes`] for a frame a caller built by hand.
+    ///
+    /// `to_bytes` panics on an oversized payload because the payload
+    /// ceiling is the type's invariant; a caller that assembles a frame
+    /// from input uses this instead and gets `infinity/too-large`.
+    pub fn try_to_bytes(&self) -> Result<Vec<u8>> {
+        if self.payload.len() > MAX_FRAME_PAYLOAD as usize {
+            return Err(Error::TooLarge);
+        }
         let mut out = Vec::with_capacity(FRAME_HEADER_SIZE + self.payload.len());
         out.extend_from_slice(&STREAM_MAGIC);
         out.push(STREAM_VERSION);
@@ -190,7 +215,7 @@ impl Frame {
         let checksum = frame_checksum(&self.payload);
         out.extend_from_slice(&checksum[..8]);
         out.extend_from_slice(&self.payload);
-        out
+        Ok(out)
     }
 
     /// Parse one frame, returning it and the number of bytes consumed.
@@ -272,6 +297,13 @@ impl Frame {
 }
 
 /// Truncated Blake3 checksum of a frame payload.
+///
+/// Integrity only: the caller takes the first 8 bytes, and eight bytes
+/// give a 2^32 birthday bound, so a colliding frame pair can be forged.
+/// A matching checksum says the bytes survived the transport
+/// uncorrupted; it never says who sent them. Authenticity comes only
+/// from a signature (a `SignedImage` envelope) or the full 32-byte
+/// content hash verified at `End` (INF-L11(c)).
 pub fn frame_checksum(payload: &[u8]) -> [u8; 32] {
     *blake3::hash(payload).as_bytes()
 }
@@ -623,6 +655,15 @@ impl DeltaOp {
                 let target = NodeId(take_u32(buf, cursor)?);
                 let fragment = Box::new(decode_fragment(buf, cursor, limits)?);
                 DeltaOp::PutNode { target, fragment }
+            }
+            2 => {
+                // Tag 2 (`PushNode`) was specified but retired before
+                // release: it appended a fragment without a name, so its
+                // nodes were unreachable and canonicalization dropped
+                // them — a silent no-op (spec §3). The tag stays refused
+                // with its own message, not the catch-all below, so a
+                // future assignment is a deliberate change (INF-L11(a)).
+                return Err(Error::StreamDelta("delta operation 2 is retired"));
             }
             3 => {
                 let name = take_string(buf, cursor)?;
@@ -1029,10 +1070,16 @@ pub struct StreamedModule {
 
 impl std::fmt::Debug for StreamedModule {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Summary only: formatting the module clones the arena and scans
+        // every text field against every secret (`InfinityModule`'s
+        // `Debug`), which is work a log line must never do for a large
+        // module — and a leak risk in miniature for a small one
+        // (INF-L11(f)). Counts identify the module; contents never print.
         f.debug_struct("StreamedModule")
             .field("content_hash", &crate::ir::hash_hex(&self.content_hash))
             .field("image_len", &self.image.len())
-            .field("module", &self.module)
+            .field("node_count", &self.module.node_count())
+            .field("root", &self.module.root())
             .finish()
     }
 }
@@ -1107,12 +1154,6 @@ impl StreamDecoder {
         }
     }
 
-    /// Use explicit decode limits for the reassembled image and for every
-    /// intermediate bound.
-    ///
-    /// The value is not validated here: a zero ceiling is discovered on the
-    /// first input that touches it. Prefer [`StreamDecoder::try_with_limits`]
-    /// when the limits come from configuration or a caller.
     /// Decoded bytes the pending delta state currently holds.
     ///
     /// Exposed so a caller can prove a refused frame left the accounting where
@@ -1133,6 +1174,12 @@ impl StreamDecoder {
         self.generation_work
     }
 
+    /// Use explicit decode limits for the reassembled image and for every
+    /// intermediate bound.
+    ///
+    /// The value is not validated here: a zero ceiling is discovered on the
+    /// first input that touches it. Prefer [`StreamDecoder::try_with_limits`]
+    /// when the limits come from configuration or a caller.
     pub fn with_limits(mut self, limits: crate::layout::Limits) -> Self {
         self.limits = limits;
         self
@@ -1152,11 +1199,17 @@ impl StreamDecoder {
     /// Feed raw frame bytes. Frames may be split across calls and several may
     /// arrive in one call; partial frames are buffered.
     ///
-    /// A fault ends the byte stream: the refused frame and any tail after it
-    /// are discarded, and the semantic state is rolled back. `push` (one frame)
-    /// stays retryable per frame; `push_bytes` is not, because the tail was
-    /// parsed against a frame that failed. A caller that wants to retry one
-    /// frame feeds it to `push` directly.
+    /// Faults are recoverable per frame, not per buffer (spec §4): a
+    /// refused frame is dropped from the buffer together with any tail
+    /// parsed against it, and the decoder's semantic state is rolled back
+    /// to before that frame, so the caller corrects the frame and resends
+    /// from it in a fresh call — bytes already consumed before the fault
+    /// are not replayed. This holds for parse faults (bad magic, version,
+    /// kind, flags, checksum, frame length) as well as semantic faults:
+    /// a parse fault used to leave the faulting bytes buffered, so every
+    /// later `push_bytes` call re-failed with the same error and `finish`
+    /// reported a misleading `infinity/truncated` (W7-NF-01). `push` (one
+    /// frame) stays retryable per frame for the same reason.
     pub fn push_bytes(&mut self, buf: &[u8]) -> Result<()> {
         // The buffer is extended before any frame is parsed, so a caller-
         // controlled chunk must be bounded first: a single 1 GiB call used to
@@ -1185,10 +1238,11 @@ impl StreamDecoder {
             }
             if self.partial[consumed_total..consumed_total + 4] != STREAM_MAGIC {
                 // A wrong magic in a 4..31-byte tail would otherwise be reported
-                // as a truncation and make the caller wait forever.
-                if consumed_total > 0 {
-                    self.partial.drain(..consumed_total);
-                }
+                // as a truncation and make the caller wait forever. The
+                // faulting bytes are dropped, not kept: a magic fault is
+                // final for these bytes, and keeping them would re-fail
+                // every later call with the same error (INF-L11(e)).
+                self.partial.clear();
                 return Err(Error::StreamMagic);
             }
             if remaining < FRAME_HEADER_SIZE {
@@ -1206,8 +1260,9 @@ impl StreamDecoder {
                             // Sequence and semantic state are rolled back inside
                             // `push`, but the *tail* of this buffer was parsed
                             // against the frame that just failed, so it can
-                            // never be delivered. Drop it: a semantic fault ends
-                            // this byte stream, and the caller opens a new one.
+                            // never be delivered. Drop it: the caller corrects
+                            // the failed frame and resends from it in a fresh
+                            // call, and the decoder stays usable (INF-L11(e)).
                             self.partial.clear();
                             return Err(error);
                         }
@@ -1231,9 +1286,12 @@ impl StreamDecoder {
                         if declared <= MAX_FRAME_PAYLOAD as u64
                             && declared > self.limits.max_total_bytes
                         {
-                            if at > 0 {
-                                self.partial.drain(..at);
-                            }
+                            // A frame whose declared length exceeds the
+                            // caller's ceiling can never be accepted, so
+                            // its bytes are dropped with the consumed
+                            // prefix: a refused frame leaves nothing
+                            // buffered (INF-L11(e)).
+                            self.partial.clear();
                             return Err(Error::Limit {
                                 kind: "stream frame bytes",
                                 limit: self.limits.max_total_bytes,
@@ -1243,9 +1301,18 @@ impl StreamDecoder {
                     break;
                 }
                 Err(error) => {
-                    if consumed_total > 0 {
-                        self.partial.drain(..consumed_total);
-                    }
+                    // A parse fault is final for these bytes: every
+                    // non-`Truncated` verdict (bad magic, version, kind,
+                    // flags, checksum, frame length) is decided on a
+                    // complete header or a complete payload, so appending
+                    // more bytes can never make the faulting frame valid.
+                    // Drop it and its tail like the semantic path, so the
+                    // caller corrects the frame and resends from it
+                    // (INF-L11(e), W7-NF-01). Keeping the bytes poisoned
+                    // the decoder: every later call re-failed with the
+                    // same error and `finish` reported a misleading
+                    // `Truncated`.
+                    self.partial.clear();
                     return Err(error);
                 }
             }
@@ -1261,7 +1328,10 @@ impl StreamDecoder {
     /// A frame that fails semantic validation leaves the decoder exactly as it
     /// was: the sequence counter, the frame counter and any partially decoded
     /// deltas are restored, so the caller can fix the input and retry. A
-    /// sequence mismatch itself is fatal: the caller must reopen the stream.
+    /// sequence mismatch is an ordinary semantic fault, not a fatal one: it
+    /// rolls back like any other, and the corrected frame is accepted with
+    /// its original sequence number (INF-L11(e) — the old "fatal, reopen
+    /// the stream" wording contradicted the rollback above it).
     pub fn push(&mut self, frame: &Frame) -> Result<()> {
         if frame.sequence != self.expected {
             return Err(Error::StreamSequence {
@@ -1824,6 +1894,10 @@ impl StreamDecoder {
 
     /// Finish the stream, requiring at least one completed generation and no
     /// half-received frame left over.
+    ///
+    /// A refused frame leaves nothing buffered (see [`StreamDecoder::push_bytes`]),
+    /// so a `Truncated` here means the stream really did end mid-frame —
+    /// not that an earlier fault is still buffered (INF-L11(e), W7-NF-01).
     pub fn finish(self) -> Result<StreamedModule> {
         if !self.partial.is_empty() {
             // A partial frame at the end of the stream. Read the declared
@@ -2107,7 +2181,23 @@ pub fn delta_hash(module: &InfinityModule, ops: &[DeltaOp]) -> Result<[u8; 32]> 
 
 /// Reassemble a whole byte stream into a module.
 pub fn decode_stream(bytes: &[u8]) -> Result<StreamedModule> {
-    let mut decoder = StreamDecoder::new();
+    decode_stream_with_limits(bytes, crate::layout::Limits::default())
+}
+
+/// Reassemble a whole byte stream into a module under explicit limits.
+///
+/// The strict caller that today hand-rolls a [`StreamDecoder`] to get
+/// non-default limits uses this instead: the limits bound the
+/// reassembled image and every intermediate check, exactly as
+/// [`StreamDecoder::with_limits`] does. A limits value with a zero
+/// ceiling is refused up front as `infinity/invalid-argument`
+/// ([`crate::layout::Limits::check`]) instead of surfacing as
+/// `infinity/limit` on the first hostile frame (INF-L11(d)).
+pub fn decode_stream_with_limits(
+    bytes: &[u8],
+    limits: crate::layout::Limits,
+) -> Result<StreamedModule> {
+    let mut decoder = StreamDecoder::new().try_with_limits(limits)?;
     decoder.push_bytes(bytes)?;
     decoder.finish()
 }

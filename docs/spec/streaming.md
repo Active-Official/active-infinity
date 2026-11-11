@@ -25,7 +25,7 @@ The fault is permanent: no amount of input makes an oversized frame legal, so
 the error is fatal and not `is_incomplete()`. A buffer that merely stops short
 of a legal frame is `infinity/truncated` and waits for more bytes, including a
 read shorter than the four-byte magic. A wrong *frame* checksum is
-`infinity/stream-checksum` (a framing fault the sender can retry); a wrong
+`infinity/stream-checksum` (a framing fault the sender can retry). The checksum is integrity only: eight bytes give a 2^32 birthday bound, so a colliding frame pair can be forged; it detects random corruption, never forgery, and proves nothing about who sent the frame. Authenticity comes only from a signature (a `SignedImage` envelope) or the full 32-byte content hash verified at `End`; a wrong
 reassembled-module hash at `End` is `infinity/stream-hash`; a wrong magic is
 `infinity/stream-magic`; a skipped
 sequence number is `infinity/stream-sequence`. A non-zero `flags` or `reserved`
@@ -123,7 +123,7 @@ node), `2` ai-immutable (`0`/`1`).
   the whole module for no new content.
 - The decoder's work is bounded across generations, not only within one: a
   generation is charged **before** the assembly, merge and encode, against a
-  counter that may not exceed 64x `Limits::max_total_bytes` (`infinity/limit`,
+  counter that may not exceed 32x `Limits::max_total_bytes` (`infinity/limit`,
   kind `stream generation work`). A tripped ceiling latches: every later frame
   is refused before any work, so replaying one refused frame cannot buy another
   encode. A wrong-hash `End` stays retryable, and the retry is charged.
@@ -145,6 +145,11 @@ node), `2` ai-immutable (`0`/`1`).
 - `push_bytes` is recoverable per frame, not per buffer: a refused frame is
   consumed and its semantic state is rolled back, so the caller can correct
   that frame; bytes already consumed before a fault are not replayed.
+  Parse faults (bad magic, version, kind, flags, checksum, frame length)
+  recover the same way: the faulting frame and any tail parsed against it
+  are dropped, and the caller resends from the failed frame. A fault never
+  leaves bytes buffered, so a `Truncated` at `finish` means the stream
+  really ended mid-frame.
 - A delta merge also runs under the decoder's own `max_nodes`, not the
   defaults, so a strict caller is never made to allocate a larger arena than it
   declared.

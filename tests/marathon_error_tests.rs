@@ -5,7 +5,7 @@
 
 use active_infinity::layout::Header;
 use active_infinity::stream::{
-    decode_stream, encode_stream, DeltaOp, Frame, FrameKind, StreamEncoder,
+    apply_delta, decode_stream, encode_stream, DeltaOp, Frame, FrameKind, StreamEncoder,
 };
 use active_infinity::{encode, AnnotationKind, InfinityModule, Inode};
 
@@ -20,18 +20,29 @@ fn module() -> InfinityModule {
 }
 
 /// A delta annotation whose text does not fit the u16 length space is a delta
-/// fault (`infinity/stream-delta`), not an image address-space fault.
+/// fault (`infinity/stream-delta`), not an image address-space fault — and
+/// it stays one when the stream cannot widen: the width is stream-wide, so
+/// a stream that already carries narrow `Delta` frames refuses a late wide
+/// delta instead of emitting a stream its own decoder would misread
+/// (INF-L12). A first wide delta upgrades the stream instead; see
+/// `inf_l12_delta_strings_tests::a_70kib_annotation_delta_round_trips`.
 #[test]
 fn an_oversized_delta_annotation_is_a_stream_delta() {
     let base = module();
     let root = base.root().expect("root");
+    let narrow = vec![DeltaOp::SetAnnotation {
+        node: root,
+        kind: AnnotationKind::Intent("note".into()),
+    }];
+    let updated = apply_delta(&base, &narrow).expect("apply");
     let ops = vec![DeltaOp::SetAnnotation {
         node: root,
         kind: AnnotationKind::Intent("x".repeat(70_000)),
     }];
     let mut encoder = StreamEncoder::new(&base, 4096).expect("encoder");
+    encoder.push_delta(&base, &narrow).expect("narrow delta");
     let error = encoder
-        .push_delta(&base, &ops)
+        .push_delta(&updated, &ops)
         .expect_err("the delta string cannot be encoded");
     assert_eq!(error.code(), "infinity/stream-delta", "{error}");
 }

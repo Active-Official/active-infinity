@@ -39,10 +39,12 @@ buffers partial frames and never requires frame boundaries at call boundaries.
 
 | Kind | Name | Payload |
 |-----:|------|---------|
-| 1 | `Begin` | `{ major u16, minor u16, flags u16, reserved u16, dialect u64, total_size u64 }` (24 bytes) |
+| 1 | `Begin` | `{ major u16, minor u16, flags u16, stream flags u16, dialect u64, total_size u64 }` (24 bytes) |
 | 2 | `Batch` | `{ section u8, count u32, chunk_len u32, bytes }` |
 | 3 | `Delta` | `{ op_count u32, ops… }` |
 | 4 | `End` | `{ content_hash [32], total_size u64 }` (40 bytes) |
+
+Bit 0 of the `Begin` stream-flags word selects the wide delta-string form (§3); all other bits are reserved and refused with `infinity/reserved`.
 
 ### 2.1 Generation
 
@@ -80,8 +82,8 @@ the module came from the peer, so it is not the caller's own image.
 | 0 | `SetRoot` | `node u32` (`0xFFFF_FFFF` = no root) |
 | 1 | `PutNode` | `target u32, fragment_len u32, fragment` |
 | 2 | *retired* | refused with `infinity/stream-delta` |
-| 3 | `SetBinding` | `name_len u16, name, node u32` |
-| 4 | `RemoveBinding` | `name_len u16, name` |
+| 3 | `SetBinding` | `name_len u16 (u32 when the stream is wide), name, node u32` |
+| 4 | `RemoveBinding` | `name_len u16 (u32 when the stream is wide), name` |
 | 5 | `SetAnnotation` | `node u32, kind u8, payload` |
 | 6 | `ClearAnnotations` | — |
 | 7 | `SetProvenance` | `present u8`, then producer/model/tool optional strings, timestamp `u64`, parent flag + hash, entry count and entries |
@@ -102,6 +104,8 @@ arena layout beyond the target id it names.
 
 Annotation kinds: `0` intent (string), `1` constraint (source string + expression
 node), `2` ai-immutable (`0`/`1`).
+
+Delta strings are `u16`-length-prefixed in a narrow stream. A stream whose `Begin` frame sets stream-flags bit 0 writes every delta string — binding names, annotation text, provenance text — with a `u32` length prefix instead, so a stream can carry strings up to the frame ceiling (64 MiB), like the image format's 64 MiB strings (INF-L12). The width is stream-wide: the encoder upgrades on the first wide delta (or the caller opts in up front with `StreamEncoder::with_wide_delta_strings`), and a stream that already carries narrow `Delta` frames, or one already serialized, refuses a late wide delta with `infinity/stream-delta`. A wide delta frame against a narrow `Begin` is refused: the decoder reads the lengths in the width the `Begin` declares, so the misread fails as `infinity/stream-delta` (trailing bytes) or at the closing `End` hash. An old reader refuses a flagged stream with `infinity/reserved`; a new reader reads an unflagged stream exactly as v1.
 
 ## 4. Limits and failure
 
@@ -127,6 +131,7 @@ node), `2` ai-immutable (`0`/`1`).
   kind `stream generation work`). A tripped ceiling latches: every later frame
   is refused before any work, so replaying one refused frame cannot buy another
   encode. A wrong-hash `End` stays retryable, and the retry is charged.
+- A delta string over 64 KiB needs the wide form: in a narrow stream it is refused with `infinity/stream-delta`, and a stream that already carries narrow `Delta` frames, or one already serialized, refuses a late wide delta the same way (INF-L12).
 - A delta must change the module. A `Delta` whose ops re-encode to the image
   already held (`SetRoot` to the current root, `RemoveBinding` of an absent
   name, `SetProvenance(None)` on a module without provenance) is refused with

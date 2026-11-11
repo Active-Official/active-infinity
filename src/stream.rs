@@ -39,6 +39,7 @@
 
 use std::collections::VecDeque;
 use std::fmt;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::canonical::remap_node;
 use crate::encode::{encode_with, hash_image};
@@ -51,6 +52,16 @@ use crate::validate::Validated;
 
 /// Stream frame magic is `AINS`; version 1.
 pub const STREAM_VERSION: u8 = 1;
+/// Bit 0 of the `Begin` payload's stream-flags word: delta strings use a
+/// `u32` length prefix instead of `u16` (INF-L12).
+///
+/// The image format allows 64 MiB strings, but a delta string used to be
+/// capped at `u16::MAX` bytes with no way to express more. A stream that
+/// needs a longer delta string sets this bit in its `Begin` frame and
+/// writes every delta string with a `u32` length; a stream without it is
+/// byte-identical to v1. Every other bit of the word stays reserved and
+/// is refused with `infinity/reserved`.
+pub const BEGIN_FLAG_WIDE_DELTA_STRINGS: u16 = 0x0001;
 /// Fixed frame header size.
 pub const FRAME_HEADER_SIZE: usize = 32;
 /// Default batch chunk size (bytes of section payload per frame).
@@ -504,6 +515,16 @@ fn section_body_len(
 }
 
 /// A semantic delta operation.
+///
+/// Delta strings (binding names, annotation text, provenance text) use a
+/// `u16` length prefix in a narrow stream and a `u32` length prefix in a
+/// stream whose `Begin` frame sets [`BEGIN_FLAG_WIDE_DELTA_STRINGS`]
+/// (INF-L12): the image format allows 64 MiB strings, so a narrow stream
+/// cannot express an update to a large-text field. The width is
+/// stream-wide — the decoder reads every delta string in the width the
+/// `Begin` declares. [`StreamEncoder::push_delta`] upgrades a stream on
+/// its first wide delta, or the caller opts in up front with
+/// [`StreamEncoder::with_wide_delta_strings`].
 #[derive(Clone, PartialEq)]
 pub enum DeltaOp {
     /// Replace the module root.
@@ -548,7 +569,11 @@ impl fmt::Debug for DeltaOp {
 }
 
 impl DeltaOp {
-    fn encode(&self, out: &mut Vec<u8>) -> Result<()> {
+    /// Encode one operation. `wide` selects the `u32` delta-string form
+    /// for every string this op writes (INF-L12); the caller owns the
+    /// decision — the width is stream-wide, so a single op never chooses
+    /// it alone.
+    fn encode(&self, out: &mut Vec<u8>, wide: bool) -> Result<()> {
         match self {
             DeltaOp::SetRoot(root) => {
                 out.push(0);
@@ -567,12 +592,12 @@ impl DeltaOp {
             }
             DeltaOp::SetBinding { name, node } => {
                 out.push(3);
-                write_delta_string(out, name)?;
+                write_delta_string(out, name, wide)?;
                 out.extend_from_slice(&node.0.to_le_bytes());
             }
             DeltaOp::RemoveBinding { name } => {
                 out.push(4);
-                write_delta_string(out, name)?;
+                write_delta_string(out, name, wide)?;
             }
             DeltaOp::SetAnnotation { node, kind } => {
                 out.push(5);
@@ -580,11 +605,11 @@ impl DeltaOp {
                 match kind {
                     AnnotationKind::Intent(text) => {
                         out.push(0);
-                        write_string(out, text)?;
+                        write_string(out, text, wide)?;
                     }
                     AnnotationKind::Constraint { source, expr } => {
                         out.push(1);
-                        write_string(out, source)?;
+                        write_string(out, source, wide)?;
                         out.extend_from_slice(&expr.0.to_le_bytes());
                     }
                     AnnotationKind::AiImmutable(flag) => {
@@ -600,9 +625,9 @@ impl DeltaOp {
                     None => out.push(0),
                     Some(prov) => {
                         out.push(1);
-                        write_opt_string(out, prov.producer.as_deref())?;
-                        write_opt_string(out, prov.model.as_deref())?;
-                        write_opt_string(out, prov.tool.as_deref())?;
+                        write_opt_string(out, prov.producer.as_deref(), wide)?;
+                        write_opt_string(out, prov.model.as_deref(), wide)?;
+                        write_opt_string(out, prov.tool.as_deref(), wide)?;
                         out.extend_from_slice(&prov.timestamp_ms.to_le_bytes());
                         match prov.parent {
                             None => out.push(0),
@@ -613,11 +638,11 @@ impl DeltaOp {
                         }
                         out.extend_from_slice(&(prov.entries.len() as u32).to_le_bytes());
                         for entry in &prov.entries {
-                            write_string(out, &entry.key)?;
+                            write_string(out, &entry.key, wide)?;
                             match &entry.value {
                                 crate::ir::ProvValue::Text(text) => {
                                     out.push(0);
-                                    write_string(out, text)?;
+                                    write_string(out, text, wide)?;
                                 }
                                 crate::ir::ProvValue::Int(value) => {
                                     out.push(1);
@@ -640,7 +665,15 @@ impl DeltaOp {
         Ok(())
     }
 
-    fn decode(buf: &[u8], cursor: &mut usize, limits: crate::layout::Limits) -> Result<DeltaOp> {
+    /// Decode one operation. `wide` selects the `u32` delta-string form
+    /// for every string this op reads (INF-L12); it is the width the
+    /// stream's `Begin` frame declared, never a per-op choice.
+    fn decode(
+        buf: &[u8],
+        cursor: &mut usize,
+        limits: crate::layout::Limits,
+        wide: bool,
+    ) -> Result<DeltaOp> {
         let tag = take_u8(buf, cursor)?;
         let op = match tag {
             0 => {
@@ -666,21 +699,21 @@ impl DeltaOp {
                 return Err(Error::StreamDelta("delta operation 2 is retired"));
             }
             3 => {
-                let name = take_string(buf, cursor)?;
+                let name = take_string(buf, cursor, wide)?;
                 let node = NodeId(take_u32(buf, cursor)?);
                 DeltaOp::SetBinding { name, node }
             }
             4 => {
-                let name = take_string(buf, cursor)?;
+                let name = take_string(buf, cursor, wide)?;
                 DeltaOp::RemoveBinding { name }
             }
             5 => {
                 let node = NodeId(take_u32(buf, cursor)?);
                 let kind_tag = take_u8(buf, cursor)?;
                 let kind = match kind_tag {
-                    0 => AnnotationKind::Intent(take_string(buf, cursor)?),
+                    0 => AnnotationKind::Intent(take_string(buf, cursor, wide)?),
                     1 => {
-                        let source = take_string(buf, cursor)?;
+                        let source = take_string(buf, cursor, wide)?;
                         let expr = NodeId(take_u32(buf, cursor)?);
                         AnnotationKind::Constraint { source, expr }
                     }
@@ -702,9 +735,9 @@ impl DeltaOp {
                 if !take_bool(buf, cursor)? {
                     DeltaOp::SetProvenance(None)
                 } else {
-                    let producer = take_opt_string(buf, cursor)?;
-                    let model = take_opt_string(buf, cursor)?;
-                    let tool = take_opt_string(buf, cursor)?;
+                    let producer = take_opt_string(buf, cursor, wide)?;
+                    let model = take_opt_string(buf, cursor, wide)?;
+                    let tool = take_opt_string(buf, cursor, wide)?;
                     let timestamp_ms = take_u64(buf, cursor)?;
                     let parent = if take_bool(buf, cursor)? {
                         Some(take_hash(buf, cursor)?)
@@ -722,9 +755,9 @@ impl DeltaOp {
                     }
                     let mut entries = Vec::with_capacity(count.min(4096) as usize);
                     for _ in 0..count {
-                        let key = take_string(buf, cursor)?;
+                        let key = take_string(buf, cursor, wide)?;
                         let value = match take_u8(buf, cursor)? {
-                            0 => crate::ir::ProvValue::Text(take_string(buf, cursor)?),
+                            0 => crate::ir::ProvValue::Text(take_string(buf, cursor, wide)?),
                             1 => crate::ir::ProvValue::Int(take_i64(buf, cursor)?),
                             2 => crate::ir::ProvValue::Flag(take_bool(buf, cursor)?),
                             3 => crate::ir::ProvValue::Hash(take_hash(buf, cursor)?),
@@ -1095,6 +1128,9 @@ pub struct StreamDecoder {
     ended: bool,
     expected: u64,
     flags: u16,
+    /// The stream's delta strings use the wide (`u32`) form, set from the
+    /// `Begin` frame's stream-flags word (INF-L12).
+    wide_delta_strings: bool,
     total_size: Option<u64>,
     module: Option<InfinityModule>,
     image: Option<Vec<u8>>,
@@ -1140,6 +1176,7 @@ impl StreamDecoder {
             ended: false,
             expected: 0,
             flags: 0,
+            wide_delta_strings: false,
             total_size: None,
             module: None,
             image: None,
@@ -1416,12 +1453,17 @@ impl StreamDecoder {
                 if flags & !crate::layout::FLAG_KNOWN_MASK != 0 {
                     return Err(Error::UnknownFlags(flags & !crate::layout::FLAG_KNOWN_MASK));
                 }
-                if frame.payload[6..8] != [0, 0] {
+                // Bytes 6..8 are the stream-flags word, not image data:
+                // bit 0 selects the wide (`u32`) delta-string form
+                // (INF-L12). Every other bit stays reserved.
+                let stream_flags = u16::from_le_bytes([frame.payload[6], frame.payload[7]]);
+                if stream_flags & !BEGIN_FLAG_WIDE_DELTA_STRINGS != 0 {
                     return Err(Error::ReservedNonZero {
                         section: "stream-begin",
                         offset: 6,
                     });
                 }
+                self.wide_delta_strings = stream_flags & BEGIN_FLAG_WIDE_DELTA_STRINGS != 0;
                 let dialect = read_u64(&frame.payload, 8)?;
                 // The same accepted set as the image path
                 // (`validate::Validated::new`): the current dialect plus the
@@ -1577,7 +1619,12 @@ impl StreamDecoder {
                     });
                 }
                 for _ in 0..count {
-                    let op = DeltaOp::decode(&frame.payload, &mut cursor, self.limits)?;
+                    let op = DeltaOp::decode(
+                        &frame.payload,
+                        &mut cursor,
+                        self.limits,
+                        self.wide_delta_strings,
+                    )?;
                     if let DeltaOp::PutNode { fragment, .. } = &op {
                         // A fragment is a full module; its decoded nodes,
                         // field entries and payload bytes are the memory this
@@ -1944,6 +1991,11 @@ impl StreamDecoder {
 pub struct StreamEncoder {
     frames: VecDeque<Frame>,
     sequence: u64,
+    /// The stream's delta strings use the wide (`u32`) form (INF-L12).
+    wide_delta_strings: bool,
+    /// `frames()` or `to_bytes()` was called: the `Begin` bytes may
+    /// already be with a peer, so a late widening is refused (INF-L12).
+    emitted: AtomicBool,
 }
 
 impl std::fmt::Debug for StreamEncoder {
@@ -1963,12 +2015,74 @@ impl StreamEncoder {
         Ok(Self {
             frames: frames.into(),
             sequence,
+            wide_delta_strings: false,
+            emitted: AtomicBool::new(false),
         })
+    }
+
+    /// Opt in to wide (`u32`) delta strings up front (INF-L12).
+    ///
+    /// Call this before serializing when a later generation may carry a
+    /// delta string over 64 KiB: the `Begin` frame carries the flag from
+    /// construction, so frames serialized at any point agree with the
+    /// deltas. Without it, the first wide `push_delta` upgrades the
+    /// stream — which a stream that was already serialized, or one that
+    /// already carries narrow `Delta` frames, cannot do.
+    pub fn with_wide_delta_strings(mut self) -> Self {
+        self.set_wide();
+        self
+    }
+
+    /// Set the wide-delta-strings bit in the `Begin` frame and in the
+    /// encoder state (INF-L12). The `Begin` frame is always the first
+    /// frame `new` built, so the lookup cannot miss; the kind and length
+    /// checks keep a hand-built encoder honest instead of writing the bit
+    /// into a `Batch`.
+    fn set_wide(&mut self) {
+        if let Some(begin) = self.frames.front_mut() {
+            if begin.kind == FrameKind::Begin && begin.payload.len() == 24 {
+                let flags = u16::from_le_bytes([begin.payload[6], begin.payload[7]])
+                    | BEGIN_FLAG_WIDE_DELTA_STRINGS;
+                begin.payload[6..8].copy_from_slice(&flags.to_le_bytes());
+            }
+        }
+        self.wide_delta_strings = true;
     }
 
     /// Append an incremental generation: the delta ops plus the closing end
     /// frame carrying the hash of the *whole* re-encoded module.
+    ///
+    /// Delta strings over 64 KiB need the wide (`u32`) form (INF-L12):
+    /// the first `push_delta` that carries one upgrades the stream by
+    /// setting [`BEGIN_FLAG_WIDE_DELTA_STRINGS`] in the `Begin` frame, so
+    /// the frames must be serialized after the last `push_delta` — a
+    /// `Begin` serialized earlier stays narrow and its peer would misread
+    /// the wide delta. A stream that already carries narrow `Delta`
+    /// frames, or one that was already serialized, refuses a late wide
+    /// delta with `infinity/stream-delta` instead: start a new stream
+    /// with [`StreamEncoder::with_wide_delta_strings`] and push the wide
+    /// delta before serializing.
     pub fn push_delta(&mut self, base: &InfinityModule, ops: &[DeltaOp]) -> Result<()> {
+        if ops.iter().any(op_has_wide_string) && !self.wide_delta_strings {
+            // The width is stream-wide: the decoder reads every delta
+            // string in the width the `Begin` declares, so a stream cannot
+            // mix narrow and wide frames.
+            if self
+                .frames
+                .iter()
+                .any(|frame| frame.kind == FrameKind::Delta)
+            {
+                return Err(Error::StreamDelta(
+                    "delta string exceeds the u16 length space and this stream already carries narrow delta frames; start a new stream with StreamEncoder::with_wide_delta_strings",
+                ));
+            }
+            if self.emitted.load(Ordering::SeqCst) {
+                return Err(Error::StreamDelta(
+                    "delta string exceeds the u16 length space and this stream was already serialized with a narrow Begin frame; start a new stream with StreamEncoder::with_wide_delta_strings",
+                ));
+            }
+            self.set_wide();
+        }
         let updated = apply_delta(base, ops)?;
         // Both sides opt in to the drop (INF-04): the delta orphans the
         // replaced subtree on purpose, and the no-op check compares the
@@ -1990,7 +2104,7 @@ impl StreamEncoder {
                 .to_le_bytes(),
         );
         for op in ops {
-            op.encode(&mut payload)?;
+            op.encode(&mut payload, self.wide_delta_strings)?;
         }
         if payload.len() > MAX_FRAME_PAYLOAD as usize {
             // The decoder refuses a frame over the ceiling, so emitting one would
@@ -2012,12 +2126,21 @@ impl StreamEncoder {
     }
 
     /// All frames in order.
+    ///
+    /// Serializing marks the stream emitted: a later wide `push_delta`
+    /// cannot upgrade the `Begin` frame a peer may already hold, so it is
+    /// refused (INF-L12). Serialize after the last `push_delta`.
     pub fn frames(&self) -> Vec<Frame> {
+        self.emitted.store(true, Ordering::SeqCst);
         self.frames.iter().cloned().collect()
     }
 
     /// Concatenated frame bytes (a single byte stream).
+    ///
+    /// See [`StreamEncoder::frames`]: serializing marks the stream
+    /// emitted.
     pub fn to_bytes(&self) -> Vec<u8> {
+        self.emitted.store(true, Ordering::SeqCst);
         let mut out = Vec::new();
         for frame in &self.frames {
             out.extend_from_slice(&frame.to_bytes());
@@ -2026,21 +2149,61 @@ impl StreamEncoder {
     }
 }
 
-fn write_string(out: &mut Vec<u8>, text: &str) -> Result<()> {
-    let bytes = text.as_bytes();
-    if bytes.len() > u16::MAX as usize {
-        // This helper only writes delta payloads (annotation and provenance
-        // ops), so the fault is the delta's, not the image address space.
-        return Err(Error::StreamDelta(
-            "delta string exceeds the u16 length space",
-        ));
+/// Whether any string in `op` needs the wide (`u32`) form (INF-L12).
+///
+/// Mirrors the `encode` arms exactly: every string `encode` writes must
+/// be checked here, or a wide string would reach the narrow encoder.
+fn op_has_wide_string(op: &DeltaOp) -> bool {
+    const NARROW_MAX: usize = u16::MAX as usize;
+    match op {
+        DeltaOp::SetRoot(_) | DeltaOp::ClearAnnotations | DeltaOp::PutNode { .. } => false,
+        DeltaOp::SetBinding { name, .. } | DeltaOp::RemoveBinding { name } => {
+            name.len() > NARROW_MAX
+        }
+        DeltaOp::SetAnnotation { kind, .. } => match kind {
+            AnnotationKind::Intent(text) => text.len() > NARROW_MAX,
+            AnnotationKind::Constraint { source, .. } => source.len() > NARROW_MAX,
+            AnnotationKind::AiImmutable(_) => false,
+        },
+        DeltaOp::SetProvenance(prov) => match prov {
+            None => false,
+            Some(prov) => {
+                prov.producer.as_deref().is_some_and(|text| text.len() > NARROW_MAX)
+                    || prov.model.as_deref().is_some_and(|text| text.len() > NARROW_MAX)
+                    || prov.tool.as_deref().is_some_and(|text| text.len() > NARROW_MAX)
+                    || prov.entries.iter().any(|entry| {
+                        entry.key.len() > NARROW_MAX
+                            || matches!(&entry.value, crate::ir::ProvValue::Text(text) if text.len() > NARROW_MAX)
+                    })
+            }
+        },
     }
-    out.extend_from_slice(&(bytes.len() as u16).to_le_bytes());
+}
+
+fn write_string(out: &mut Vec<u8>, text: &str, wide: bool) -> Result<()> {
+    let bytes = text.as_bytes();
+    if wide {
+        // A `u32` length cannot overflow: `try_from` refuses a string
+        // over 4 GiB, and the frame ceiling refuses anything over 64 MiB
+        // once the payload is built (`push_delta` checks it).
+        let len = u32::try_from(bytes.len())
+            .map_err(|_| Error::StreamDelta("delta string exceeds the u32 length space"))?;
+        out.extend_from_slice(&len.to_le_bytes());
+    } else {
+        if bytes.len() > u16::MAX as usize {
+            // This helper only writes delta payloads (annotation and provenance
+            // ops), so the fault is the delta's, not the image address space.
+            return Err(Error::StreamDelta(
+                "delta string exceeds the u16 length space",
+            ));
+        }
+        out.extend_from_slice(&(bytes.len() as u16).to_le_bytes());
+    }
     out.extend_from_slice(bytes);
     Ok(())
 }
 
-fn write_opt_string(out: &mut Vec<u8>, text: Option<&str>) -> Result<()> {
+fn write_opt_string(out: &mut Vec<u8>, text: Option<&str>, wide: bool) -> Result<()> {
     match text {
         None => {
             out.push(0);
@@ -2048,7 +2211,7 @@ fn write_opt_string(out: &mut Vec<u8>, text: Option<&str>) -> Result<()> {
         }
         Some(text) => {
             out.push(1);
-            write_string(out, text)
+            write_string(out, text, wide)
         }
     }
 }
@@ -2103,35 +2266,61 @@ fn take_hash(buf: &[u8], cursor: &mut usize) -> Result<[u8; 32]> {
     Ok(hash)
 }
 
-/// Write a delta string: `u16` length, then the bytes (spec §4).
-fn write_delta_string(out: &mut Vec<u8>, text: &str) -> Result<()> {
-    let len = u16::try_from(text.len())
-        .map_err(|_| Error::StreamDelta("delta string exceeds the u16 length space"))?;
-    out.extend_from_slice(&len.to_le_bytes());
+/// Write a delta string: a `u16` length, then the bytes, in a narrow
+/// stream; a `u32` length in a wide one (spec §3, INF-L12).
+fn write_delta_string(out: &mut Vec<u8>, text: &str, wide: bool) -> Result<()> {
+    if wide {
+        let len = u32::try_from(text.len())
+            .map_err(|_| Error::StreamDelta("delta string exceeds the u32 length space"))?;
+        out.extend_from_slice(&len.to_le_bytes());
+    } else {
+        let len = u16::try_from(text.len())
+            .map_err(|_| Error::StreamDelta("delta string exceeds the u16 length space"))?;
+        out.extend_from_slice(&len.to_le_bytes());
+    }
     out.extend_from_slice(text.as_bytes());
     Ok(())
 }
 
-fn take_string(buf: &[u8], cursor: &mut usize) -> Result<String> {
-    if *cursor + 2 > buf.len() {
+/// Read a delta string: a `u16` length in a narrow stream, a `u32` length
+/// in a stream whose `Begin` set [`BEGIN_FLAG_WIDE_DELTA_STRINGS`]
+/// (INF-L12). The length is bounded by the remaining buffer either way,
+/// and the frame itself is bounded by `Limits::max_total_bytes`, so a
+/// wide string cannot buy an allocation past the caller's ceiling.
+fn take_string(buf: &[u8], cursor: &mut usize, wide: bool) -> Result<String> {
+    let prefix = if wide { 4 } else { 2 };
+    if *cursor + prefix > buf.len() {
         return Err(Error::StreamDelta("truncated delta payload"));
     }
-    let len = u16::from_le_bytes([buf[*cursor], buf[*cursor + 1]]) as usize;
-    *cursor += 2;
-    if *cursor + len > buf.len() {
-        return Err(Error::StreamDelta("truncated delta payload"));
-    }
-    let text = std::str::from_utf8(&buf[*cursor..*cursor + len])
+    let len = if wide {
+        u32::from_le_bytes([
+            buf[*cursor],
+            buf[*cursor + 1],
+            buf[*cursor + 2],
+            buf[*cursor + 3],
+        ]) as usize
+    } else {
+        u16::from_le_bytes([buf[*cursor], buf[*cursor + 1]]) as usize
+    };
+    *cursor += prefix;
+    // On a 32-bit target `*cursor + len` wraps for a `u32`-sized length,
+    // which would build a slice with `start > end` and panic in release
+    // (the same guard `decode_fragment` uses for its `u32` length).
+    let end = cursor
+        .checked_add(len)
+        .filter(|end| *end <= buf.len())
+        .ok_or(Error::StreamDelta("truncated delta payload"))?;
+    let text = std::str::from_utf8(&buf[*cursor..end])
         .map_err(|_| Error::StreamDelta("invalid UTF-8 in a delta string"))?
         .to_string();
-    *cursor += len;
+    *cursor = end;
     Ok(text)
 }
 
-fn take_opt_string(buf: &[u8], cursor: &mut usize) -> Result<Option<String>> {
+fn take_opt_string(buf: &[u8], cursor: &mut usize, wide: bool) -> Result<Option<String>> {
     match take_u8(buf, cursor)? {
         0 => Ok(None),
-        1 => Ok(Some(take_string(buf, cursor)?)),
+        1 => Ok(Some(take_string(buf, cursor, wide)?)),
         _ => Err(Error::StreamDelta("invalid optional string tag")),
     }
 }

@@ -1,9 +1,12 @@
 //! A three-way, field-level merge of module roots.
 //!
 //! Two parties start from a shared `base` module and each produces a `left` and
-//! a `right` module. The merge compares the root tables field by field and
-//! reports a typed conflict whenever both sides changed the same field in
-//! incompatible ways. Subtrees are compared by the canonical encoding of the
+//! a `right` module. The merge compares the root tables field by field, and
+//! when both sides changed the same table field it compares that table's
+//! fields in turn, recursing until a field that actually disagrees is found
+//! (INF-MERGE-01): two sides editing disjoint leaves of the same nested
+//! table merge cleanly, and only a leaf both sides changed differently
+//! conflicts. Subtrees are compared by the canonical encoding of the
 //! subtree alone, so a field that merely moved inside a module still compares
 //! equal.
 //!
@@ -214,7 +217,7 @@ pub fn merge(
         let b = base_map.get(name).copied();
         let l = left_map.get(name).copied();
         let r = right_map.get(name).copied();
-        match ctx.decide(b, l, r)? {
+        match ctx.decide(b, l, r, 0)? {
             Decision::Conflict(kind) => {
                 // Describe the conflict as precisely as the shapes allow: both
                 // sides being tables means the disagreement is inside them, and
@@ -288,6 +291,30 @@ pub fn merge(
         fields.sort_by(|a, b| a.0.cmp(&b.0));
     }
 
+    // Apply the nested merges (INF-MERGE-01): each `MergeNested` decision
+    // mutates the merged copy of the left table in place. The root-table
+    // application above never touches these fields, and node ids are
+    // stable across imports, so the child table is found by name here.
+    for (name, decision) in &decisions {
+        let Decision::MergeNested(children) = decision else {
+            continue;
+        };
+        let Some(root) = merged.root() else {
+            return Err(Error::Encode("merged root disappeared"));
+        };
+        let table = match merged.get(root) {
+            Some(Inode::Table { fields }) => fields
+                .iter()
+                .find(|(field, _)| field == name)
+                .map(|(_, id)| *id),
+            _ => None,
+        };
+        let Some(table) = table else {
+            return Err(Error::Encode("merged nested table disappeared"));
+        };
+        apply_nested(&mut merged, right, table, children, &mut imported)?;
+    }
+
     apply_metadata(&mut merged, right, plan, &mut imported)?;
 
     // Canonicalize: this drops any fragment nodes the selected subtree does not
@@ -324,6 +351,11 @@ enum Decision {
     TakeRight(NodeId),
     Delete,
     Conflict(ConflictKind),
+    /// Both sides changed different nested fields of the same table; the
+    /// children carry the per-field decisions, recursively. A child that
+    /// itself conflicts makes the whole table a conflict instead (see
+    /// `Ctx::decide`), so a `MergeNested` tree never contains a `Conflict`.
+    MergeNested(Vec<(String, Decision)>),
 }
 
 /// One module-level component the field merge does not own.
@@ -388,7 +420,13 @@ impl Ctx<'_> {
         Ok(())
     }
 
-    fn decide(&self, b: Option<NodeId>, l: Option<NodeId>, r: Option<NodeId>) -> Result<Decision> {
+    fn decide(
+        &self,
+        b: Option<NodeId>,
+        l: Option<NodeId>,
+        r: Option<NodeId>,
+        depth: usize,
+    ) -> Result<Decision> {
         // Secret material is never compared. Equality is an oracle
         // (`SECURITY.md` I-2), so a field that holds a secret on either side is
         // a conflict even when the two subtrees are byte-identical: the
@@ -439,7 +477,75 @@ impl Ctx<'_> {
         } else {
             ConflictKind::ModifyModify
         };
+        // Both sides changed a table field: try to settle it field by
+        // field (INF-MERGE-01). The whole-field conflict above stands when
+        // the shapes differ, when a nested field itself conflicts, or when
+        // the recursion bound is reached.
+        if depth < MAX_CONFLICT_DEPTH {
+            if let Some(children) = self.try_nested_merge(b, l, r, depth)? {
+                return Ok(Decision::MergeNested(children));
+            }
+        }
         Ok(Decision::Conflict(kind))
+    }
+
+    /// Try to settle a both-changed table field per nested field
+    /// (INF-MERGE-01).
+    ///
+    /// Returns `Some(children)` when every nested field decides without a
+    /// conflict — the children are the per-field decisions, themselves
+    /// recursive — and `None` when the field must stay a whole-field
+    /// conflict: a side is not a table, the base is not a table, or any
+    /// nested field itself conflicts. The caller keeps the whole-field
+    /// conflict kind it already computed; this function never reports a
+    /// conflict of its own.
+    fn try_nested_merge(
+        &self,
+        b: Option<NodeId>,
+        l: Option<NodeId>,
+        r: Option<NodeId>,
+        depth: usize,
+    ) -> Result<Option<Vec<(String, Decision)>>> {
+        let (Some(left_id), Some(right_id)) = (l, r) else {
+            // One side deleted the field: nothing to merge field by field.
+            return Ok(None);
+        };
+        // The base must be a table too, when it exists: a base that is not
+        // a table means the shape changed, and the parent's conflict
+        // stands (`a_non_table_base_is_not_descended_into`).
+        let base_fields = match b {
+            Some(id) => match table_fields(self.base, id)? {
+                Some(fields) => Some(fields),
+                None => return Ok(None),
+            },
+            None => None,
+        };
+        let (Some(left_fields), Some(right_fields)) = (
+            table_fields(self.left, left_id)?,
+            table_fields(self.right, right_id)?,
+        ) else {
+            // Either side is not a table: the shapes differ.
+            return Ok(None);
+        };
+        let names: BTreeSet<&str> = left_fields
+            .keys()
+            .chain(right_fields.keys())
+            .copied()
+            .collect();
+        let mut children: Vec<(String, Decision)> = Vec::with_capacity(names.len());
+        for name in names {
+            let child_base = base_fields
+                .as_ref()
+                .and_then(|fields| fields.get(name))
+                .copied();
+            let child_left = left_fields.get(name).copied();
+            let child_right = right_fields.get(name).copied();
+            match self.decide(child_base, child_left, child_right, depth + 1)? {
+                Decision::Conflict(_) => return Ok(None),
+                decision => children.push((name.to_string(), decision)),
+            }
+        }
+        Ok(Some(children))
     }
 
     /// Compare two optional nodes across modules by their canonical subtree.
@@ -554,7 +660,9 @@ impl Ctx<'_> {
                 .copied();
             let child_left = left_fields.get(name).copied();
             let child_right = right_fields.get(name).copied();
-            if let Decision::Conflict(kind) = self.decide(child_base, child_left, child_right)? {
+            if let Decision::Conflict(kind) =
+                self.decide(child_base, child_left, child_right, depth + 1)?
+            {
                 let child_path = format!("{path}.{}", self.field_label(name)?);
                 let before = out.len();
                 self.nested_conflicts(
@@ -723,6 +831,101 @@ fn apply_metadata(
     }
     if let Some(extensions) = plan.extensions {
         merged.set_extensions(extensions);
+    }
+    Ok(())
+}
+
+/// Apply the per-field decisions of one nested table merge (INF-MERGE-01)
+/// to the merged copy of the left table.
+///
+/// `table` is the node in `into` holding the left table. Its field list is
+/// rewritten once, mirroring the root-table application in `merge`:
+/// `TakeRight` slots are imported from `from` and replaced (or added, when
+/// the right side added the nested field), `Delete` slots are removed, and
+/// `MergeNested` children recurse into their own table. The child ids are
+/// read before any import — imports append nodes, so those ids stay valid
+/// — and the recursion depth is bounded by construction: the decision tree
+/// was built under `MAX_CONFLICT_DEPTH`.
+fn apply_nested(
+    into: &mut InfinityModule,
+    from: &InfinityModule,
+    table: NodeId,
+    decisions: &[(String, Decision)],
+    imported: &mut usize,
+) -> Result<()> {
+    // Snapshot the table's current field slots before any import: the
+    // borrow must end before `import_subtree` takes `into` mutably.
+    let slots: Vec<(String, NodeId)> = match into.get(table) {
+        Some(Inode::Table { fields }) => fields.clone(),
+        _ => return Err(Error::Encode("merged nested table disappeared")),
+    };
+    // Copy right-hand subtrees before mutating the table, so the fragment
+    // import never sees a borrowed table (same order as the root apply).
+    let mut additions: Vec<(String, NodeId)> = Vec::new();
+    let mut nested: Vec<(NodeId, &[(String, Decision)])> = Vec::new();
+    let mut removed: BTreeSet<&str> = BTreeSet::new();
+    for (name, decision) in decisions {
+        match decision {
+            Decision::KeepLeft => {}
+            Decision::TakeRight(id) => {
+                let (copied, nodes) = import_subtree(into, from, *id)?;
+                *imported = imported.saturating_add(nodes);
+                if *imported > MAX_MERGE_NODES {
+                    return Err(Error::Limit {
+                        kind: "merge imported nodes",
+                        limit: MAX_MERGE_NODES as u64,
+                    });
+                }
+                additions.push((name.clone(), copied));
+            }
+            Decision::Delete => {
+                removed.insert(name.as_str());
+            }
+            Decision::MergeNested(children) => {
+                let child = slots
+                    .iter()
+                    .find(|(field, _)| field == name)
+                    .map(|(_, id)| *id)
+                    .ok_or(Error::Encode("merged nested table disappeared"))?;
+                nested.push((child, children.as_slice()));
+            }
+            Decision::Conflict(_) => {
+                // A `MergeNested` tree never contains a conflict: the
+                // parent `decide` fell back to the whole-field conflict
+                // instead. Fail closed if one ever appears.
+                return Err(Error::Encode("nested merge holds a conflict"));
+            }
+        }
+    }
+    // Rewrite this table's field list once: drop the deletes, replace the
+    // imported slots, append the added ones, and keep the canonical field
+    // order — the same shape as the root-table application.
+    let table_node = into
+        .node_mut(table)
+        .map_err(|_| Error::Encode("merged nested table disappeared"))?;
+    let Inode::Table { fields } = table_node else {
+        return Err(Error::Encode("merged nested table disappeared"));
+    };
+    fields.retain(|(name, _)| !removed.contains(name.as_str()));
+    let mut pending: std::collections::HashMap<&str, NodeId> = additions
+        .iter()
+        .map(|(name, id)| (name.as_str(), *id))
+        .collect();
+    for (name, slot) in fields.iter_mut() {
+        if let Some(id) = pending.remove(name.as_str()) {
+            *slot = id;
+        }
+    }
+    for (name, id) in &additions {
+        if pending.contains_key(name.as_str()) {
+            fields.push((name.clone(), *id));
+        }
+    }
+    fields.sort_by(|a, b| a.0.cmp(&b.0));
+    // Recurse into the nested tables: their node ids were read before this
+    // rewrite and are unaffected by it.
+    for (child, children) in nested {
+        apply_nested(into, from, child, children, imported)?;
     }
     Ok(())
 }

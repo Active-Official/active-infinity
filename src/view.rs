@@ -261,15 +261,47 @@ impl<'a> InfinityView<'a> {
     }
 
     /// Derived dependents of a node (nodes that reference it), sorted.
+    ///
+    /// Scans the stored edge table directly, one entry at a time
+    /// (`Validated::edge(i)`) — it never materialises the full table the
+    /// way `edges()` does (INF-L08). Time is O(E) per call: the stored
+    /// table carries no reverse index, so every edge must be examined.
+    /// Allocation is O(result). A caller that needs the dependents of many
+    /// nodes should use `dependents_map()` instead, which pays the O(E)
+    /// scan once for every node.
     pub fn dependents(&self, id: NodeId) -> Result<Vec<NodeId>> {
         let mut out = Vec::new();
-        for (from, to) in self.edges()? {
-            if from == id {
-                out.push(to);
+        for index in 0..self.validated.span(crate::layout::Section::Edges).count {
+            let (from, to) = self.validated.edge(index)?;
+            if from == id.0 {
+                out.push(NodeId(to));
             }
         }
         out.sort_unstable();
         out.dedup();
+        Ok(out)
+    }
+
+    /// Every node's dependents in a single scan of the stored edge table.
+    ///
+    /// The bulk form of `dependents()` (INF-L08): one O(E) pass over the
+    /// table builds the whole reverse map, instead of one O(E) scan per
+    /// node for a caller looping `dependents()` over all nodes (O(V x E)).
+    /// Returns one entry per node, indexed by node id; each entry is
+    /// sorted and deduplicated, exactly as `dependents()` returns it.
+    /// The map itself is O(V + E) by construction — it holds every edge
+    /// once, grouped by its dependency.
+    pub fn dependents_map(&self) -> Result<Vec<Vec<NodeId>>> {
+        let mut out: Vec<Vec<NodeId>> = vec![Vec::new(); self.validated.node_count() as usize];
+        for index in 0..self.validated.span(crate::layout::Section::Edges).count {
+            let (from, to) = self.validated.edge(index)?;
+            let dependents = out.get_mut(from as usize).ok_or(Error::Edge { from, to })?;
+            dependents.push(NodeId(to));
+        }
+        for dependents in &mut out {
+            dependents.sort_unstable();
+            dependents.dedup();
+        }
         Ok(out)
     }
 
@@ -282,6 +314,12 @@ impl<'a> InfinityView<'a> {
     }
 
     /// All edges, as (dependency, dependent).
+    ///
+    /// This materialises the whole table (one entry per stored edge, up
+    /// to `max_edges`), by design: a caller that only needs one node's
+    /// dependents should use `dependents()` — which scans the table
+    /// without materialising it — or `dependents_map()` for the bulk form
+    /// (INF-L08).
     pub fn edges(&self) -> Result<Vec<(NodeId, NodeId)>> {
         let mut out = Vec::new();
         for index in 0..self.validated.span(crate::layout::Section::Edges).count {

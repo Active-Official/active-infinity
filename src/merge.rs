@@ -43,13 +43,19 @@
 //! Work is bounded by a node budget: every subtree comparison materialises only
 //! the reachable cone of that subtree (never the whole module), imported
 //! right-hand nodes are charged against [`MAX_MERGE_NODES`], and a total visit
-//! budget [`MAX_MERGE_WORK`] stops a pathological conflict walk. The output
+//! budget [`MAX_MERGE_WORK`] stops a pathological conflict walk. Secret
+//! walks are memoized per (module, node) within one merge, so the three
+//! comparisons of one field share the walks (INF-MERGE-06). When the
+//! budget cannot pay for another level of conflict refinement, the
+//! refinement stops and the parent conflict stands instead of erroring:
+//! a large legitimate conflicting merge reports its conflicts rather
+//! than failing with `Limit("merge work")` (INF-MERGE-06). The output
 //! ceiling is checked on the kept-node count before the final encode
 //! (INF-MERGE-04), so an over-ceiling merge is refused without paying for a
 //! canonical encode + decode of a module that is thrown away.
 
-use std::cell::Cell;
-use std::collections::{BTreeMap, BTreeSet};
+use std::cell::{Cell, RefCell};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use crate::ir::{AnnotationKind, InfinityModule, Inode, NodeId, Provenance};
 use crate::layout::EncodeOpts;
@@ -91,6 +97,13 @@ pub const MAX_CONFLICT_PATH_BYTES: usize = 1 << 20;
 
 /// Deepest nested conflict path reported.
 const MAX_CONFLICT_DEPTH: usize = 64;
+
+/// Work charges one level of conflict refinement costs, per node of
+/// the refined cone (INF-MERGE-06). Deciding one child costs up to
+/// three fresh secret walks at two charges per node plus six subtree
+/// images at one charge per node; one level's children partition the
+/// parent's cone, so a level costs `12 x cone`.
+const REFINEMENT_LEVEL_CHARGES_PER_NODE: usize = 12;
 
 /// Why a field could not be merged automatically.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -199,6 +212,7 @@ pub fn merge(
         hash_secrets,
         secret_texts,
         redaction: Cell::new(MAX_MERGE_WORK),
+        secret_memo: RefCell::new(HashMap::new()),
     };
 
     let mut conflicts = ConflictSet::default();
@@ -236,11 +250,35 @@ pub fn merge(
             Decision::Conflict(kind) => {
                 // Describe the conflict as precisely as the shapes allow: both
                 // sides being tables means the disagreement is inside them, and
-                // a dotted path names the field that actually differs.
+                // a dotted path names the field that actually differs. When
+                // the refinement is truncated (INF-MERGE-06) the parent
+                // path stands for the unrefined remainder as well: the
+                // report then holds the conflicts established so far plus
+                // the parent, never an error for a conflict the merge
+                // already established.
                 let before = conflicts.len();
-                ctx.nested_conflicts(name, b, l, r, 0, &mut conflicts)?;
-                if conflicts.len() == before {
-                    conflicts.push(ctx.field_label(name)?, kind)?;
+                let complete = match ctx.nested_conflicts(name, b, l, r, 0, &mut conflicts) {
+                    Ok(complete) => complete,
+                    Err(Error::Limit { .. }) => false,
+                    Err(error) => return Err(error),
+                };
+                if !complete || conflicts.len() == before {
+                    // INF-MERGE-06: the parent path stands for the
+                    // unrefined remainder. If even the parent no longer
+                    // fits the conflict-path budget (or its label cannot
+                    // be redacted within budget), the established
+                    // conflicts stand alone — erroring here would
+                    // discard a real conflict report for a merge whose
+                    // conflicts are already established.
+                    match ctx.field_label(name) {
+                        Ok(label) => match conflicts.push(label, kind) {
+                            Ok(()) => {}
+                            Err(Error::Limit { .. }) => {}
+                            Err(error) => return Err(error),
+                        },
+                        Err(Error::Limit { .. }) => {}
+                        Err(error) => return Err(error),
+                    }
                 }
             }
             decision => {
@@ -497,6 +535,13 @@ struct MetaPlan {
     extensions: Option<Vec<(u64, Vec<u8>)>>,
 }
 
+/// Memoized `has_secret` answers per (module, node) within one
+/// merge: whether the cone holds a secret, and the cone size the
+/// answer was measured over (INF-MERGE-06). Factored out of the
+/// `Ctx.secret_memo` field so the field type stays under
+/// clippy's `type_complexity` threshold.
+type SecretMemo = HashMap<(*const InfinityModule, NodeId), (bool, usize)>;
+
 struct Ctx<'a> {
     base: &'a InfinityModule,
     left: &'a InfinityModule,
@@ -508,6 +553,13 @@ struct Ctx<'a> {
     secret_texts: Vec<String>,
     /// Cumulative budget for redacting labels.
     redaction: Cell<usize>,
+    /// Memoized `has_secret` answers per (module, node) within one
+    /// merge, with the cone size each answer was measured over
+    /// (INF-MERGE-06). The inputs are immutable and borrowed for the
+    /// whole merge, so a pointer key is sound: the same allocation is
+    /// the same module, and a different allocation is walked on its
+    /// own merits.
+    secret_memo: RefCell<SecretMemo>,
 }
 
 impl Ctx<'_> {
@@ -630,6 +682,12 @@ impl Ctx<'_> {
         r: Option<NodeId>,
         depth: usize,
     ) -> Result<Option<Vec<(String, Decision)>>> {
+        // INF-MERGE-06: when the remaining work budget cannot pay for
+        // one more level of refinement, the whole-field conflict the
+        // caller already established stands — no descent is started.
+        if !self.refinement_affordable(self.cones(b, l, r)) {
+            return Ok(None);
+        }
         let (Some(left_id), Some(right_id)) = (l, r) else {
             // One side deleted the field: nothing to merge field by field.
             return Ok(None);
@@ -664,9 +722,15 @@ impl Ctx<'_> {
                 .copied();
             let child_left = left_fields.get(name).copied();
             let child_right = right_fields.get(name).copied();
-            match self.decide(child_base, child_left, child_right, depth + 1)? {
-                Decision::Conflict(_) => return Ok(None),
-                decision => children.push((name.to_string(), decision)),
+            match self.decide(child_base, child_left, child_right, depth + 1) {
+                Ok(Decision::Conflict(_)) => return Ok(None),
+                Ok(decision) => children.push((name.to_string(), decision)),
+                // INF-MERGE-06: the budget died while refining a
+                // conflict the caller already established. The
+                // whole-field conflict stands; any other error still
+                // propagates.
+                Err(Error::Limit { .. }) => return Ok(None),
+                Err(error) => return Err(error),
             }
         }
         Ok(Some(children))
@@ -706,7 +770,18 @@ impl Ctx<'_> {
     }
 
     /// Whether a subtree reaches secret material, charging every node visited.
+    ///
+    /// Memoized per (module, node) within one merge (INF-MERGE-06):
+    /// `decide()` asks the same node up to eight times (its own two
+    /// walks plus two per `equal()` call), and the walks are the
+    /// dominant cost on a large subtree. Only the queried node's
+    /// answer is cached; a walk that errors caches nothing, so a
+    /// failed walk never poisons the memo.
     fn has_secret(&self, module: &InfinityModule, id: NodeId) -> Result<bool> {
+        let key = (module as *const InfinityModule, id);
+        if let Some(&(found, _)) = self.secret_memo.borrow().get(&key) {
+            return Ok(found);
+        }
         let mut seen = BTreeSet::new();
         let mut stack = vec![id];
         let mut found = false;
@@ -727,7 +802,48 @@ impl Ctx<'_> {
             stack.extend(children);
         }
         self.charge(seen.len())?;
+        self.secret_memo
+            .borrow_mut()
+            .insert(key, (found, seen.len()));
         Ok(found)
+    }
+
+    /// The cone size `has_secret` measured for one node, when it has
+    /// been walked already (INF-MERGE-06). `None` means the node was
+    /// never walked: the refinement pre-check treats that as
+    /// "unknown" and proceeds, with the `Limit` catch as the backstop.
+    fn cached_cone(&self, module: &InfinityModule, id: NodeId) -> Option<usize> {
+        self.secret_memo
+            .borrow()
+            .get(&(module as *const InfinityModule, id))
+            .map(|&(_, nodes)| nodes)
+    }
+
+    /// The measured cone sizes of one field's three sides, for the
+    /// refinement pre-check (INF-MERGE-06). `None` per side that was
+    /// never walked (or has no node).
+    fn cones(&self, b: Option<NodeId>, l: Option<NodeId>, r: Option<NodeId>) -> [Option<usize>; 3] {
+        [
+            b.and_then(|id| self.cached_cone(self.base, id)),
+            l.and_then(|id| self.cached_cone(self.left, id)),
+            r.and_then(|id| self.cached_cone(self.right, id)),
+        ]
+    }
+
+    /// Whether one more level of conflict refinement fits in the
+    /// remaining work budget (INF-MERGE-06). One level costs up to
+    /// `REFINEMENT_LEVEL_CHARGES_PER_NODE` per node of the refined
+    /// cone, and the cone is the largest of the three sides' measured
+    /// cones. When the remainder cannot pay for even one level, the
+    /// refinement is not started: the parent conflict stands instead
+    /// of a descent that can only die mid-way. An unmeasured cone
+    /// (all three sides `None`) means "unknown" and the refinement
+    /// proceeds.
+    fn refinement_affordable(&self, cones: [Option<usize>; 3]) -> bool {
+        let Some(largest) = cones.into_iter().flatten().max() else {
+            return true;
+        };
+        self.budget.get() >= largest.saturating_mul(REFINEMENT_LEVEL_CHARGES_PER_NODE)
     }
 
     /// Describe a conflict inside two tables with dotted paths.
@@ -739,6 +855,15 @@ impl Ctx<'_> {
     /// shape changed, and the parent's `ModifyModify` stands. A subtree that
     /// reaches a secret is never walked, and the depth is capped so a
     /// pathological shape cannot recurse without bound.
+    ///
+    /// Returns whether the refinement completed (`true`) or was
+    /// truncated early (`false`, INF-MERGE-06): the budget pre-check
+    /// fired, or a `Limit` stopped the descent. On truncation the
+    /// caller pushes the parent path with the already-established
+    /// kind, so the report names the conflict even though its leaves
+    /// are unrefined. `Limit` errors from this frame's own walks are
+    /// left to propagate — the caller maps them to truncation — while
+    /// any other error still propagates as an error.
     fn nested_conflicts(
         &self,
         path: &str,
@@ -747,22 +872,28 @@ impl Ctx<'_> {
         r: Option<NodeId>,
         depth: usize,
         out: &mut ConflictSet,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         if depth >= MAX_CONFLICT_DEPTH {
-            return Ok(());
+            return Ok(true);
+        }
+        // INF-MERGE-06: when the remaining work budget cannot pay for
+        // one more level of refinement, stop here — the caller stands
+        // the parent conflict for the unrefined remainder.
+        if !self.refinement_affordable(self.cones(b, l, r)) {
+            return Ok(false);
         }
         let (Some(left_id), Some(right_id)) = (l, r) else {
-            return Ok(());
+            return Ok(true);
         };
         if self.has_secret(self.left, left_id)? || self.has_secret(self.right, right_id)? {
-            return Ok(());
+            return Ok(true);
         }
         let base_fields = match b {
             Some(id) => match table_fields(self.base, id)? {
                 Some(fields) => Some(fields),
                 // The base is not a table while both sides are: the shape
                 // changed, so this is the parent's conflict, not a child's.
-                None => return Ok(()),
+                None => return Ok(true),
             },
             None => None,
         };
@@ -770,7 +901,7 @@ impl Ctx<'_> {
             table_fields(self.left, left_id)?,
             table_fields(self.right, right_id)?,
         ) else {
-            return Ok(());
+            return Ok(true);
         };
         let names: BTreeSet<&str> = left_fields
             .keys()
@@ -789,20 +920,32 @@ impl Ctx<'_> {
             {
                 let child_path = format!("{path}.{}", self.field_label(name)?);
                 let before = out.len();
-                self.nested_conflicts(
+                let complete = match self.nested_conflicts(
                     &child_path,
                     child_base,
                     child_left,
                     child_right,
                     depth + 1,
                     out,
-                )?;
+                ) {
+                    Ok(complete) => complete,
+                    // INF-MERGE-06: the child's refinement was
+                    // truncated by a `Limit`. Stop this frame too —
+                    // the caller stands the parent path for the
+                    // unrefined remainder. Any other error still
+                    // propagates.
+                    Err(Error::Limit { .. }) => return Ok(false),
+                    Err(error) => return Err(error),
+                };
+                if !complete {
+                    return Ok(false);
+                }
                 if out.len() == before {
                     out.push(child_path, kind)?;
                 }
             }
         }
-        Ok(())
+        Ok(true)
     }
 
     /// Compare the module-level components and plan how to apply the one-sided
@@ -1482,13 +1625,17 @@ impl ConflictSet {
     }
 
     fn push(&mut self, field: String, kind: ConflictKind) -> Result<()> {
-        self.bytes = self.bytes.saturating_add(field.len());
-        if self.bytes > MAX_CONFLICT_PATH_BYTES {
+        // INF-MERGE-06: check before charging. A failed push must not
+        // consume path budget: the truncation it triggers still owes
+        // the caller a parent conflict, and that push needs the bytes
+        // this one did not spend.
+        if self.bytes.saturating_add(field.len()) > MAX_CONFLICT_PATH_BYTES {
             return Err(Error::Limit {
                 kind: "merge conflict paths",
                 limit: MAX_CONFLICT_PATH_BYTES as u64,
             });
         }
+        self.bytes = self.bytes.saturating_add(field.len());
         self.list.push(Conflict { field, kind });
         Ok(())
     }

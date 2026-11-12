@@ -178,6 +178,26 @@ const BROAD_SIDS: [&str; 3] = ["S-1-1-0", "S-1-5-32-545", "S-1-5-11"];
 /// The SIDs holding an ACE on `path`, via PowerShell (XPL-INF-07). Panics
 /// when PowerShell cannot run or the query fails: a test that cannot inspect
 /// the ACL must fail closed, not pass vacuously.
+///
+/// The spawned `powershell` (Windows PowerShell 5.1) runs with
+/// `PSModulePath` REMOVED from its environment. CI-FIX-INF-15: without this,
+/// the child inherits the ambient `PSModulePath`, and on the GitHub runner
+/// that ambient path is the one built by the `pwsh` (PowerShell 7) session
+/// the `run: cargo test` step executes under -- it lists the PowerShell 7
+/// modules directory first. Windows PowerShell 5.1 module autoload then
+/// finds `Microsoft.PowerShell.Security` 7.0.0.0 (the PowerShell 7 edition)
+/// before its own 3.0.0.0 edition and fails to load it into 5.1
+/// (`CouldNotAutoloadMatchingModule`), so both ACL tests panic at the
+/// `Get-Acl failed` assert below -- while the same tests pass from `cmd`,
+/// whose `PSModulePath` holds only the 5.1 directories. An explicit
+/// `Import-Module Microsoft.PowerShell.Security` does NOT fix it (it fails
+/// the same way: the 7.x `Security.types.ps1xml` cannot load into 5.1,
+/// `FormatXmlUpdateException`, and `Get-Acl` still fails afterwards).
+/// With `PSModulePath` absent, 5.1 rebuilds its default module path (user
+/// modules, `Program Files\WindowsPowerShell\Modules`, and its own system
+/// directory), which holds only the 3.0.0.0 edition -- so `Get-Acl` loads
+/// regardless of which shell spawned `cargo test`. The property pinned here
+/// is unchanged: the SIDs are still read through `Get-Acl`, in SID form.
 #[cfg(windows)]
 fn acl_sids(path: &Path) -> Vec<String> {
     let script = format!(
@@ -186,6 +206,7 @@ fn acl_sids(path: &Path) -> Vec<String> {
     );
     let output = std::process::Command::new("powershell")
         .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+        .env_remove("PSModulePath")
         .output()
         .expect("spawn powershell");
     assert!(

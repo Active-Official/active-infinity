@@ -691,7 +691,7 @@ fn a_signing_seed_can_come_from_a_file() {
     // signing from a file needs the explicit --allow-insecure-seed flag
     // (INF-CLI-02). The refusal itself is covered by
     // `a_world_readable_seed_file_is_refused_on_windows`.
-    let mut argv: Vec<&str> = vec![
+    let argv: Vec<&str> = vec![
         "store",
         "put",
         image_path.to_str().expect("utf8"),
@@ -700,6 +700,11 @@ fn a_signing_seed_can_come_from_a_file() {
         "--sign-file",
         seed_path.to_str().expect("utf8"),
     ];
+    // The extra flag exists only on Windows (INF-CLI-02): the `mut` is
+    // needed there but unused on Linux, where `-D warnings` fails the
+    // `Clippy (CLI lint)` CI job. Rebind as mutable on Windows only.
+    #[cfg(windows)]
+    let mut argv = argv;
     #[cfg(windows)]
     argv.push("--allow-insecure-seed");
     let put = run(&argv);

@@ -5,11 +5,11 @@
 //! `proptest` reports the number of cases it ran; the tests also assert that the
 //! generators produced non-trivial modules so a green run means something.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 use active_infinity::{
     decode, encode, validate, AnnotationKind, Constraint, DecodeOpts, InfinityModule, Inode,
-    InterpPart, Limits, SerializedKind, UnitTag,
+    InterpPart, Limits, NodeId, SerializedKind, UnitTag,
 };
 use proptest::prelude::*;
 
@@ -89,6 +89,55 @@ fn module_from(spec: &Spec) -> InfinityModule {
     module
 }
 
+/// Collect, in depth-first encounter order, the ordered field-name vector of
+/// every table in the module reachable from its root.
+///
+/// This is the assertion TEST-13 needs. `InfinityModule::eq` is canonical
+/// structural equality, so it cannot see field order, and `encode` re-sorts
+/// table fields before writing them: a decoded module with every table's
+/// fields reversed still compares equal and still re-encodes to the same
+/// bytes. The ordered vectors collected here are the only check in this file
+/// that can see decoded field order. `SchemaTable` is collected the same way:
+/// `decode` materialises its fields in wire order too, so the same blindness
+/// would apply to it even though the generator below never builds one.
+/// The `seen` set keeps the walk total on a shared (DAG) node instead of
+/// revisiting it; both modules share the same structure, so encounter order
+/// still matches between them.
+fn ordered_table_fields(module: &InfinityModule) -> Vec<Vec<String>> {
+    fn walk(
+        module: &InfinityModule,
+        id: NodeId,
+        seen: &mut HashSet<NodeId>,
+        out: &mut Vec<Vec<String>>,
+    ) {
+        if !seen.insert(id) {
+            return;
+        }
+        let Some(node) = module.get(id) else {
+            return;
+        };
+        match node {
+            Inode::Table { fields } | Inode::SchemaTable { fields, .. } => {
+                out.push(fields.iter().map(|(name, _)| name.clone()).collect());
+                for (_, child) in fields {
+                    walk(module, *child, seen, out);
+                }
+            }
+            other => {
+                for child in other.children() {
+                    walk(module, child, seen, out);
+                }
+            }
+        }
+    }
+
+    let mut out = Vec::new();
+    if let Some(root) = module.root() {
+        walk(module, root, &mut HashSet::new(), &mut out);
+    }
+    out
+}
+
 proptest! {
     #![proptest_config(ProptestConfig { cases: 256, ..ProptestConfig::default() })]
 
@@ -102,6 +151,18 @@ proptest! {
         // Rebuilding the same logical value produces the same bytes.
         let rebuilt = module_from(&spec);
         prop_assert_eq!(encode(&rebuilt).expect("rebuild"), bytes);
+        // TEST-13: the three assertions above are all order-blind — `==`
+        // is canonical structural equality and `encode` re-sorts table
+        // fields — so they pass even with every decoded table's fields
+        // reversed (mutation M09). Compare the materialised field-name
+        // vectors in order instead: that is the property the mutation
+        // breaks. The generator builds tables from a `BTreeMap`, so the
+        // original order is sorted and the decoded order must match it
+        // exactly, nested tables included.
+        prop_assert_eq!(
+            ordered_table_fields(&decoded),
+            ordered_table_fields(&module)
+        );
     }
 
     #[test]
@@ -190,6 +251,49 @@ fn generators_produce_real_modules() {
         .unwrap()
         .nodes,
         module.node_count() as u32
+    );
+}
+
+/// TEST-13 pin: decode materialises table fields in wire order, and the
+/// ordered comparison in `round_trip_and_canonical_stability` really sees
+/// that order. A hand-built module whose root table is inserted in
+/// non-sorted order (`b` before `a`) encodes to the canonical (sorted)
+/// image, so the decoded root table must read `["a", "b"]` — and the nested
+/// table `["c", "d"]`. If `ordered_table_fields` ever returned empty
+/// vectors, this test would fail: the expected vectors are non-empty.
+/// A non-sorted insertion order cannot be asserted through strict `decode`
+/// itself — the canonical proof re-encodes and rejects any non-canonical
+/// image — so sorted order is the strongest case the strict path admits.
+#[test]
+fn decoded_table_fields_keep_wire_order_sorted() {
+    let mut module = InfinityModule::new();
+    let inner_int = module.push(Inode::Int(1));
+    let inner_str = module.push(Inode::Str("x".into()));
+    let nested = module.push(Inode::Table {
+        fields: vec![("d".to_string(), inner_str), ("c".to_string(), inner_int)],
+    });
+    let outer_int = module.push(Inode::Int(2));
+    let root = module.push(Inode::Table {
+        fields: vec![("b".to_string(), nested), ("a".to_string(), outer_int)],
+    });
+    module.set_root(Some(root));
+    let bytes = encode(&module).expect("encode");
+    let decoded = decode(&bytes).expect("decode");
+    assert_eq!(
+        ordered_table_fields(&decoded),
+        vec![
+            vec!["a".to_string(), "b".to_string()],
+            vec!["c".to_string(), "d".to_string()],
+        ]
+    );
+    // The collector reports the original's insertion order, not a sorted
+    // view of it: if it sorted, this would read `["a", "b"]` / `["c", "d"]`.
+    assert_eq!(
+        ordered_table_fields(&module),
+        vec![
+            vec!["b".to_string(), "a".to_string()],
+            vec!["d".to_string(), "c".to_string()],
+        ]
     );
 }
 

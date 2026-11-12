@@ -56,9 +56,14 @@
 
 use active_infinity::interop::resolve_path;
 use active_infinity::{
-    merge, ConflictKind, InfinityModule, Inode, Merge, NodeId, ProvEntry, ProvValue, Provenance,
-    SecretBytes,
+    merge, ConflictKind, InfinityModule, Inode, Merge, NodeId,
 };
+
+// Used only by the `json`-gated provenance fixtures below; without the
+// gate these imports are unused when the `json` feature is off (the
+// `Clippy (no default features)` CI job) and `-D warnings` fails.
+#[cfg(feature = "json")]
+use active_infinity::{ProvEntry, ProvValue, Provenance, SecretBytes};
 
 #[cfg(feature = "json")]
 use active_infinity::interop::{provenance_json, provenance_json_for, SECRET_MARKER};

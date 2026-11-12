@@ -44,6 +44,10 @@
 //!   the streaming encoder that would remove the quadratic cost is a
 //!   recorded follow-up, not this fix.
 
+// `to_redacted_json` is gated behind the `json` feature in the library;
+// an unconditional import fails `cargo clippy --no-default-features`
+// (E0432) in the `Clippy (no default features)` CI job.
+#[cfg(feature = "json")]
 use active_infinity::interop::to_redacted_json;
 use active_infinity::{encode, Error, InfinityModule, Inode};
 use active_infinity::{to_protobuf, validate};
@@ -76,6 +80,9 @@ fn assert_codec_depth_refusal(error: &Error) {
     }
 }
 
+// JSON-only helper: with the `json` feature off its callers are gated
+// out, and an ungated helper would trip `dead_code` under -D warnings.
+#[cfg(feature = "json")]
 /// Assert the JSON of a `depth`-deep nested-table module has exactly one
 /// field per table and the leaf `Int(1)` innermost.
 fn assert_nested_json(json: &str, depth: usize) {
@@ -90,6 +97,7 @@ fn assert_nested_json(json: &str, depth: usize) {
     );
 }
 
+#[cfg(feature = "json")]
 #[test]
 fn w4_shape_200_deep_tables_render_as_json() {
     // W4's control: 200-deep renders fine, pre- and post-fix.
@@ -98,6 +106,7 @@ fn w4_shape_200_deep_tables_render_as_json() {
     assert_nested_json(&json, 200);
 }
 
+#[cfg(feature = "json")]
 #[test]
 fn w4_shape_300_deep_tables_render_as_json() {
     // W4's reproduction, fixed: 300-deep nested Tables rendered
@@ -115,6 +124,7 @@ fn w4_shape_300_deep_tables_render_as_protobuf() {
     assert!(!bytes.is_empty(), "a 300-deep module projects to bytes");
 }
 
+#[cfg(feature = "json")]
 #[test]
 fn thousand_deep_tables_render_on_both_paths() {
     // Mid-range depth: past the old 256 ceiling by 4x, well inside the
@@ -126,6 +136,7 @@ fn thousand_deep_tables_render_on_both_paths() {
     assert!(!bytes.is_empty(), "a 1000-deep module projects to bytes");
 }
 
+#[cfg(feature = "json")]
 #[test]
 fn ceiling_deep_tables_render_as_json() {
     // The deepest legal module: 4095 Tables over a leaf is codec depth
@@ -167,6 +178,7 @@ fn protobuf_renders_to_1914_and_refuses_1915() {
     }
 }
 
+#[cfg(feature = "json")]
 #[test]
 fn past_ceiling_tables_are_refused_by_the_codec_first() {
     // 4096 Tables put the leaf at codec depth 4097: the codec refuses
@@ -200,6 +212,10 @@ fn codec_accepts_4095_deep_tables_and_refuses_4096() {
     assert_codec_depth_refusal(&error);
 }
 
+// Both-paths helper, gated with its callers: the JSON half needs the
+// `json` feature, and the protobuf half stays covered by the ungated
+// protobuf-only tests above.
+#[cfg(feature = "json")]
 /// Render a `depth`-deep nested-table module on both paths inside a
 /// 256 KiB thread: 8x smaller than the 2 MiB test-thread stack. If any
 /// step of either path still recursed per level of depth, the thread
@@ -222,6 +238,7 @@ fn render_on_small_stack(depth: usize) -> (bool, bool) {
         .expect("the 256 KiB thread must complete, not abort the process")
 }
 
+#[cfg(feature = "json")]
 #[test]
 fn small_stack_thread_renders_300_deep_tables() {
     // The finding's shape on a small stack: the old recursive walk
@@ -238,6 +255,7 @@ fn small_stack_thread_renders_300_deep_tables() {
     );
 }
 
+#[cfg(feature = "json")]
 #[test]
 fn small_stack_thread_renders_1000_deep_tables() {
     let (json_ok, protobuf_ok) = render_on_small_stack(1000);
@@ -251,6 +269,7 @@ fn small_stack_thread_renders_1000_deep_tables() {
     );
 }
 
+#[cfg(feature = "json")]
 #[test]
 fn small_stack_thread_renders_1914_deep_tables_both_paths() {
     // The protobuf path at its own boundary on the small stack: the
@@ -267,6 +286,7 @@ fn small_stack_thread_renders_1914_deep_tables_both_paths() {
     );
 }
 
+#[cfg(feature = "json")]
 #[test]
 fn small_stack_thread_renders_ceiling_deep_tables() {
     // The strongest pin: the maximum legal depth (4095 tables, codec

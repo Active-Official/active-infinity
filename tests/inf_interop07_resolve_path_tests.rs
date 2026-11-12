@@ -55,9 +55,7 @@
 //!   string. It is recorded as a new finding in the fix record, not fixed.
 
 use active_infinity::interop::resolve_path;
-use active_infinity::{
-    merge, ConflictKind, InfinityModule, Inode, Merge, NodeId,
-};
+use active_infinity::{merge, ConflictKind, InfinityModule, Inode, Merge, NodeId};
 
 // Used only by the `json`-gated provenance fixtures below; without the
 // gate these imports are unused when the `json` feature is off (the

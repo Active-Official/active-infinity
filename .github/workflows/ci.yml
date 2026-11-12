@@ -509,9 +509,15 @@ jobs:
         # (verify("6.0", Windows) throws 'Version "6.0" is not
         # available'), so the step failed deterministically. SwiftyLab's
         # action supports Windows and resolves "6.0" to the latest 6.0.x.
+        # Swift 6.0.x itself is broken on current windows-latest: it cannot
+        # build against Windows SDK 10.0.26100.0 (cyclic dependency in module
+        # 'ucrt'); the fix landed in Swift 6.1 and was never backported to
+        # 6.0. The exact conformance steps were reproduced locally with Swift
+        # 6.4.2 and PASS (5 vectors, ABI 1), so this job tracks 6.4 instead.
+        # The Linux polyglot-swift job stays on 6.0: it passes there.
         uses: SwiftyLab/setup-swift@d60245579ea3836a3f2fa65ebbe1e8891d577c76 # v1.14.2
         with:
-          swift-version: "6.0"
+          swift-version: "6.4"
       - name: Build the shared library
         working-directory: ffi/active-infinity-ffi
         run: cargo build --locked --release

@@ -47,9 +47,23 @@ CONTROLS = [
     {
         "id": "I-8-projection",
         "invariant": "I-8",
-        "file": "src/interop.rs",
-        "find": "    *budget += 1;\n    if *budget > PROJECTION_NODE_BUDGET {\n",
-        "replace": "    *budget += 1;\n    if false {\n",
+        # INF-INTEROP-08 made the projection iterative and the budget check
+        # now lives at TWO sites: resolves_to_secret (the taint walk) and
+        # build_projected (the projection walk), sharing one budget. Both
+        # must be disabled or the surviving check still trips and the
+        # control proves nothing.
+        "edits": [
+            {
+                "file": "src/interop.rs",
+                "find": "        *budget = budget.saturating_add(1);\n        if *budget > PROJECTION_NODE_BUDGET {\n",
+                "replace": "        *budget = budget.saturating_add(1);\n        if false {\n",
+            },
+            {
+                "file": "src/interop.rs",
+                "find": "                *budget += 1;\n                if *budget > PROJECTION_NODE_BUDGET {\n",
+                "replace": "                *budget += 1;\n                if false {\n",
+            },
+        ],
         "suite": "redteam_tests",
         "test": "projection_budget_refuses_an_exponential_dag",
         "why": "The projection node budget is disabled, so a shared DAG expands without bound.",

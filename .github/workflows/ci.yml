@@ -400,7 +400,12 @@ jobs:
       - name: Dart
         env:
           ACTIVE_INFINITY_LIB: ${{ github.workspace }}/ffi/active-infinity-ffi/target/release/libactive_infinity_ffi.so
-        run: dart run polyglot/dart/bin/conformance.dart
+        # The binding depends on package:ffi (calloc). `dart run` from the
+        # repo root does not resolve the package's dependencies, so fetch
+        # them explicitly first.
+        run: |
+          dart pub get --directory=polyglot/dart
+          dart run polyglot/dart/bin/conformance.dart
 
   polyglot-dotnet:
     runs-on: ubuntu-latest

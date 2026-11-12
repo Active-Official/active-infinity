@@ -4,3 +4,8 @@ version: 0.1.0
 publish_to: none
 environment:
   sdk: ">=3.0.0 <4.0.0"
+
+# `calloc` (used for Limits and the generational alloc out-pointer)
+# comes from package:ffi, not dart:ffi.
+dependencies:
+  ffi: ^2.1.0

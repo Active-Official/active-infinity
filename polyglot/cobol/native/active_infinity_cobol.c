@@ -73,6 +73,14 @@ static int quoted_after(const char **cursor, const char *end, const char *key,
   if (length >= capacity) {
     length = capacity - 1;
   }
+  /* The caller is a fixed COBOL alphanumeric field, not a C string: bytes
+   * past the NUL stay visible to FUNCTION TRIM / reference modification,
+   * so a shorter value must not leave a longer previous value's tail
+   * behind it (bad_header_size failed this way: "ated" from
+   * header_truncated survived past the new NUL and the expected-code
+   * length came out 26 instead of 21). Blank the field first, in the
+   * COBOL convention, then write the string. */
+  memset(out, ' ', capacity);
   memcpy(out, at, length);
   out[length] = '\0';
   *cursor = quote + 1;

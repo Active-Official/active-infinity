@@ -29,9 +29,12 @@
 //!
 //! Peak RSS is the process high-water mark, so it catches a transient that is
 //! freed before exit: Windows reads `PeakWorkingSet64`, Linux reads `VmHWM`
-//! from `/proc/self/status`. Any other platform fails closed with a clear
-//! message (the repo's own `tests/perf_budget.rs` precedent: a helper that
-//! cannot measure must fail, not return a number that would pass vacuously).
+//! from `/proc/self/status`, macOS reads `ru_maxrss` from
+//! `getrusage(RUSAGE_SELF)` — bytes on macOS, unlike kilobytes on Linux, so
+//! the macOS branch divides by 1024. Any other platform fails closed with a
+//! clear message (the repo's own `tests/perf_budget.rs` precedent: a helper
+//! that cannot measure must fail, not return a number that would pass
+//! vacuously).
 
 use std::io::Write;
 use std::time::Instant;
@@ -127,7 +130,27 @@ fn rss_current_kib() -> u64 {
         }
         panic!("/proc/self/status has no VmRSS line");
     }
-    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+    #[cfg(target_os = "macos")]
+    {
+        // Same `ps` precedent as `tests/perf_budget.rs::rss_kib`: `ps`
+        // reports KiB already. Only the *current* RSS is needed here — the
+        // baseline is informational (printed, never asserted); the peak
+        // comes from `getrusage` in `rss_peak_kib` below.
+        let output = std::process::Command::new("ps")
+            .args(["-o", "rss=", "-p", &std::process::id().to_string()])
+            .output()
+            .expect("spawn ps");
+        assert!(
+            output.status.success(),
+            "ps failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout)
+            .trim()
+            .parse()
+            .expect("rss is a number")
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
     {
         panic!(
             "INF-06: no RSS measurement exists for this target; the probe refuses to report a number it cannot measure"
@@ -171,7 +194,29 @@ fn rss_peak_kib() -> u64 {
         }
         panic!("/proc/self/status has no VmHWM line");
     }
-    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+    #[cfg(target_os = "macos")]
+    {
+        // macOS has no /proc, and `ps` reports only the *current* RSS, never
+        // the high-water mark — a current reading taken after `validate`
+        // would miss the transient this probe exists to catch (freed mmap'd
+        // regions are unmapped). `getrusage(RUSAGE_SELF).ru_maxrss` is the
+        // kernel's peak, the exact analogue of Linux `VmHWM` and Windows
+        // `PeakWorkingSet64`.
+        // Units trap: `ru_maxrss` is KILOBYTES on Linux but BYTES on
+        // macOS/Darwin, so divide by 1024 here.
+        // The `unsafe` is confined to this one FFI call; the library crate
+        // keeps its `#![forbid(unsafe_code)]` — this example is test-support
+        // code, the same class as the counting global allocators in the
+        // tests (`tests/inf11_blobkey_tests.rs`, `inf_compress01_*`).
+        let mut usage = std::mem::MaybeUninit::<libc::rusage>::uninit();
+        let rc = unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) };
+        assert_eq!(rc, 0, "getrusage(RUSAGE_SELF) failed");
+        let usage = unsafe { usage.assume_init() };
+        let bytes = usage.ru_maxrss;
+        assert!(bytes > 0, "getrusage reported a zero peak RSS");
+        (bytes as u64) / 1024
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
     {
         panic!(
             "INF-06: no peak-RSS measurement exists for this target; the probe refuses to report a number it cannot measure"

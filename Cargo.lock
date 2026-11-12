@@ -29,6 +29,7 @@ dependencies = [
  "blake3",
  "criterion",
  "ed25519-dalek",
+ "libc",
  "proptest",
  "prost",
  "rkyv",

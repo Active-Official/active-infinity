@@ -59,6 +59,13 @@ prost = "0.13"
 rkyv = { version = "0.8.17", features = ["alloc", "bytecheck"] }
 serde_json = "1.0"
 
+# macOS-only: the INF-06 probe (`examples/inf06_probe.rs`) reads the peak-RSS
+# high-water mark from `getrusage(RUSAGE_SELF).ru_maxrss` on macOS. `libc`
+# is already in the lock as a transitive dependency; this only adds the
+# direct edge for the macOS target, so no new crate version enters the graph.
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+libc = "0.2"
+
 [[bench]]
 name = "codec"
 harness = false

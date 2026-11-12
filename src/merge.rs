@@ -35,7 +35,10 @@
 //! are replaced by the marker first), so a metadata comparison cannot be used
 //! to guess a secret. A binary extension payload is hashed over its redacted
 //! bytes (INF-MERGE-02), so the same rule holds where there is no text to
-//! redact.
+//! redact. The provenance, extensions and annotations comparisons share
+//! one cumulative redaction budget (`MAX_MERGE_WORK`): each section writes
+//! its spent remainder back, so the three together spend at most one
+//! budget, not one each (INF-MERGE-05).
 //!
 //! Work is bounded by a node budget: every subtree comparison materialises only
 //! the reachable cone of that subtree (never the whole module), imported
@@ -842,7 +845,11 @@ impl Ctx<'_> {
 
         // Provenance: one block, compared through a redacted rendering. One
         // cumulative budget per block: an infallible replacement per field let
-        // 10k entries x 1k secrets run for minutes (pass 2, #6).
+        // 10k entries x 1k secrets run for minutes (pass 2, #6). The budget
+        // is shared with the extensions and annotations sections below
+        // (INF-MERGE-05): the spent remainder is written back to
+        // `self.redaction` after this block, so the three sections
+        // together spend at most one `MAX_MERGE_WORK`, not one each.
         let mut provenance_budget = self.redaction.get();
         let left_key = provenance_key(self.left, &self.hash_secrets, &mut provenance_budget)?;
         let right_key = provenance_key(self.right, &self.hash_secrets, &mut provenance_budget)?;
@@ -854,6 +861,12 @@ impl Ctx<'_> {
                 conflicts.push("<provenance>".to_string(), ConflictKind::KindMismatch)?;
             }
         }
+
+        // INF-MERGE-05: write the spent provenance budget back. Without
+        // this the extensions section below starts from a fresh full
+        // budget and the sections together spend up to three times the
+        // intended redaction work.
+        self.redaction.set(provenance_budget);
 
         // Extensions: one set, sorted by tag, compared through redacted
         // payloads. A payload that is not text is redacted at the byte level
@@ -873,6 +886,11 @@ impl Ctx<'_> {
                 conflicts.push("<extensions>".to_string(), ConflictKind::KindMismatch)?;
             }
         }
+
+        // INF-MERGE-05: same write-back as the provenance section above,
+        // so the annotation comparison that follows shares the budget the
+        // provenance and extensions sections already spent.
+        self.redaction.set(extensions_budget);
 
         // Annotations: no name to merge by, so any difference is a conflict.
         // The comparison is order-insensitive and redacted.

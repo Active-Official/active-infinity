@@ -860,7 +860,8 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
       - name: Install audit tools
-        run: cargo install cargo-audit --version 0.22.2 --locked
+        run: |
+          cargo install cargo-audit --version 0.22.2 --locked
           cargo install cargo-deny --version 0.20.2 --locked
       - name: Advisory audit
         # `--deny warnings` fails on any new unmaintained/unsound advisory. The
@@ -884,7 +885,8 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
       - name: Install audit tools
-        run: cargo install cargo-audit --version 0.22.2 --locked
+        run: |
+          cargo install cargo-audit --version 0.22.2 --locked
           cargo install cargo-deny --version 0.20.2 --locked
       - name: Copy the root policy configs
         run: cp deny.toml audit.toml "${{ matrix.crate }}/"

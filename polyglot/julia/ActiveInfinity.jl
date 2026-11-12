@@ -10,8 +10,8 @@ leave it unset to let the loader search.
 module ActiveInfinity
 
 export ABI_VERSION, ActiveInfinityError, Image, Limits, abi_version, content_hash,
-       content_hash_hex, from_active, redacted_json, reencode, validate,
-       validate_canonical, validate_with_limits, decode_with_limits
+       content_hash_hex, from_active, redacted_json, reencode, set_limit!,
+       validate, validate_canonical, validate_with_limits, decode_with_limits
 
 const ABI_VERSION = Int32(1)
 
@@ -114,32 +114,62 @@ function Limits()
     return limits
 end
 
+# Julia has no switch: the field dispatch is an if/elseif chain. (The
+# FFI-02 migration wrote this as a bare `"name" => assignment` chain, which
+# is not valid Julia -- the file failed to parse at all, so the whole Julia
+# conformance job died in `include`.)
 function set_limit!(limits::Limits, name::AbstractString, value::Integer)
-        "max_nodes" => limits.max_nodes = UInt32(value)
-        "max_edges" => limits.max_edges = UInt32(value)
-        "max_children" => limits.max_children = UInt32(value)
-        "max_fields" => limits.max_fields = UInt32(value)
-        "max_parts" => limits.max_parts = UInt32(value)
-        "max_strings" => limits.max_strings = UInt32(value)
-        "max_string_bytes" => limits.max_string_bytes = UInt32(value)
-        "max_blobs" => limits.max_blobs = UInt32(value)
-        "max_blob_bytes" => limits.max_blob_bytes = UInt32(value)
-        "max_annotations" => limits.max_annotations = UInt32(value)
-        "max_units" => limits.max_units = UInt32(value)
-        "max_types" => limits.max_types = UInt32(value)
-        "max_aux" => limits.max_aux = UInt32(value)
-        "max_numbers" => limits.max_numbers = UInt32(value)
-        "max_secrets" => limits.max_secrets = UInt32(value)
-        "max_secret_bytes" => limits.max_secret_bytes = UInt32(value)
-        "max_extensions" => limits.max_extensions = UInt32(value)
-        "max_prov_bytes" => limits.max_prov_bytes = UInt32(value)
-        "max_prov_entries" => limits.max_prov_entries = UInt32(value)
-        "max_hashes" => limits.max_hashes = UInt32(value)
-        "max_bindings" => limits.max_bindings = UInt32(value)
-        "max_total_bytes" => limits.max_total_bytes = UInt64(value)
-        "max_decoded_bytes" => limits.max_decoded_bytes = UInt64(value)
-        "max_depth" => limits.max_depth = UInt32(value)
-    error("unknown limits field $name")
+    if name == "max_nodes"
+        limits.max_nodes = UInt32(value)
+    elseif name == "max_edges"
+        limits.max_edges = UInt32(value)
+    elseif name == "max_children"
+        limits.max_children = UInt32(value)
+    elseif name == "max_fields"
+        limits.max_fields = UInt32(value)
+    elseif name == "max_parts"
+        limits.max_parts = UInt32(value)
+    elseif name == "max_strings"
+        limits.max_strings = UInt32(value)
+    elseif name == "max_string_bytes"
+        limits.max_string_bytes = UInt32(value)
+    elseif name == "max_blobs"
+        limits.max_blobs = UInt32(value)
+    elseif name == "max_blob_bytes"
+        limits.max_blob_bytes = UInt32(value)
+    elseif name == "max_annotations"
+        limits.max_annotations = UInt32(value)
+    elseif name == "max_units"
+        limits.max_units = UInt32(value)
+    elseif name == "max_types"
+        limits.max_types = UInt32(value)
+    elseif name == "max_aux"
+        limits.max_aux = UInt32(value)
+    elseif name == "max_numbers"
+        limits.max_numbers = UInt32(value)
+    elseif name == "max_secrets"
+        limits.max_secrets = UInt32(value)
+    elseif name == "max_secret_bytes"
+        limits.max_secret_bytes = UInt32(value)
+    elseif name == "max_extensions"
+        limits.max_extensions = UInt32(value)
+    elseif name == "max_prov_bytes"
+        limits.max_prov_bytes = UInt32(value)
+    elseif name == "max_prov_entries"
+        limits.max_prov_entries = UInt32(value)
+    elseif name == "max_hashes"
+        limits.max_hashes = UInt32(value)
+    elseif name == "max_bindings"
+        limits.max_bindings = UInt32(value)
+    elseif name == "max_total_bytes"
+        limits.max_total_bytes = UInt64(value)
+    elseif name == "max_decoded_bytes"
+        limits.max_decoded_bytes = UInt64(value)
+    elseif name == "max_depth"
+        limits.max_depth = UInt32(value)
+    else
+        error("unknown limits field $name")
+    end
 end
 
 validate_with_limits(image::AbstractVector{UInt8}, limits::Union{Limits, Nothing} = nothing) =

@@ -24,7 +24,7 @@ function manifest_invalid_cases()
     text = read(joinpath(ROOT, "conformance", "manifest.json"), String)
     # kind "invalid" (with the closing quote, so "invalid_stream" never
     # matches) is followed by this case's name, path and expected_code.
-    pattern = r"\"kind\": \"invalid\"[\s\S]*?\"name\": \"([^\"]+)\"[\s\S]*?\"path\": \"([^\"]+)\"[\s\S]*?\"options\": \\{([^}]*)\\}[\s\S]*?\"expected_code\": \"([^\"]+)\""
+    pattern = r"\"kind\": \"invalid\"[\s\S]*?\"name\": \"([^\"]+)\"[\s\S]*?\"path\": \"([^\"]+)\"[\s\S]*?\"options\": \{([^}]*)\}[\s\S]*?\"expected_code\": \"([^\"]+)\""
     return [(String(m.captures[1]), String(m.captures[2]), String(m.captures[3]), String(m.captures[4]))
             for m in eachmatch(pattern, text)]
 end
@@ -116,8 +116,11 @@ function main()
         refused || error("$name: invalid image was accepted")
         invalid_checked += 1
     end
-    invalid_checked + invalid_skipped == 35 || error("the manifest invalid vectors were not exercised")
-    invalid_skipped == 2 || error("the limits-dependent skips changed")
+    # INF-FFI-02 removed the limits-dependent skips (limit, too_deep now go
+    # through validate_with_limits, so all 35 are checked and nothing is
+    # skipped); the migration dropped the `invalid_skipped` counter but left
+    # these two assertions referencing it.
+    invalid_checked == 35 || error("the manifest invalid vectors were not exercised")
 
     source = "port = 8080\nname = \"julia\"\n"
     first = from_active(source, "julia.active")

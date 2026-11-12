@@ -101,7 +101,7 @@ fn carries_content_frame(bytes: &[u8]) -> bool {
 }
 
 /// Recommended input ceiling for [`compress`], in bytes: the codec's image
-/// ceiling ([`Limits::default().max_total_bytes`]).
+/// ceiling (the default [`Limits::max_total_bytes`]).
 ///
 /// `compress` takes a canonical image, and a canonical image is bounded by
 /// that ceiling by construction, so an input larger than this is never a
